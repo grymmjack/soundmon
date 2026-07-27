@@ -56,6 +56,15 @@ except Exception:
     SERVERS = {}
 SERVERS.setdefault("local", "http://127.0.0.1:8188")
 
+# Default negatives. The SFX one pushes *music and speech* away, because an SFX
+# request drifts into a little musical phrase surprisingly often — but that same
+# negative sabotages --music, which is why the two are separate. Either can be
+# overridden with an explicit --negative.
+SFX_NEGATIVE = ("music, melody, song, speech, voice, vocals, "
+                "low quality, distorted, clipping, hiss, background noise")
+MUSIC_NEGATIVE = ("sound effect, foley, speech, spoken word, silence, "
+                  "low quality, distorted, clipping, hiss, muffled")
+
 
 def resolve_server(value):
     """Resolve a --server value (a servers.json alias, or host[:port]/full URL) to a URL."""
@@ -100,6 +109,7 @@ def print_help():
         ex('soundmon "a heavy wooden door creaking open"', "best quality (the default)"),
         ex('soundmon "a sword hitting metal" --style impact', "steer with a style guide"),
         ex('soundmon "footsteps on gravel" -n 4', "4 variations to pick from"),
+        ex('soundmon "a lo-fi hip hop piano loop" --music', "musical loops/beds/stings"),
         ex('soundmon "laser blast" --format sb --bits 8', "SoundBlaster-era 8-bit crunch"),
         ex('soundmon --batch "door,glass,fire" -n 8', "8 of each → own folders"),
         ex('soundmon "rain" --seconds 30 --server rtx,titan', "long, fanned across GPUs"),
@@ -110,6 +120,7 @@ def print_help():
         opt('--batch "a,b,c"', "round-robin subjects → a folder each (N of each)"),
         opt("--seconds N", "length in seconds (model max 47)", "10"),
         opt("--style NAMES", "append proven style guide(s) — see --list-styles"),
+        opt("--music", "music mode: loops/beds/stings (no full songs or vocals)"),
         opt("--format NAME", "hardware format lock — see --list-formats", "none"),
         opt("--bits N", "WAV bit depth: 8 / 16 / 24", "16"),
         opt("--seed N", "lock / repeat a result (re-run a favorite)", "random"),
@@ -186,7 +197,11 @@ def build_graph(a, seed, subject=None, server=None):
     parts = [subject]
     if a.style_add:
         parts.append(a.style_add)
-    parts.append("sound effect, high quality, clean recording")
+    # The tail nudges the model toward the right *kind* of audio. "sound effect"
+    # actively hurts a music request, so --music swaps it out along with the
+    # negative prompt (see MUSIC_NEGATIVE).
+    parts.append("high quality, clean recording"
+                 if a.music else "sound effect, high quality, clean recording")
     prompt = ", ".join(parts)
     negative = a.negative + ((", " + a.style_neg) if a.style_neg else "")
 
@@ -390,8 +405,12 @@ def main():
     p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 5.0")
     p.add_argument("--fast", action="store_true", help="16 steps: ~3x faster, rougher")
     p.add_argument("--seed", type=int, default=-1, help="-1 = random each run")
-    p.add_argument("--negative", default="music, melody, song, speech, voice, vocals, "
-                   "low quality, distorted, clipping, hiss, background noise")
+    p.add_argument("--music", action="store_true",
+                   help="music mode: drops the anti-music negative prompt and the "
+                        "'sound effect' prompt tail. Good for loops, beds, stings and "
+                        "riffs — the model does NOT do full songs or vocals.")
+    p.add_argument("--negative", default=None,
+                   help="what to avoid (defaults differ for SFX vs --music)")
     p.add_argument("--name", default=None, help="output filename base (default: from description)")
     # --- post-processing (the RetroSFX node) ---
     p.add_argument("--no-trim", dest="no_trim", action="store_true",
@@ -467,6 +486,8 @@ def main():
         a.style_neg = ", ".join(negs)
 
     a.steps = (16 if a.fast else 50) if a.steps is None else a.steps
+    if a.negative is None:
+        a.negative = MUSIC_NEGATIVE if a.music else SFX_NEGATIVE
 
     n = max(1, a.number)
     subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]

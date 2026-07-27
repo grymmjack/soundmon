@@ -117,6 +117,31 @@ ambience* into the negative prompt, which matters more than the positive for SFX
 The global default negative already fights the two most common failure modes:
 the model drifting into **music** or **speech**.
 
+### Music (`--music`)
+
+Yes, within limits. Stable Audio Open makes **musical elements** — loops, beds,
+stings, riffs, drum grooves — but **not full songs, and no vocals**. Stability
+trained and describes it for "short samples, sound effects and production
+elements"; asking for a finished track gets you a 47-second sketch that wanders.
+
+```bash
+soundmon "a lo-fi hip hop piano loop" --music --seconds 12
+soundmon "a driving rock drum beat" --music --style drums
+soundmon "an 8-bit boss battle theme" --music --style chipmusic --format nes --bits 8
+```
+
+`--music` matters more than it looks: the **default negative prompt actively
+fights music.** For SFX the default pushes *music, melody, song, voice, vocals*
+away, because an SFX request drifts into a little musical phrase surprisingly
+often. That same negative sabotages a music request. `--music` swaps in
+`MUSIC_NEGATIVE` and drops the "sound effect" tail from the prompt. Music style
+guides: `musicloop`, `sting`, `drums`, `chipmusic`, `cinematic`.
+
+> **Want actual songs?** That's a different model. ComfyUI already ships
+> **ACE-Step** nodes (`TextEncodeAceStepAudio`, `EmptyAceStepLatentAudio` — both
+> present in 0.24.0), which does full songs with vocals and lyrics. It's a
+> separate checkpoint and a separate graph; soundmon doesn't wire it up today.
+
 ### Render farm
 
 Identical to pixelmon's, because it's the same code — the CLI never touches the

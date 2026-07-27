@@ -46,6 +46,18 @@
   "loop":      {"prompt": "seamless loop, continuous, no fade, consistent level throughout",
                 "negative": "fade in, fade out, sudden ending, one-shot"},
 
+  "_music": "pair these with --music, which drops the anti-music negative prompt",
+  "musicloop": {"prompt": "seamless instrumental music loop, steady tempo, consistent, no vocals",
+                "negative": "vocals, singing, speech, fade out, tempo change"},
+  "sting":     {"prompt": "short musical sting, a few seconds, decisive ending, instrumental",
+                "negative": "vocals, singing, long, ambient, sustained drone"},
+  "drums":     {"prompt": "drum loop, tight groove, punchy kick and snare, steady tempo",
+                "negative": "vocals, melody, pitched instruments, ambient"},
+  "chipmusic": {"prompt": "chiptune music loop, square and triangle wave, NES style, catchy, instrumental",
+                "negative": "vocals, realistic instruments, orchestral, acoustic"},
+  "cinematic": {"prompt": "cinematic orchestral music, strings and brass, dramatic, instrumental",
+                "negative": "vocals, singing, electronic, lo-fi, distorted"},
+
   "_modifiers": "shorthand qualities you can stack onto any of the above",
   "dry":       {"prompt": "dry, close-mic, no reverb, tight",
                 "negative": "reverb, echo, room, hall, distant"},
