@@ -690,9 +690,19 @@ def main():
         c = C
         sys.path.insert(0, _SCRIPT_DIR)
         import narrate
-        print(f"{c['b']}{c['cyan']}Narration voices{c['rst']}  {c['dim']}(use with --voice, --narrate){c['rst']}\n")
-        for v, desc in narrate.VOICES.items():
-            print(f"  {c['grn']}{v:<12}{c['rst']} {c['dim']}{desc}{c['rst']}")
+        print(f"{c['b']}{c['cyan']}Narration voices{c['rst']}  "
+              f"{c['dim']}(use with --voice, --narrate) — [grade] is Kokoro's own rating{c['rst']}")
+        groups = [("bm_", "British male"), ("bf_", "British female"),
+                  ("am_", "American male"), ("af_", "American female")]
+        for pre, label in groups:
+            names = [v for v in narrate.VOICES if v.startswith(pre)]
+            if not names:
+                continue
+            print(f"\n  {c['b']}{c['yel']}{label}{c['rst']} {c['dim']}({len(names)}){c['rst']}")
+            for v in names:
+                print(f"    {c['grn']}{v:<12}{c['rst']} {c['dim']}{narrate.VOICES[v]}{c['rst']}")
+        print(f"\n  {c['dim']}{len(narrate.VOICES)} English voices. Kokoro also ships 26 "
+              f"non-English (ja/zh/es/pt/hi/it/fr) — pass one explicitly with a matching --lang.{c['rst']}")
         print(f"\n  {c['b']}{c['yel']}TIP{c['rst']}  a booming dungeon master: "
               f"{c['grn']}--voice bm_george --pitch -3 --speed 0.9{c['rst']}")
         return

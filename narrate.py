@@ -14,20 +14,53 @@ import os
 import re
 import sys
 
-# Kokoro's British voices. 'bm_' = British male, 'bf_' = British female.
-# bm_george / bm_lewis are the deepest — the dungeon-master picks.
+# Every ENGLISH voice Kokoro ships: 8 British + 20 American. Prefix is
+# <accent><gender>_ — b=British, a=American; m=male, f=female.
+#
+# The grade is Kokoro's own published quality rating (VOICES.md), not ours:
+# A is excellent, D is rough. It tracks how much training audio the voice had,
+# so a C voice is usually thinner or less stable rather than differently
+# characterised. Where a description names a character trait, that voice has
+# actually been listened to; the rest carry accent + grade only, because
+# inventing personalities for voices nobody has heard is how you end up
+# recommending the wrong narrator.
+#
+# Kokoro also ships 26 non-English voices (ja/zh/es/pt/hi/it/fr). They're
+# deliberately not listed — this is a narration tool for an English game — but
+# any of them works if you pass it explicitly with a matching --lang.
 VOICES = {
-    "bm_george": "British male, deep and measured — the classic DM",
-    "bm_lewis":  "British male, deep and gravelly",
-    "bm_daniel": "British male, lighter and brisker",
-    "bm_fable":  "British male, warm storyteller",
-    "bf_alice":  "British female, clear",
-    "bf_emma":   "British female, warm",
-    "bf_isabella": "British female, formal",
-    "bf_lily":   "British female, soft",
-    "am_onyx":   "American male, deep",
-    "am_fenrir": "American male, rough",
-    "af_heart":  "American female, warm",
+    # --- British male ---
+    "bm_george":   "British male, deep and measured — the classic DM  [B]",
+    "bm_fable":    "British male, warm storyteller  [B]",
+    "bm_lewis":    "British male, deep and gravelly — the deepest here  [C]",
+    "bm_daniel":   "British male, lighter and brisker  [C]",
+    # --- British female ---
+    "bf_emma":     "British female  [B] — best-trained British female",
+    "bf_isabella": "British female, formal — Souls-style narrator  [B]",
+    "bf_alice":    "British female  [C]",
+    "bf_lily":     "British female  [C]",
+    # --- American male ---
+    "am_fenrir":   "American male  [B]",
+    "am_michael":  "American male  [B]",
+    "am_puck":     "American male  [B]",
+    "am_echo":     "American male  [C]",
+    "am_eric":     "American male  [C]",
+    "am_liam":     "American male  [C]",
+    "am_onyx":     "American male  [C]",
+    "am_santa":    "American male  [C] — very little training audio",
+    "am_adam":     "American male  [D] — roughest voice in the set",
+    # --- American female ---
+    "af_bella":    "American female  [A] — highest-rated voice Kokoro ships",
+    "af_heart":    "American female  [A] — Kokoro's flagship default",
+    "af_nicole":   "American female  [B] — tuned for headphones",
+    "af_aoede":    "American female  [B]",
+    "af_kore":     "American female  [B]",
+    "af_sarah":    "American female  [B]",
+    "af_alloy":    "American female  [B]",
+    "af_nova":     "American female  [B]",
+    "af_sky":      "American female  [B] — very little training audio",
+    "af_jessica":  "American female  [C]",
+    "af_river":    "American female  [C]",
 }
 
 SAMPLE_RATE = 24000     # Kokoro's native output rate
