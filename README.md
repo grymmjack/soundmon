@@ -1,6 +1,6 @@
-# soundmon — text-to-sound-effect generator (NVIDIA · AMD · CPU)
+# soundmon — text-to-audio generator: SFX, music loops, and full songs
 
-Describe a sound, get a game-ready WAV — with **one command**, entirely on your
+Describe audio, get a WAV — with **one command**, entirely on your own machines.
 own machines. Uses ComfyUI + **Stable Audio Open 1.0**, and shares pixelmon's
 engine, render farm, and CLI conventions.
 
