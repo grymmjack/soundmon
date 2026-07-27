@@ -146,6 +146,8 @@ def print_help():
         "",
         f"{c['b']}{c['cyan']}ADVANCED{c['rst']}",
         opt("--server NAMES", "remote ComfyUI (alias/host/URL); comma-list = render farm", "local"),
+        opt("--lufs N", "loudness CEILING in LUFS, attenuate-only ('off')", "-16"),
+        opt("--true-peak N", "true-peak ceiling in dBTP", "-1.0"),
         opt("--ogg", "compress to OGG Vorbis (~25x smaller) — off by default"),
         opt("--ogg-quality N", "OGG quality 0-10", "5"),
         opt("--flac / --mp3 / --opus", "save compressed instead of WAV"),
@@ -402,6 +404,80 @@ def _short(url):
     return url.split("//", 1)[-1]
 
 
+def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
+    """Enforce a loudness CEILING and a true-peak ceiling. Attenuate-only.
+
+    The RetroSFX node peak-normalizes, which makes every file's tallest sample
+    match — but not how loud it *sounds*. Measured across a generated pack,
+    peaks sat within 0.8 dB of each other while integrated loudness spanned
+    12.3 dB (alarm -8.1 LUFS vs treasure -20.4 LUFS). A dense sustained sound
+    at -1 dBFS peak is far louder to the ear than a sparse transient one.
+
+    So this is the gain stage: measure EBU R128 integrated loudness, and if the
+    file is louder than `lufs` (or peaks above `true_peak`), pull it down by a
+    single fixed gain. Nothing is ever boosted — see the note at the gain
+    calculation for why targeting a level instead of capping one is wrong here.
+
+    True peak rather than sample peak, because lossy decode reconstructs
+    inter-sample peaks above the original samples: ogg files here measured
+    -0.4 dBTP from a -1.0 dBFS source, which is how you get playback clipping
+    from a file that looks compliant.
+    """
+    if shutil.which("ffmpeg") is None:
+        return path
+    # loudnorm needs enough signal to integrate over. Measured on real output:
+    # it reports cleanly at 2.97s and 0.60s, and returns nothing at 0.20s and
+    # 0.12s. So the floor is ~0.4s, NOT the 3s an EBU R128 window suggests — a
+    # 3s guard silently skipped almost the whole SFX pack, since generated
+    # effects land at 2.97s. Anything shorter keeps the node's peak
+    # normalization, and the JSON-parse fallback below catches stragglers.
+    try:
+        dur = float(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True).stdout.strip())
+    except (ValueError, FileNotFoundError):
+        return path
+    if dur < 0.4:
+        return path
+
+    meas = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
+         "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+        capture_output=True, text=True).stderr
+    try:
+        blob = json.loads(meas[meas.rindex("{"):meas.rindex("}") + 1])
+        cur_i, cur_tp = float(blob["input_i"]), float(blob["input_tp"])
+    except (ValueError, KeyError):
+        return path
+
+    # A CEILING, not a target. Only ever attenuate.
+    #
+    # Targeting a fixed loudness would mean BOOSTING sparse sounds, and they
+    # can't take it: a coin-jingle measured 34.4 dB crest factor with its peak
+    # already at -0.97 dBFS, so reaching -16 LUFS needs +14 dB and would put
+    # the peak at +13 dBFS. The only ways to get there are clipping it or
+    # compressing it flat — both destroy exactly what makes a transient read as
+    # a transient. Quiet-but-punchy is a legitimate sound; too loud is not.
+    #
+    # So: pull down anything above the ceiling, leave everything else alone,
+    # and separately guarantee no true peak exceeds the limit.
+    gain = min(0.0, lufs - cur_i, true_peak - cur_tp)
+    if gain > -0.1:                       # already compliant; don't re-encode
+        return path
+
+    tmp = os.path.splitext(path)[0] + ".ln.wav"
+    m = f"volume={gain:.2f}dB"
+    r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", path, "-af", m, tmp],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        os.replace(tmp, path)
+    elif os.path.exists(tmp):
+        os.remove(tmp)
+    return path
+
+
 def to_ogg(path, quality=5, keep=False):
     """Transcode a finished file to OGG Vorbis. Returns the new path (or the
     original, unchanged, if conversion isn't possible).
@@ -523,6 +599,8 @@ def run_farm(a, work):
             advanced = True
             dest_dir = d or os.path.join(OUTPUT, "soundmon")
             files = [fetch_audio(it, dest_dir, srv) for it in audio_outs(outs)]
+            if a.lufs_target is not None:
+                files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             if a.ogg:
                 files = [to_ogg(f, a.ogg_quality, a.keep_wav) for f in files]
             done += 1
@@ -632,6 +710,14 @@ def main():
     p.add_argument("--fade-ms", dest="fade_ms", type=int, default=5,
                    help="de-click fade on both ends, in ms. default 5")
     # --- output format ---
+    p.add_argument("--lufs", default="-16",
+                   help="loudness CEILING in LUFS ('off' to disable). Anything louder is "
+                        "pulled down; nothing is ever boosted. Peak normalization matches "
+                        "the tallest sample, not how loud a sound seems. default -16")
+    p.add_argument("--true-peak", dest="true_peak", type=float, default=-1.0,
+                   metavar="N",
+                   help="true-peak ceiling in dBTP (not sample peak — lossy decode "
+                        "overshoots). default -1.0")
     p.add_argument("--ogg", action="store_true",
                    help="compress the finished audio to OGG Vorbis (~25x smaller). "
                         "Off by default. Done client-side with ffmpeg, so farm boxes "
@@ -719,7 +805,7 @@ def main():
     if a.narrate or a.narrate_file:
         sys.path.insert(0, _SCRIPT_DIR)
         import narrate
-        narrate.run(a, slug, to_ogg)
+        narrate.run(a, slug, to_ogg, loudness_normalize)
         return
 
     if a.format not in FORMATS:
@@ -773,6 +859,13 @@ def main():
             a.scheduler = "simple"
     else:
         a.steps = (16 if a.fast else 50) if a.steps is None else a.steps
+
+    a.lufs_target = None
+    if str(a.lufs).lower() not in ("off", "none", "no", ""):
+        try:
+            a.lufs_target = float(a.lufs)
+        except ValueError:
+            p.error(f"--lufs must be a number or 'off', got {a.lufs!r}")
 
     if a.negative is None:
         a.negative = (SONG_NEGATIVE if a.song
@@ -872,6 +965,8 @@ def main():
                             shutil.move(f, tgt)
                             moved.append(tgt)
                     files = moved
+            if a.lufs_target is not None:
+                files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             if a.ogg:
                 files = [to_ogg(f, a.ogg_quality, a.keep_wav) for f in files]
             clip = files[0] if files else None

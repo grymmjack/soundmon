@@ -125,7 +125,7 @@ def parse_lines(path):
     return out
 
 
-def run(a, slug, to_ogg=None):
+def run(a, slug, to_ogg=None, loudness_normalize=None):
     """Generate narration for one prompt or a whole file. Called from soundmon.py.
 
     `to_ogg` is injected rather than imported: soundmon.py runs as __main__, so
@@ -181,6 +181,8 @@ def run(a, slug, to_ogg=None):
         sf.write(path, audio, SAMPLE_RATE, subtype=f"PCM_{a.bits}" if a.bits != 8 else "PCM_U8")
         # Narration compresses especially well — it's mono-ish speech with a lot
         # of near-silence between words.
+        if getattr(a, "lufs_target", None) is not None and loudness_normalize:
+            loudness_normalize(path, a.lufs_target, a.true_peak)
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
