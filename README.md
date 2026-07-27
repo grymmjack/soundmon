@@ -132,9 +132,35 @@ boxes skipped, in-flight jobs requeued if a box drops. See pixelmon's
 [README-RENDER-FARM.md](https://github.com/grymmjack/pixelmon) for LAN/firewall
 setup — it applies verbatim.
 
-> **Each farm box needs the audio models.** A box provisioned for pixelmon has
-> ComfyUI but not Stable Audio Open. On each one: `./download-models.sh`, link
-> `custom_nodes/retro_sfx`, restart ComfyUI.
+#### Provisioning a farm box
+
+A box already running pixelmon has ComfyUI but *not* Stable Audio Open. It needs
+the models and the node — **not** the CLI (the client drives it). From your main
+box, per farm member:
+
+```bash
+rsync -az --exclude '.git' --exclude 'servers.json' ~/git/soundmon/ box:git/soundmon/
+ssh box 'cd ~/git/soundmon && ./install.sh && ./download-models.sh'
+ssh box 'tmux new-session -d -s comfy "~/launch-comfyui.sh 2>&1 | tee ~/comfyui.log"'
+```
+
+Then confirm the node and models registered:
+
+```bash
+curl -s http://<box>:8188/object_info | grep -o RetroSFX | head -1
+```
+
+Per-platform notes from provisioning a real mixed fleet:
+
+| Box | Gotcha |
+|---|---|
+| **macOS** | No `tmux` by default — use `nohup caffeinate -i ./launch-comfyui.sh &` instead (`caffeinate` also stops the Mac sleeping mid-run). Ships **bash 3.2**, so scripts must avoid bash-4-only syntax. |
+| **WSL2** | The distro **shuts down when idle**, which takes sshd *and* ComfyUI with it — the box still pings (Windows is up) while every WSL port reads `filtered`. Wake it with `wsl` in PowerShell, then `sudo service ssh start`. |
+| **Linux** | `loginctl enable-linger "$USER"` once, or systemd kills tmux on logout. |
+
+> ⚠ **Don't `pkill -f "…main.py"` over SSH** — the pattern matches the very shell
+> running it, so the command kills itself before it can restart anything. Get the
+> PID from `ps`/`pgrep` and `kill` that, or just let `bin/soundmon` auto-start.
 
 ---
 
