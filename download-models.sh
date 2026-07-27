@@ -25,7 +25,10 @@ get() {  # url  dest
     local url="$1" dest="$2"
     if [ -f "$dest" ]; then echo "✓ already have $(basename "$dest")"; return; fi
     echo "↓ downloading $(basename "$dest") ..."
-    curl -L --fail "${AUTH[@]}" -o "$dest" "$url"
+    # ${AUTH[@]+"${AUTH[@]}"} not "${AUTH[@]}": macOS ships bash 3.2, where
+    # expanding an EMPTY array under `set -u` is an "unbound variable" fatal
+    # error. This idiom expands to nothing when unset and is safe in 3.2 and 4+.
+    curl -L --fail ${AUTH[@]+"${AUTH[@]}"} -o "$dest" "$url"
 }
 
 # Stable Audio Open 1.0 — the DiT + VAE (4.85 GB).
