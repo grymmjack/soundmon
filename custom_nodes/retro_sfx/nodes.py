@@ -117,6 +117,9 @@ class RetroSFX:
                 "audio": ("AUDIO",),
                 "format": (list(FORMATS), {"default": "none"}),
                 "trim_silence": ("BOOLEAN", {"default": True}),
+                "max_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1000.0, "step": 0.01,
+                                          "tooltip": "Hard length cap; 0 = no cap. Different from "
+                                                     "trimming, which only removes silence."}),
                 "threshold_db": ("FLOAT", {"default": -45.0, "min": -90.0, "max": 0.0, "step": 1.0}),
                 "normalize_db": ("FLOAT", {"default": -1.0, "min": -30.0, "max": 0.0, "step": 0.5}),
                 "fade_ms": ("INT", {"default": 5, "min": 0, "max": 500}),
@@ -127,11 +130,21 @@ class RetroSFX:
     FUNCTION = "process"
     CATEGORY = "audio/soundmon"
 
-    def process(self, audio, format, trim_silence, threshold_db, normalize_db, fade_ms):
+    def process(self, audio, format, trim_silence, max_seconds, threshold_db,
+                normalize_db, fade_ms):
         wave, sr = audio["waveform"], audio["sample_rate"]
 
         if trim_silence:
             wave = _trim_silence(wave, sr, threshold_db)
+
+        # Hard cap, applied AFTER trimming so the budget is spent on real audio
+        # rather than the model's leading silence. Trimming removes quiet; this
+        # removes length — a UI blip that plays once per glyph needs the latter,
+        # and no amount of silence-trimming will give it.
+        if max_seconds > 0:
+            keep = int(sr * max_seconds)
+            if 0 < keep < wave.shape[-1]:
+                wave = wave[:, :, :keep]
 
         spec = FORMATS.get(format)
         if spec is not None:

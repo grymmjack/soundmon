@@ -92,6 +92,7 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | `--fast` | 16 steps instead of 50: ~1.6× faster, rougher | off |
 | `--seed N` | lock / repeat a result | random |
 | `--no-trim` | keep the model's leading/trailing silence | off |
+| `--max-seconds N` | hard length cap (0 = none). Truncates — trimming only removes *silence* | `0` |
 | `--normalize-db N` | peak level after generation | `-1.0` |
 | `--fade-ms N` | de-click fade on both ends | `5` |
 | `--flac` / `--mp3` / `--opus` | save compressed instead of WAV | WAV |
@@ -180,6 +181,44 @@ and `--no-audio-codes` both cut it substantially.
 
 > **Farm boxes need the song model separately** — `./download-models.sh --song`
 > on each one. A box with only the SFX models will fail `--song` jobs.
+
+### Narration (`--narrate`)
+
+A third engine, for spoken lines — a dungeon master, menu readouts, item
+descriptions. Uses **Kokoro** (82 M params, Apache-2.0), which ships four
+British male voices among others:
+
+```bash
+pip install kokoro soundfile        # one-time, into ComfyUI's venv
+soundmon "The crypt door grinds open." --narrate --voice bm_george --pitch -3
+soundmon --narrate-file lines.txt --voice bm_george --pitch -3 --speed 0.92
+```
+
+| Flag | What | Default |
+|---|---|---|
+| `--narrate-file` | narrate every line of a file, one WAV each | — |
+| `--voice` | see `--list-voices` (`bm_george`, `bm_lewis`, …) | `bm_george` |
+| `--pitch` | semitones; **negative = deeper**, duration preserved | 0 |
+| `--speed` | speech rate | 1.0 |
+
+A booming DM is `--voice bm_george --pitch -3 --speed 0.9` (measured: drops the
+fundamental from ~107 Hz to ~85 Hz). Kokoro has no pitch control, so `--pitch`
+gets it by asking Kokoro to speak *faster* by the same factor and then
+resampling back — the duration change cancels and only the pitch move survives.
+
+**`--narrate-file` reads `key | text` rows** (and skips `#` comments), so game
+string tables work directly and the key becomes the filename.
+
+> **This engine deliberately skips ComfyUI.** SFX and songs are diffusion
+> problems where ComfyUI earns its keep — model loading, VRAM, the farm. Kokoro
+> is an 82 M feed-forward model that speaks a line in about a second; wrapping
+> it in a node graph and fanning it across four GPUs would *add* latency. So it
+> runs in-process and writes through the same output/`--batch` path: one
+> interface, the right mechanism per engine.
+
+> **It runs on CPU on purpose.** On the RX 6600 (gfx1032 masquerading as gfx1030
+> via `HSA_OVERRIDE_GFX_VERSION`) Kokoro dies with `HIP error: invalid device
+> function`. At 82 M params there was nothing to win on the GPU anyway.
 
 ### Render farm
 

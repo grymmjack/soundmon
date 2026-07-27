@@ -277,7 +277,8 @@ def build_graph(a, seed, subject=None, server=None):
         g = _song_nodes(a, seed, subject)
         g["11"] = {"class_type": "RetroSFX",
                    "inputs": {"audio": ["10", 0], "format": a.format,
-                              "trim_silence": not a.no_trim, "threshold_db": a.threshold_db,
+                              "trim_silence": not a.no_trim, "max_seconds": a.max_seconds,
+                          "threshold_db": a.threshold_db,
                               "normalize_db": a.normalize_db, "fade_ms": a.fade_ms}}
         return _attach_save(a, g, prefix)
 
@@ -308,7 +309,8 @@ def build_graph(a, seed, subject=None, server=None):
         "10": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
         "11": {"class_type": "RetroSFX",
                "inputs": {"audio": ["10", 0], "format": a.format,
-                          "trim_silence": not a.no_trim, "threshold_db": a.threshold_db,
+                          "trim_silence": not a.no_trim, "max_seconds": a.max_seconds,
+                          "threshold_db": a.threshold_db,
                           "normalize_db": a.normalize_db, "fade_ms": a.fade_ms}},
     }
 
@@ -375,6 +377,25 @@ def server_up(server):
         return False
 
 
+def server_has_ckpt(server, ckpt):
+    """Does this box actually have `ckpt` installed?
+
+    A mixed fleet is the normal case: the SFX models are ~5.3 GB and the song
+    model another ~9.3 GB, so boxes get provisioned at different times. Without
+    this check, a --song job dispatched to an SFX-only box comes back as an
+    opaque ComfyUI validation error partway through a long batch. Cheaper to ask
+    once at startup and route around it.
+    """
+    try:
+        with urllib.request.urlopen(f"{server}/object_info/CheckpointLoaderSimple",
+                                    timeout=10) as r:
+            info = json.loads(r.read())
+        node = info.get("CheckpointLoaderSimple", info)
+        return ckpt in node["input"]["required"]["ckpt_name"][0]
+    except Exception:
+        return False
+
+
 def _short(url):
     return url.split("//", 1)[-1]
 
@@ -408,6 +429,19 @@ def run_farm(a, work):
         print(f"   ⚠ skipping unreachable: {', '.join(_short(s) for s in down)}")
     if not live:
         sys.exit("render farm: no reachable servers in the pool.")
+
+    # Route around boxes that lack the model this run needs, rather than letting
+    # them fail jobs mid-batch.
+    need = a.song_base if a.song else a.base
+    ready = [s for s in live if server_has_ckpt(s, need)]
+    missing = [s for s in live if s not in ready]
+    if missing:
+        print(f"   ⚠ skipping (no {need}): {', '.join(_short(s) for s in missing)}")
+        hint = "--song" if a.song else ""
+        print(f"     provision them with:  ./download-models.sh {hint}".rstrip())
+    if not ready:
+        sys.exit(f"render farm: no server in the pool has {need}.")
+    live = ready
     print(f"   \U0001f69c render farm: {len(live)} GPU(s) — {', '.join(_short(s) for s in live)}")
     pending = list(work)        # (subject, seed, dest)
     inflight = {}               # server -> (subject, seed, dest, pid)
@@ -484,6 +518,22 @@ def main():
     p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 5.0")
     p.add_argument("--fast", action="store_true", help="16 steps: ~3x faster, rougher")
     p.add_argument("--seed", type=int, default=-1, help="-1 = random each run")
+    # --- narration mode (Kokoro TTS): spoken lines, runs on CPU, no ComfyUI ---
+    p.add_argument("--narrate", action="store_true",
+                   help="NARRATION mode — speak the text with a TTS voice (Kokoro). "
+                        "Runs locally on CPU; no ComfyUI, no GPU, no farm.")
+    p.add_argument("--narrate-file", dest="narrate_file", default=None, metavar="FILE",
+                   help="narrate every line of a file, one WAV each. Understands "
+                        "'key | text' rows (and '#' comments), so game string tables "
+                        "work directly; the key becomes the filename.")
+    p.add_argument("--voice", default="bm_george",
+                   help="TTS voice (--narrate). default bm_george (British male). --list-voices")
+    p.add_argument("--speed", type=float, default=1.0,
+                   help="speech rate (--narrate). 1.0 = normal, 0.85 = slow and grave")
+    p.add_argument("--pitch", type=float, default=0.0,
+                   help="pitch shift in semitones (--narrate). NEGATIVE = deeper, "
+                        "e.g. -3 for a booming dungeon master. Duration is preserved.")
+    p.add_argument("--list-voices", action="store_true", help="list TTS voices and exit")
     # --- song mode (ACE-Step 1.5): full songs with vocals, lyrics, BPM, key ---
     p.add_argument("--song", action="store_true",
                    help="FULL SONG mode via ACE-Step 1.5 — real vocals and lyrics. "
@@ -527,6 +577,10 @@ def main():
     p.add_argument("--trim", action="store_true",
                    help="force silence-trimming on in --song mode (off there by default, "
                         "because trimming breaks bar alignment)")
+    p.add_argument("--max-seconds", dest="max_seconds", type=float, default=0.0,
+                   metavar="N",
+                   help="hard length cap in seconds (0 = none). Unlike trimming, which only "
+                        "removes silence, this truncates — use it for one-shot UI blips")
     p.add_argument("--threshold-db", dest="threshold_db", type=float, default=-45.0,
                    help="silence floor for trimming, in dB. default -45")
     p.add_argument("--normalize-db", dest="normalize_db", type=float, default=-1.0,
@@ -570,7 +624,8 @@ def main():
         REMOTE = not any(h in SERVER for h in ("127.0.0.1", "localhost", "[::1]"))
 
     if a.show_help or (not a.prompt and not a.batch and not a.list_formats
-                       and not a.list_styles and not a.list_keys):
+                       and not a.list_styles and not a.list_keys and not a.list_voices
+                       and not a.narrate_file):
         print_help()
         return
     if a.list_formats:
@@ -579,6 +634,16 @@ def main():
     if a.list_styles:
         print_styles()
         return
+    if a.list_voices:
+        c = C
+        sys.path.insert(0, _SCRIPT_DIR)
+        import narrate
+        print(f"{c['b']}{c['cyan']}Narration voices{c['rst']}  {c['dim']}(use with --voice, --narrate){c['rst']}\n")
+        for v, desc in narrate.VOICES.items():
+            print(f"  {c['grn']}{v:<12}{c['rst']} {c['dim']}{desc}{c['rst']}")
+        print(f"\n  {c['b']}{c['yel']}TIP{c['rst']}  a booming dungeon master: "
+              f"{c['grn']}--voice bm_george --pitch -3 --speed 0.9{c['rst']}")
+        return
     if a.list_keys:
         c = C
         print(f"{c['b']}{c['cyan']}Musical keys{c['rst']}  {c['dim']}(use with --key, --song only){c['rst']}\n")
@@ -586,6 +651,15 @@ def main():
             ks = [k for k in KEYS if k.endswith(q)]
             print(f"  {c['grn']}{q:<6}{c['rst']} {c['dim']}{', '.join(k.rsplit(' ',1)[0] for k in ks)}{c['rst']}")
         return
+    # Narration is its own pipeline (Kokoro on CPU) — it never touches ComfyUI,
+    # so it short-circuits before any of the diffusion-side setup below.
+    # Same shape as pixelmon handing --animate off to animate.py.
+    if a.narrate or a.narrate_file:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import narrate
+        narrate.run(a, slug)
+        return
+
     if a.format not in FORMATS:
         p.error(f"unknown format {a.format!r}. See --list-formats.")
 
