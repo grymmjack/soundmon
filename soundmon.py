@@ -151,7 +151,7 @@ def print_help():
         opt("--lufs N", "loudness CEILING in LUFS, attenuate-only ('off')", "-16"),
         opt("--true-peak N", "true-peak ceiling in dBTP", "-1.0"),
         opt("--ogg", "compress to OGG Vorbis (~25x smaller) — off by default"),
-        opt("--ogg-quality N", "OGG quality 0-10", "5"),
+        opt("--ogg-quality N", "OGG quality 0-10 (accuracy, not bandwidth)", "8"),
         opt("--flac / --mp3 / --opus", "save compressed instead of WAV"),
         opt('--negative "..."', "negative prompt (what to avoid)"),
         opt("--name NAME", "output filename base", "from description"),
@@ -756,8 +756,11 @@ def main():
                    help="compress the finished audio to OGG Vorbis (~25x smaller). "
                         "Off by default. Done client-side with ffmpeg, so farm boxes "
                         "need nothing extra.")
-    p.add_argument("--ogg-quality", dest="ogg_quality", type=int, default=5, metavar="N",
-                   help="OGG Vorbis quality 0-10, higher = bigger/better. default 5")
+    p.add_argument("--ogg-quality", dest="ogg_quality", type=int, default=8, metavar="N",
+                   help="OGG Vorbis quality 0-10, higher = bigger/better. default 8. "
+                        "Quality does NOT extend bandwidth — measured identical 17.3 kHz "
+                        "rolloff from q=3 to q=10 — it buys accuracy BELOW the rolloff: "
+                        "19.6 dB signal-to-error at q=5 vs 22.7 dB at q=8 for 23% more size.")
     p.add_argument("--keep-wav", dest="keep_wav", action="store_true",
                    help="with --ogg, keep the original WAV alongside the .ogg")
     p.add_argument("--flac", action="store_true", help="save FLAC instead of WAV")
@@ -922,8 +925,13 @@ def main():
                     a.lyrics = f.read()
             except OSError as e:
                 p.error(f"--lyrics-file: {e}")
-    elif a.seconds <= 0 or a.seconds > 47:
-        p.error("--seconds must be between 0 and 47 (Stable Audio's trained maximum)")
+    else:
+        # 47s is Stable Audio Open 1.0's trained maximum. Stable Audio 3 goes
+        # further — verified 60s and 90s generating correctly (and in 3-4s), so
+        # the old cap would needlessly block the manifest's 60s loops.
+        _max = 120.0 if a.engine == "sa3" else 47.0
+        if a.seconds <= 0 or a.seconds > _max:
+            p.error(f"--seconds must be between 0 and {_max:g} for --engine {a.engine}")
 
     # Resolve --style guide(s) into prompt/negative additions (used by build_graph).
     a.style_add, a.style_neg = "", ""
