@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to servers.json (gitignored) and put your real IPs there. Any box already running ComfyUI for pixelmon is a soundmon box too — it just needs the audio models and the retro_sfx node. Use short aliases: soundmon 'rain' --server rtx,titan,local",
+  "local": "http://127.0.0.1:8188",
+  "rtx":   "http://192.168.1.50:8188",
+  "titan": "http://192.168.1.51:8188",
+  "mac":   "http://192.168.1.52:8188"
+}

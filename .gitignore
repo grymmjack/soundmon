@@ -1,0 +1,11 @@
+# your machines' real IPs stay out of the repo (copy servers.example.json)
+servers.json
+
+__pycache__/
+*.pyc
+
+# generated audio
+*.wav
+*.flac
+*.mp3
+*.opus
