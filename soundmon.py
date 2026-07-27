@@ -146,6 +146,8 @@ def print_help():
         "",
         f"{c['b']}{c['cyan']}ADVANCED{c['rst']}",
         opt("--server NAMES", "remote ComfyUI (alias/host/URL); comma-list = render farm", "local"),
+        opt("--ogg", "compress to OGG Vorbis (~25x smaller) — off by default"),
+        opt("--ogg-quality N", "OGG quality 0-10", "5"),
         opt("--flac / --mp3 / --opus", "save compressed instead of WAV"),
         opt('--negative "..."', "negative prompt (what to avoid)"),
         opt("--name NAME", "output filename base", "from description"),
@@ -400,6 +402,46 @@ def _short(url):
     return url.split("//", 1)[-1]
 
 
+def to_ogg(path, quality=5, keep=False):
+    """Transcode a finished file to OGG Vorbis. Returns the new path (or the
+    original, unchanged, if conversion isn't possible).
+
+    Done CLIENT-SIDE, on purpose. The obvious alternative — having the ComfyUI
+    save node emit .ogg — would need an encoder installed on every farm box and
+    a node update + restart across the fleet. Converting after the file lands
+    means unmodified farm boxes keep working and the CLI alone decides the
+    output format. Encoding a 60s track takes well under a second, so there is
+    nothing to gain by pushing it upstream.
+
+    ffmpeg's *native* vorbis encoder is used with `-strict -2` because this
+    build ships no libvorbis, and python-soundfile segfaults writing OGG here
+    (libsndfile 1.2.2, truncates then SIGSEGVs). Measured on a 60s 48kHz track:
+    11 MB -> 436 KB at q=5, a 26x reduction with the full duration intact.
+    """
+    if shutil.which("ffmpeg") is None:
+        print("   ⚠ --ogg needs ffmpeg on PATH; leaving WAV")
+        return path
+    out = os.path.splitext(path)[0] + ".ogg"
+    # `-ac 2` is not optional: ffmpeg's native vorbis encoder is STEREO-ONLY
+    # ("Current FFmpeg Vorbis encoder only supports 2 channels"), and narration
+    # comes out of Kokoro as 24kHz mono. Upmixing costs almost nothing because
+    # Vorbis joint-stereo codes two identical channels efficiently.
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+         "-c:a", "vorbis", "-strict", "-2", "-ac", "2", "-q:a", str(quality), out],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+        print(f"   ⚠ ogg encode failed for {os.path.basename(path)}; keeping WAV")
+        print("     " + r.stderr.decode().strip().splitlines()[0][:160]
+              if r.stderr else "")
+        if os.path.exists(out):
+            os.remove(out)        # don't leave a 0-byte .ogg that shadows the WAV
+        return path
+    if not keep:
+        os.remove(path)
+    return out
+
+
 def audio_outs(outs):
     """Flatten ComfyUI's outputs dict to the list of saved audio files.
     Save nodes report under 'audio' (SaveAudio, SaveAudioMP3/Opus, and our SaveSFX)."""
@@ -481,6 +523,8 @@ def run_farm(a, work):
             advanced = True
             dest_dir = d or os.path.join(OUTPUT, "soundmon")
             files = [fetch_audio(it, dest_dir, srv) for it in audio_outs(outs)]
+            if a.ogg:
+                files = [to_ogg(f, a.ogg_quality, a.keep_wav) for f in files]
             done += 1
             sj = f"{subj}  " if a.batch else ""
             print(f"   ✅ [{done}/{total}] {_short(srv):<20} {sj}seed={seed}  ->  "
@@ -588,6 +632,14 @@ def main():
     p.add_argument("--fade-ms", dest="fade_ms", type=int, default=5,
                    help="de-click fade on both ends, in ms. default 5")
     # --- output format ---
+    p.add_argument("--ogg", action="store_true",
+                   help="compress the finished audio to OGG Vorbis (~25x smaller). "
+                        "Off by default. Done client-side with ffmpeg, so farm boxes "
+                        "need nothing extra.")
+    p.add_argument("--ogg-quality", dest="ogg_quality", type=int, default=5, metavar="N",
+                   help="OGG Vorbis quality 0-10, higher = bigger/better. default 5")
+    p.add_argument("--keep-wav", dest="keep_wav", action="store_true",
+                   help="with --ogg, keep the original WAV alongside the .ogg")
     p.add_argument("--flac", action="store_true", help="save FLAC instead of WAV")
     p.add_argument("--mp3", action="store_true", help="save MP3 instead of WAV")
     p.add_argument("--opus", action="store_true", help="save Opus instead of WAV")
@@ -657,7 +709,7 @@ def main():
     if a.narrate or a.narrate_file:
         sys.path.insert(0, _SCRIPT_DIR)
         import narrate
-        narrate.run(a, slug)
+        narrate.run(a, slug, to_ogg)
         return
 
     if a.format not in FORMATS:
@@ -810,6 +862,8 @@ def main():
                             shutil.move(f, tgt)
                             moved.append(tgt)
                     files = moved
+            if a.ogg:
+                files = [to_ogg(f, a.ogg_quality, a.keep_wav) for f in files]
             clip = files[0] if files else None
             first_open = first_open or clip
             tag = f"[{i}/{total}] " if total > 1 else ""

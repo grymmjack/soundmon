@@ -95,6 +95,8 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | `--max-seconds N` | hard length cap (0 = none). Truncates — trimming only removes *silence* | `0` |
 | `--normalize-db N` | peak level after generation | `-1.0` |
 | `--fade-ms N` | de-click fade on both ends | `5` |
+| `--ogg` | compress the result to OGG Vorbis (~25× smaller). **Optional, off by default** | off |
+| `--ogg-quality N` | OGG quality 0–10 | `5` |
 | `--flac` / `--mp3` / `--opus` | save compressed instead of WAV | WAV |
 | `--server NAME[,...]` | remote ComfyUI; comma-list = render farm | local |
 
@@ -219,6 +221,31 @@ string tables work directly and the key becomes the filename.
 > **It runs on CPU on purpose.** On the RX 6600 (gfx1032 masquerading as gfx1030
 > via `HSA_OVERRIDE_GFX_VERSION`) Kokoro dies with `HIP error: invalid device
 > function`. At 82 M params there was nothing to win on the GPU anyway.
+
+### Compressing output (`--ogg`)
+
+WAV is the default because it is lossless and every tool reads it. When size
+matters — shipping a game's asset folder, say — `--ogg` transcodes the finished
+audio to OGG Vorbis. Measured on a 60 s 48 kHz music track: **11 MB → 436 KB at
+q=5, a 26× reduction** with the full duration intact.
+
+```bash
+soundmon "a laser blast" --ogg                     # ~25x smaller
+soundmon "dark fantasy" --song --ogg --ogg-quality 7
+soundmon --narrate-file lines.txt --ogg --keep-wav # keep both
+```
+
+It happens **client-side, after the file lands** — not in the ComfyUI save node.
+That matters: a node-side encoder would have to be installed on every farm box
+and kept in sync, whereas this way unmodified farm boxes keep working and the
+CLI alone decides the output format. Encoding is well under a second.
+
+> **Two footguns this walks around.** `python-soundfile` segfaults writing OGG
+> here (libsndfile 1.2.2 — truncates, then SIGSEGV), so ffmpeg does the work.
+> And ffmpeg's *native* vorbis encoder is **stereo-only**, so mono sources (all
+> narration — Kokoro emits 24 kHz mono) are upmixed with `-ac 2` or the encode
+> fails outright. Vorbis joint-stereo codes two identical channels cheaply, so
+> this costs almost nothing.
 
 ### Render farm
 
