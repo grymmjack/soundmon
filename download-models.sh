@@ -69,3 +69,24 @@ fi
 echo "✅ models ready in $COMFY/models/"
 echo "   checkpoint:   $CKPT/stable-audio-open-1.0.safetensors"
 echo "   text encoder: $TENC/t5_base.safetensors"
+
+# --- Optional: Stable Audio 3 for --sa3 (music + sfx, full-band) ------------
+# ~14 GB. Skipped unless you ask:  ./download-models.sh --sa3  (or SA3_MODEL=1)
+#
+# Why bother when ACE-Step already makes music: ACE's audio VAE hard-cuts at
+# 16 kHz. Measured on raw model output, before any encoding — 12-16k at -23.9 dB,
+# 16-18k at -48.8 dB. Everything above 16k is gone before soundmon sees the file,
+# so no encoder setting or step count recovers it. That is the "spectrally
+# processed, frequencies just missing" artifact.
+#
+# Unlike stable-audio-open-1.0 these are UNGATED via the Comfy-Org repackage,
+# so no HF token is needed. Medium covers music and sfx; the two smalls are
+# purpose-trained specialists worth A/B-ing against it.
+if [ "${1:-}" = "--sa3" ] || [ "${SA3_MODEL:-0}" = 1 ]; then
+    SA3="https://huggingface.co/Comfy-Org/stable-audio-3/resolve/main"
+    get "$SA3/text_encoders/t5gemma_b_b_ul2.safetensors" "$TENC/t5gemma_b_b_ul2.safetensors"
+    get "$SA3/checkpoints/stable_audio_3_medium.safetensors"      "$CKPT/stable_audio_3_medium.safetensors"
+    get "$SA3/checkpoints/stable_audio_3_small_music.safetensors" "$CKPT/stable_audio_3_small_music.safetensors"
+    get "$SA3/checkpoints/stable_audio_3_small_sfx.safetensors"   "$CKPT/stable_audio_3_small_sfx.safetensors"
+    echo "✅ Stable Audio 3 ready (medium + music/sfx specialists)."
+fi

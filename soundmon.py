@@ -158,7 +158,9 @@ def print_help():
         opt("--sampler NAME", "ksampler sampler", "dpmpp_3m_sde_gpu"),
         opt("--scheduler NAME", "ksampler scheduler", "exponential"),
         opt("--threshold-db N", "silence floor for trimming", "-45"),
-        opt("--base FILE", "Stable Audio checkpoint", "stable-audio-open-1.0"),
+        opt("--engine NAME", "sa3 (full-band, fast) / sao (2024, 16kHz cut)", "sa3"),
+        opt("--sa3-size N", "small (specialist) / medium (generalist)", "small"),
+        opt("--base FILE", "checkpoint override", "per --engine"),
         opt("--text-encoder FILE", "T5 text encoder", "t5_base"),
         opt("--no-open", "don't auto-play the result"),
         opt("--output-to DIR", "move outputs into DIR (relative to cwd)"),
@@ -775,8 +777,16 @@ def main():
                    help="render on a remote ComfyUI: a servers.json alias or host[:port]/URL. "
                         "comma-list = RENDER FARM, jobs fan across all GPUs. "
                         "default: local (also honors $SOUNDMON_SERVER)")
-    p.add_argument("--base", default="stable-audio-open-1.0.safetensors",
-                   help="Stable Audio checkpoint")
+    p.add_argument("--engine", default="sa3", choices=["sa3", "sao"],
+                   help="which model makes SFX and --music: 'sa3' = Stable Audio 3 "
+                        "(default; full-band to 22kHz, ~20x faster), 'sao' = Stable Audio "
+                        "Open 1.0 (the 2024 model; its VAE hard-cuts at 16kHz)")
+    p.add_argument("--sa3-size", dest="sa3_size", default="small",
+                   choices=["small", "medium"],
+                   help="Stable Audio 3 variant: 'small' picks the purpose-trained "
+                        "sfx/music specialist, 'medium' the 8.6GB generalist. default small")
+    p.add_argument("--base", default=None,
+                   help="checkpoint override (else chosen by --engine)")
     p.add_argument("--text-encoder", dest="text_encoder", default="t5_base.safetensors",
                    help="T5 text encoder (models/text_encoders/)")
     p.add_argument("--sampler", default="dpmpp_3m_sde_gpu", help="ksampler sampler_name")
@@ -836,6 +846,32 @@ def main():
     # The narrate/record hand-offs return before that setup ever runs, so leaving
     # the parse down there meant a.lufs_target did not exist yet and the loudness
     # cap silently did nothing on the two engines that ask for it by getattr.
+    # Engine selection. The GRAPH is identical for Stable Audio 1 and 3 — same
+    # CLIPLoader, ConditioningStableAudio, EmptyLatentAudio, VAEDecodeAudio —
+    # so switching models is just different files and sampler settings.
+    # ComfyUI detects T5-Gemma vs T5-base from the weights themselves, which is
+    # why one CLIPLoader serves both.
+    if not a.song:
+        if a.engine == "sa3":
+            if a.sa3_size == "medium":
+                _ck = "stable_audio_3_medium.safetensors"
+            else:
+                # The specialists genuinely differ: one is trained on music, the
+                # other on sound effects. Pick by what is being made.
+                _ck = ("stable_audio_3_small_music.safetensors" if a.music
+                       else "stable_audio_3_small_sfx.safetensors")
+            a.base = a.base or _ck
+            if a.text_encoder == "t5_base.safetensors":
+                a.text_encoder = "t5gemma_b_b_ul2.safetensors"
+            if a.sampler == "dpmpp_3m_sde_gpu":
+                a.sampler = "euler"
+            if a.scheduler == "exponential":
+                a.scheduler = "simple"
+            if a.steps is None:
+                a.steps = 16 if a.fast else 50
+        else:
+            a.base = a.base or "stable-audio-open-1.0.safetensors"
+
     a.lufs_target = None
     if str(a.lufs).lower() not in ("off", "none", "no", ""):
         try:
@@ -973,8 +1009,9 @@ def main():
         print(f"🎵 tags: {subj_label}  |  {a.seconds:g}s  |  {a.bpm}bpm  |  {a.key}  |  "
               f"{a.timesig}/4  |  {lyr}  |  {a.steps}st  |  {count_label}")
     else:
+        eng = "SA3" if a.engine == "sa3" else "SAO1"
         print(f"🔊 {subj_label}  |  {a.seconds:g}s  |  {fmt_label}{style_label}  |  "
-              f"{'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
+              f"{eng} {'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
     if total > 1:
         eta = total * per
         tip = "" if a.fast else "  (tip: add --fast for quick variations)"
@@ -988,6 +1025,17 @@ def main():
             seed = (a.seed + k) if a.seed >= 0 else random.randint(0, 2**31 - 1)
             work.append((subj, seed, dests[subj]))
             k += 1
+
+    # Capability check for the single-server path too. run_farm() already routes
+    # around boxes that lack the model; without this, a single --server pointed at
+    # a box missing the checkpoint dumped a raw ComfyUI validation blob instead of
+    # saying which file was missing where.
+    if len(POOL) <= 1 and (REMOTE or POOL):
+        need = a.song_base if a.song else a.base
+        if need and not server_has_ckpt(SERVER, need):
+            sys.exit(f"{_short(SERVER)} doesn't have {need}\n"
+                     f"  provision it:  ./download-models.sh"
+                     f"{' --song' if a.song else (' --sa3' if a.engine == 'sa3' else '')}")
 
     t0 = time.time()
     first_open = None
