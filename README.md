@@ -5,7 +5,8 @@ own machines. Uses ComfyUI + **Stable Audio Open 1.0**, and shares pixelmon's
 engine, render farm, and CLI conventions.
 
 ```bash
-soundmon "a heavy wooden door creaking open"          # full-quality WAV
+soundmon "a heavy wooden door creaking open"          # SFX
+soundmon "dark fantasy, orchestral" --song --bpm 90  # a full song, with vocals
 soundmon "a laser blast" -n 8 --fast                  # 8 quick variations
 soundmon --batch "door,glass,fire" -n 16 --server rtx,titan,local
 ```
@@ -137,10 +138,46 @@ often. That same negative sabotages a music request. `--music` swaps in
 `MUSIC_NEGATIVE` and drops the "sound effect" tail from the prompt. Music style
 guides: `musicloop`, `sting`, `drums`, `chipmusic`, `cinematic`.
 
-> **Want actual songs?** That's a different model. ComfyUI already ships
-> **ACE-Step** nodes (`TextEncodeAceStepAudio`, `EmptyAceStepLatentAudio` — both
-> present in 0.24.0), which does full songs with vocals and lyrics. It's a
-> separate checkpoint and a separate graph; soundmon doesn't wire it up today.
+### Full songs (`--song`)
+
+`--song` swaps in a second engine — **ACE-Step 1.5** — for real songs with sung
+vocals, lyrics, tempo and key. Fetch it once with `./download-models.sh --song`
+(~9.3 GB), then:
+
+```bash
+soundmon "dark fantasy, epic metal, male choir, orchestral" --song \
+  --seconds 45 --bpm 100 --key "E minor" --lyrics-file ballad.txt
+soundmon "synthwave, driving, retro" --song --seconds 120 --bpm 128 --key "A minor"
+```
+
+In song mode the description becomes the **genre tags**, not a sentence — ACE
+takes tags and lyrics as separate conditioning. Musical parameters are
+first-class:
+
+| Flag | What | Default |
+|---|---|---|
+| `--lyrics` / `--lyrics-file` | sung lyrics; `[verse]` / `[chorus]` markers work | instrumental |
+| `--bpm` | tempo, 10–300 | 120 |
+| `--key` | 34 keys (`--list-keys`) | C minor |
+| `--timesig` | 2 / 3 / 4 / 6 | 4 |
+| `--lang` | 51 languages | en |
+| `--seconds` | up to **1000** (~16 min) | 120 |
+| `--no-audio-codes` | skip the quality LLM pass — much faster | off |
+
+Output is **48 kHz** stereo here (ACE's native rate), not 44.1 kHz.
+
+> This is the same trick pixelmon's `--animate` uses: an entirely different
+> pipeline behind one CLI. `_song_nodes()` lands its AUDIO on the same graph
+> node the SFX path does, so trimming, normalizing, format-locking and saving
+> are shared verbatim.
+
+**Speed.** ACE-Step is a 3.5 B model — far heavier than Stable Audio's SFX path.
+On the RX 6600 (8 GB, ROCm, `--lowvram`): ~190 s for a 30 s instrumental, ~250 s
+for 45 s with vocals. A 12 GB+ NVIDIA card is much happier. `--fast` (8 steps)
+and `--no-audio-codes` both cut it substantially.
+
+> **Farm boxes need the song model separately** — `./download-models.sh --song`
+> on each one. A box with only the SFX models will fail `--song` jobs.
 
 ### Render farm
 

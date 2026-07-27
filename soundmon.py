@@ -64,6 +64,16 @@ SFX_NEGATIVE = ("music, melody, song, speech, voice, vocals, "
                 "low quality, distorted, clipping, hiss, background noise")
 MUSIC_NEGATIVE = ("sound effect, foley, speech, spoken word, silence, "
                   "low quality, distorted, clipping, hiss, muffled")
+# What --song pushes away. ACE-Step takes genre TAGS rather than a sentence, so
+# the negative is a tag list too.
+SONG_NEGATIVE = "low quality, noisy, distorted, clipping, muffled, off-key, amateur"
+
+# Musical keys accepted by --key, mirroring ComfyUI's TextEncodeAceStepAudio1.5
+# combo exactly (17 roots x 2 qualities). Order matters only for --list-keys.
+KEYS = [f"{root} {quality}"
+        for quality in ("major", "minor")
+        for root in ("C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb",
+                     "G", "G#", "Ab", "A", "A#", "Bb", "B")]
 
 
 def resolve_server(value):
@@ -150,6 +160,20 @@ def print_help():
         opt("--create-dirs", "create output folders if missing"),
         opt("--no-subdirs", "with --batch/--output-to: dump all into one flat folder"),
         "",
+        f"{c['b']}{c['cyan']}SONG{c['rst']}  {c['dim']}(--song: full songs with real vocals, via ACE-Step 1.5. "
+        f"needs ./download-models.sh --song){c['rst']}",
+        opt("--song", "full-song mode; the description becomes genre TAGS"),
+        opt('--lyrics "..."', "lyrics to sing — use [verse] / [chorus] markers"),
+        opt("--lyrics-file F", "read lyrics from a file"),
+        opt("--bpm N", "tempo, 10-300", "120"),
+        opt('--key "A minor"', "musical key — see --list-keys", "C minor"),
+        opt("--timesig N", "time signature: 2 / 3 / 4 / 6", "4"),
+        opt("--lang CODE", "lyrics language (51 supported)", "en"),
+        opt("--no-audio-codes", "skip the quality LLM pass — much faster"),
+        opt("--llm-cfg N", "ACE text-encoder guidance", "2.0"),
+        opt("--temperature N", "LLM temperature", "0.85"),
+        opt("--list-keys", "show every musical key"),
+        "",
         f"{c['b']}{c['cyan']}OUTPUT{c['rst']}",
         f"  {c['dim']}{OUTPUT}/soundmon/{c['rst']}",
         f"  {c['dim']}44.1 kHz stereo WAV, trimmed and normalized{c['rst']}",
@@ -192,6 +216,45 @@ def slug(text):
     return out[:40] or "sound"
 
 
+def _song_nodes(a, seed, subject):
+    """ACE-Step 1.5 graph — full songs with vocals, lyrics, BPM and key.
+
+    A different engine from the SFX path, but it lands its AUDIO on node "10"
+    just like _sfx_nodes does, so the shared RetroSFX + save tail is identical.
+    (Same trick as pixelmon's --animate: swap the pipeline, keep the CLI.)
+
+    The all-in-one checkpoint bundles the DiT, the VAE and the Qwen text encoder
+    — ComfyUI's ACEStep15 declares vae_key_prefix/text_encoder_key_prefix — so a
+    single CheckpointLoaderSimple supplies all three, unlike Stable Audio which
+    needs T5 loaded separately.
+    """
+    def encode(tags, lyrics, codes):
+        return {"class_type": "TextEncodeAceStepAudio1.5",
+                "inputs": {"clip": ["4", 1], "tags": tags, "lyrics": lyrics,
+                           "seed": seed, "bpm": a.bpm, "duration": a.seconds,
+                           "timesignature": str(a.timesig), "language": a.lang,
+                           "keyscale": a.key, "generate_audio_codes": codes,
+                           "cfg_scale": a.llm_cfg, "temperature": a.temperature,
+                           "top_p": a.top_p, "top_k": a.top_k, "min_p": a.min_p}}
+
+    return {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": a.song_base}},
+        # generate_audio_codes runs an LLM pass that markedly improves quality but
+        # is slow; it's pure waste on the negative branch, so only the positive
+        # conditioning pays for it.
+        "6": encode(subject, a.lyrics, not a.no_audio_codes),
+        "7": encode(a.negative, "", False),
+        "9": {"class_type": "EmptyAceStep1.5LatentAudio",
+              "inputs": {"seconds": a.seconds, "batch_size": 1}},
+        "3": {"class_type": "KSampler",
+              "inputs": {"seed": seed, "steps": a.steps, "cfg": a.cfg,
+                         "sampler_name": a.sampler, "scheduler": a.scheduler,
+                         "denoise": 1.0, "model": ["4", 0], "positive": ["6", 0],
+                         "negative": ["7", 0], "latent_image": ["9", 0]}},
+        "10": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+    }
+
+
 def build_graph(a, seed, subject=None, server=None):
     subject = subject if subject is not None else a.prompt
     parts = [subject]
@@ -206,7 +269,17 @@ def build_graph(a, seed, subject=None, server=None):
     negative = a.negative + ((", " + a.style_neg) if a.style_neg else "")
 
     name = slug(subject) if a.batch else (a.name or slug(subject))
-    prefix = f"soundmon/{name}_{a.seconds:g}s_{a.format}_s{seed}"
+    tag = f"{a.bpm}bpm" if a.song else a.format
+    prefix = f"soundmon/{name}_{a.seconds:g}s_{tag}_s{seed}"
+
+    if a.song:
+        # Different engine, same tail — _song_nodes also lands its AUDIO on "10".
+        g = _song_nodes(a, seed, subject)
+        g["11"] = {"class_type": "RetroSFX",
+                   "inputs": {"audio": ["10", 0], "format": a.format,
+                              "trim_silence": not a.no_trim, "threshold_db": a.threshold_db,
+                              "normalize_db": a.normalize_db, "fade_ms": a.fade_ms}}
+        return _attach_save(a, g, prefix)
 
     # NOTE: the Stable Audio Open checkpoint bundles the DiT + VAE + the two
     # seconds-embedders, but NOT the text encoder — it has zero T5 tensors. So
@@ -239,6 +312,12 @@ def build_graph(a, seed, subject=None, server=None):
                           "normalize_db": a.normalize_db, "fade_ms": a.fade_ms}},
     }
 
+    return _attach_save(a, g, prefix)
+
+
+def _attach_save(a, g, prefix):
+    """Attach the save node. Shared by both engines — they agree that the
+    finished AUDIO is on node "11", so everything downstream is identical."""
     if a.flac:
         g["12"] = {"class_type": "SaveAudio",
                    "inputs": {"audio": ["11", 0], "filename_prefix": prefix}}
@@ -405,6 +484,35 @@ def main():
     p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 5.0")
     p.add_argument("--fast", action="store_true", help="16 steps: ~3x faster, rougher")
     p.add_argument("--seed", type=int, default=-1, help="-1 = random each run")
+    # --- song mode (ACE-Step 1.5): full songs with vocals, lyrics, BPM, key ---
+    p.add_argument("--song", action="store_true",
+                   help="FULL SONG mode via ACE-Step 1.5 — real vocals and lyrics. "
+                        "The description becomes the genre/style TAGS "
+                        "(e.g. \"dark fantasy, orchestral, choir\"). Needs "
+                        "./download-models.sh --song")
+    p.add_argument("--lyrics", default="",
+                   help="lyrics to sing (--song). Use [verse] / [chorus] markers; "
+                        "leave empty for an instrumental")
+    p.add_argument("--lyrics-file", dest="lyrics_file", default=None, metavar="FILE",
+                   help="read --lyrics from a file")
+    p.add_argument("--bpm", type=int, default=120, help="tempo, 10-300 (--song). default 120")
+    p.add_argument("--key", default="C minor",
+                   help='musical key (--song), e.g. "A minor", "F# major". --list-keys')
+    p.add_argument("--timesig", default="4", choices=["2", "3", "4", "6"],
+                   help="time signature (--song). default 4")
+    p.add_argument("--lang", default="en", help="lyrics language code (--song). default en")
+    p.add_argument("--no-audio-codes", dest="no_audio_codes", action="store_true",
+                   help="skip the audio-code LLM pass (--song): much faster, lower quality")
+    p.add_argument("--llm-cfg", dest="llm_cfg", type=float, default=2.0,
+                   help="ACE text-encoder LLM guidance (--song). default 2.0")
+    p.add_argument("--temperature", type=float, default=0.85, help="LLM temperature (--song)")
+    p.add_argument("--top-p", dest="top_p", type=float, default=0.9, help="LLM top_p (--song)")
+    p.add_argument("--top-k", dest="top_k", type=int, default=0, help="LLM top_k (--song)")
+    p.add_argument("--min-p", dest="min_p", type=float, default=0.0, help="LLM min_p (--song)")
+    p.add_argument("--song-base", dest="song_base",
+                   default="ace_step_1.5_turbo_aio.safetensors",
+                   help="ACE-Step checkpoint (all-in-one: DiT + VAE + Qwen encoder)")
+    p.add_argument("--list-keys", action="store_true", help="list musical keys and exit")
     p.add_argument("--music", action="store_true",
                    help="music mode: drops the anti-music negative prompt and the "
                         "'sound effect' prompt tail. Good for loops, beds, stings and "
@@ -414,7 +522,11 @@ def main():
     p.add_argument("--name", default=None, help="output filename base (default: from description)")
     # --- post-processing (the RetroSFX node) ---
     p.add_argument("--no-trim", dest="no_trim", action="store_true",
-                   help="keep the model's leading/trailing silence (default: trim it)")
+                   help="keep the model's leading/trailing silence "
+                        "(SFX default: trim. --song default: keep)")
+    p.add_argument("--trim", action="store_true",
+                   help="force silence-trimming on in --song mode (off there by default, "
+                        "because trimming breaks bar alignment)")
     p.add_argument("--threshold-db", dest="threshold_db", type=float, default=-45.0,
                    help="silence floor for trimming, in dB. default -45")
     p.add_argument("--normalize-db", dest="normalize_db", type=float, default=-1.0,
@@ -457,7 +569,8 @@ def main():
         SERVER = POOL[0]
         REMOTE = not any(h in SERVER for h in ("127.0.0.1", "localhost", "[::1]"))
 
-    if a.show_help or (not a.prompt and not a.batch and not a.list_formats and not a.list_styles):
+    if a.show_help or (not a.prompt and not a.batch and not a.list_formats
+                       and not a.list_styles and not a.list_keys):
         print_help()
         return
     if a.list_formats:
@@ -466,10 +579,36 @@ def main():
     if a.list_styles:
         print_styles()
         return
+    if a.list_keys:
+        c = C
+        print(f"{c['b']}{c['cyan']}Musical keys{c['rst']}  {c['dim']}(use with --key, --song only){c['rst']}\n")
+        for q in ("major", "minor"):
+            ks = [k for k in KEYS if k.endswith(q)]
+            print(f"  {c['grn']}{q:<6}{c['rst']} {c['dim']}{', '.join(k.rsplit(' ',1)[0] for k in ks)}{c['rst']}")
+        return
     if a.format not in FORMATS:
         p.error(f"unknown format {a.format!r}. See --list-formats.")
-    if a.seconds <= 0 or a.seconds > 47:
-        p.error("--seconds must be between 0 and 47 (the model's trained maximum)")
+
+    # --song is a different model with a very different length range: Stable
+    # Audio tops out at 47s, ACE-Step goes to 1000s (~16 min). The default
+    # differs too — 10s is right for an SFX, absurd for a song.
+    if a.song:
+        if a.seconds == 10.0:              # untouched SFX default -> song default
+            a.seconds = 120.0
+        if a.seconds <= 0 or a.seconds > 1000:
+            p.error("--song --seconds must be between 0 and 1000")
+        if a.key not in KEYS:
+            p.error(f"unknown --key {a.key!r}. See --list-keys.")
+        if not 10 <= a.bpm <= 300:
+            p.error("--bpm must be between 10 and 300")
+        if a.lyrics_file:
+            try:
+                with open(os.path.expanduser(a.lyrics_file), encoding="utf-8") as f:
+                    a.lyrics = f.read()
+            except OSError as e:
+                p.error(f"--lyrics-file: {e}")
+    elif a.seconds <= 0 or a.seconds > 47:
+        p.error("--seconds must be between 0 and 47 (Stable Audio's trained maximum)")
 
     # Resolve --style guide(s) into prompt/negative additions (used by build_graph).
     a.style_add, a.style_neg = "", ""
@@ -485,9 +624,31 @@ def main():
         a.style_add = ", ".join(x for x in adds if x)
         a.style_neg = ", ".join(negs)
 
-    a.steps = (16 if a.fast else 50) if a.steps is None else a.steps
+    # Sampler defaults differ per engine. The ACE checkpoint we ship is the
+    # *turbo* (distilled) build, which wants few steps and cfg ~1 — feeding it
+    # Stable Audio's 50 steps / cfg 5 wastes minutes and oversaturates.
+    if a.song:
+        a.steps = (8 if a.fast else 16) if a.steps is None else a.steps
+        if a.cfg == 5.0:
+            a.cfg = 1.0
+        if a.sampler == "dpmpp_3m_sde_gpu":
+            a.sampler = "euler"
+        if a.scheduler == "exponential":
+            a.scheduler = "simple"
+    else:
+        a.steps = (16 if a.fast else 50) if a.steps is None else a.steps
+
     if a.negative is None:
-        a.negative = MUSIC_NEGATIVE if a.music else SFX_NEGATIVE
+        a.negative = (SONG_NEGATIVE if a.song
+                      else MUSIC_NEGATIVE if a.music else SFX_NEGATIVE)
+
+    # Trimming is essential for SFX (the model pads short effects with dead air)
+    # but harmful for songs: --seconds 30 at --bpm 120 in 4/4 is exactly 60 bars,
+    # and shaving the tail leaves you with a clip that no longer lines up to a
+    # bar — useless for looping or scoring to picture. Measured: a 30s request
+    # came back 22.84s. So --song keeps silence unless you ask for --trim.
+    if a.song and not a.trim:
+        a.no_trim = True
 
     n = max(1, a.number)
     subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
@@ -528,8 +689,13 @@ def main():
         print(f"🚜 render farm: {len(POOL)} servers — {', '.join(_short(s) for s in POOL)}")
     elif REMOTE:
         print(f"🌐 rendering on remote server {SERVER} (results fetched back here)")
-    print(f"🔊 {subj_label}  |  {a.seconds:g}s  |  {fmt_label}{style_label}  |  "
-          f"{'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
+    if a.song:
+        lyr = f"{len(a.lyrics.split())} words of lyrics" if a.lyrics.strip() else "instrumental"
+        print(f"🎵 tags: {subj_label}  |  {a.seconds:g}s  |  {a.bpm}bpm  |  {a.key}  |  "
+              f"{a.timesig}/4  |  {lyr}  |  {a.steps}st  |  {count_label}")
+    else:
+        print(f"🔊 {subj_label}  |  {a.seconds:g}s  |  {fmt_label}{style_label}  |  "
+              f"{'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
     if total > 1:
         eta = total * per
         tip = "" if a.fast else "  (tip: add --fast for quick variations)"
