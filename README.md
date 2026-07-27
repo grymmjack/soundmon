@@ -1,17 +1,19 @@
 # soundmon — text-to-audio generator: SFX, music loops, and full songs
 
 Describe audio, get a WAV — with **one command**, entirely on your own machines.
-own machines. Uses ComfyUI + **Stable Audio Open 1.0**, and shares pixelmon's
-engine, render farm, and CLI conventions.
+Two engines behind one CLI: **Stable Audio Open 1.0** for sound effects and
+musical elements, **ACE-Step 1.5** for full songs with sung vocals. Shares
+pixelmon's ComfyUI engine, render farm, and CLI conventions.
 
 ```bash
-soundmon "a heavy wooden door creaking open"          # SFX
-soundmon "dark fantasy, orchestral" --song --bpm 90  # a full song, with vocals
-soundmon "a laser blast" -n 8 --fast                  # 8 quick variations
-soundmon --batch "door,glass,fire" -n 16 --server rtx,titan,local
+soundmon "a heavy wooden door creaking open"              # a sound effect
+soundmon "a lo-fi piano loop" --music --seconds 12        # a musical loop
+soundmon "dark fantasy, choir" --song --bpm 90 \
+         --key "D minor" --lyrics-file ballad.txt         # a full song, sung
+soundmon --batch "door,glass,fire" -n 16 --server rtx,titan,local,mac
 ```
 
-This is the local, free, unlimited answer to cloud SFX generators like ElevenLabs
+This is the local, free, unlimited answer to cloud generators like ElevenLabs
 SFX: same "just describe what you want" workflow, no subscription, no upload, no
 per-generation cost, and the render farm means you can make 100 variations while
 you get coffee.
