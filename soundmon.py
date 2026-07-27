@@ -760,7 +760,7 @@ def main():
                    help="OGG Vorbis quality 0-10, higher = bigger/better. default 8. "
                         "Quality does NOT extend bandwidth — measured identical 17.3 kHz "
                         "rolloff from q=3 to q=10 — it buys accuracy BELOW the rolloff: "
-                        "19.6 dB signal-to-error at q=5 vs 22.7 dB at q=8 for 23% more size.")
+                        "19.6 dB signal-to-error at q=5 vs 22.7 dB at q=8 for 23%% more size.")
     p.add_argument("--keep-wav", dest="keep_wav", action="store_true",
                    help="with --ogg, keep the original WAV alongside the .ogg")
     p.add_argument("--flac", action="store_true", help="save FLAC instead of WAV")
