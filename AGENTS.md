@@ -14,6 +14,7 @@ hardware. **Three engines behind one command**, chosen by flag:
 | `--music` | Stable Audio Open 1.0 | ComfyUI / GPU | loops, beds, stings |
 | `--song` | ACE-Step 1.5 | ComfyUI / GPU | full songs, sung vocals |
 | `--narrate` | Kokoro | **CPU, in-process** | spoken narration |
+| `--record` | **a human + a microphone** | CPU, in-process | spoken narration |
 
 Sibling project to **pixelmon** (`~/pixelmon`, github.com/grymmjack/pixelmon),
 which does the same thing for pixel-art sprites. soundmon deliberately mirrors
@@ -47,6 +48,66 @@ It lives in `narrate.py` and is handed off early in `main()`, mirroring how
 pixelmon hands `--animate` to `animate.py`. **Do not "unify" this into the graph
 path.** One interface, the right mechanism per engine.
 
+**`--record` is the same exception again, one step further** — no model at all,
+just a terminal booth around a microphone. It lives in `record.py`, hands off
+next to `--narrate`, and deliberately **shares two things with it**:
+
+- `narrate.parse_lines()`, verbatim. The `key | text` manifest was never
+  TTS-specific; the key becomes the filename either way. This works without
+  numpy/soundfile/kokoro installed because `narrate.py` imports those *inside*
+  `run()` — keep it that way, or `--record` grows a TTS dependency it does not
+  need.
+- The output tail. Unlike `--narrate`, `--record` runs its own
+  trim → fade → peak-normalize before handing off to `loudness_normalize()` and
+  `to_ogg()`, because a mic take arrives with room tone and a reaction-time gap
+  that Kokoro output does not have. **A pack whose files were mastered
+  differently is a pack you can hear switching**, so the chain must stay
+  equivalent.
+
+The payoff is that a hand-voiced pack and a generated pack are interchangeable
+*per line* — record the ten lines you care about, generate the other sixty.
+
+## Recording — cross-platform gotchas
+
+There is no portable microphone. `_capture_cmd()` in `record.py` picks a backend
+per OS, and each one has a different way to be told to *stop*:
+
+| OS | Backend | Stop | Why |
+|---|---|---|---|
+| Windows | `ffmpeg -f dshow` | `q` on stdin | no SIGINT to send a child process |
+| macOS | `ffmpeg -f avfoundation` | `q` on stdin | `-i ":0"` — the leading colon is required, or it opens a **camera** |
+| Linux | `pw-record` | SIGTERM | speaks PipeWire natively |
+| Linux (fallback) | `ffmpeg -f alsa` / `arecord` | `q` / SIGTERM | for non-PipeWire systems |
+
+1. **The dev box's ffmpeg has no `pulse` demuxer.** `ffmpeg -devices` lists only
+   `alsa/oss/fbdev/v4l2/x11grab`, so the obvious `-f pulse -i default` route does
+   not exist here. That is why Linux prefers `pw-record`, which is also the
+   backend that was actually measured.
+2. **Stopping the recorder the wrong way truncates the header.** A WAV's
+   RIFF/data size fields are backfilled at close; kill the process without
+   letting it finalize and you get a file some players read as zero-length.
+   Verified `pw-record` *does* finalize correctly on a signal (size fields
+   correct after a 5.7 s signal-terminated capture) — do not "improve" this to
+   `kill -9`.
+3. **The live VU meter polls the growing file**, it does not tap the audio
+   stream — every backend writes a plain WAV as it goes, so the same code works
+   on all three OSes. Measured flush granularity is **~0.25 s** (24576 bytes =
+   0.256 s of 48 kHz mono s16), which is why `METER_HZ` is 8 and not 30; polling
+   faster re-reads the same tail and the bar just freezes.
+4. **Envelopes and meters are dB-scaled, not linear.** A linear ramp collapses
+   everything under about −18 dBFS into the bottom block, so a perfectly good
+   quiet take renders as a flat line — indistinguishable from a muted mic, which
+   is the one thing the display exists to tell apart. Both use −48..0 dB so the
+   bar you watch while recording agrees with the envelope you see after.
+5. **Takes go in `<dest>/takes/`, not beside the pack files.** The output dir
+   *is* the game's narration pack — anything in it ships.
+6. **Take numbering comes from the highest number on disk, not the count.**
+   Deleting take 2 of 3 leaves `{01, 03}`; a count-based number hands back `03`
+   and silently overwrites.
+7. **Windows consoles need `VIRTUAL_TERMINAL_PROCESSING` enabled** before they
+   honor ANSI escapes (`_enable_vt()`). Windows Terminal does it already;
+   `conhost.exe` does not, and the whole TUI renders as literal escape garbage.
+
 ## Hard-won gotchas — do not re-learn these
 
 1. **Stable Audio's checkpoint has NO text encoder.** It carries the DiT (374
@@ -79,6 +140,14 @@ path.** One interface, the right mechanism per engine.
 9. **Kokoro must run on CPU here.** On the RX 6600 (gfx1032 masquerading as
    gfx1030 via `HSA_OVERRIDE_GFX_VERSION`) it dies with `HIP error: invalid
    device function`. At 82 M params there is nothing to win on the GPU.
+10. **The engine hand-offs `return` before the diffusion-side setup in `main()`,
+    so anything they need must be parsed ABOVE them.** `a.lufs_target` was
+    derived from `--lufs` *below* the `--narrate` hand-off, so it did not exist
+    yet when `narrate.run()` looked for it — and because the lookup is a
+    defensive `getattr(a, "lufs_target", None)`, `--narrate --lufs -16` silently
+    did nothing instead of raising. The parse now sits above both hand-offs.
+    Any future per-engine option has the same trap: a `getattr` default will
+    hide it.
 
 ## Environment gotchas
 
@@ -150,3 +219,21 @@ character:
 
 The repo owner is writing this one. **Do not fill it in unless asked.** Default
 `--format none` works fully, so only the retro formats are gated on it.
+
+`take_warning()` in `record.py` is the same deal, for the same reason. It decides
+whether a recorded take looks bad enough to warn about before you accept it. The
+clipping check is implemented because clipping is objectively wrong; everything
+below it is **calibration against a specific mic, room and delivery**, which is
+not something to guess at from outside:
+
+- a "too quiet" floor depends on the mic's output and how close it is worked —
+  and matters because `loudness_normalize()` only ever *attenuates*, so a quiet
+  take stays quiet
+- duration-vs-word-count catches stopping early and leaving it running, but the
+  words/second band that means "wrong" for a grave dungeon-master read is very
+  different from conversational narration
+- the real trade-off is that a chatty warning you learn to ignore is worse than
+  no warning at all
+
+It returns `None` (accept silently) for anything it does not flag, so the booth
+is fully functional without it. **Do not fill it in unless asked.**

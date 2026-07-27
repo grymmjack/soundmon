@@ -123,6 +123,8 @@ def print_help():
         ex('soundmon "laser blast" --format sb --bits 8', "SoundBlaster-era 8-bit crunch"),
         ex('soundmon --batch "door,glass,fire" -n 8', "8 of each → own folders"),
         ex('soundmon "rain" --seconds 30 --server rtx,titan', "long, fanned across GPUs"),
+        ex("soundmon --narrate-file lines.txt --ogg", "speak a script with a TTS voice"),
+        ex("soundmon --record-file lines.txt --ogg", "record that same script yourself"),
         "",
         f"{c['b']}{c['cyan']}OPTIONS{c['rst']}",
         opt("description", "the sound you want (in quotes)"),
@@ -177,6 +179,20 @@ def print_help():
         opt("--llm-cfg N", "ACE text-encoder guidance", "2.0"),
         opt("--temperature N", "LLM temperature", "0.85"),
         opt("--list-keys", "show every musical key"),
+        "",
+        f"{c['b']}{c['cyan']}VOICE{c['rst']}  {c['dim']}(spoken narration — two ways to make the same pack: "
+        f"a TTS voice, or your own){c['rst']}",
+        opt("--narrate", "speak the text with a TTS voice (Kokoro, local CPU)"),
+        opt("--record", "record it YOURSELF from a mic, line by line"),
+        opt("--narrate-file F", "narrate every 'key | text' row of a file"),
+        opt("--record-file F", "record every row instead — resumable, one take each"),
+        opt("--voice NAME", "TTS voice — see --list-voices", "bm_george"),
+        opt("--pitch N", "semitones, NEGATIVE = deeper (duration kept)", "0"),
+        opt("--speed N", "speech rate", "1.0"),
+        opt("--device NAME", "microphone to record from — see --list-devices", "default"),
+        opt("--record-rate N", "capture sample rate", "48000"),
+        opt("--list-voices", "show every TTS voice"),
+        opt("--list-devices", "show every microphone this machine can see"),
         "",
         f"{c['b']}{c['cyan']}OUTPUT{c['rst']}",
         f"  {c['dim']}{OUTPUT}/soundmon/{c['rst']}",
@@ -656,6 +672,22 @@ def main():
                    help="pitch shift in semitones (--narrate). NEGATIVE = deeper, "
                         "e.g. -3 for a booming dungeon master. Duration is preserved.")
     p.add_argument("--list-voices", action="store_true", help="list TTS voices and exit")
+    # --- recording mode: you are the narrator; a booth around the same manifest ---
+    p.add_argument("--record", action="store_true",
+                   help="RECORDING mode — record narration in your own voice, one "
+                        "line at a time, from a mic. Same manifest and same output "
+                        "filenames as --narrate, so packs are interchangeable.")
+    p.add_argument("--record-file", dest="record_file", default=None, metavar="FILE",
+                   help="record every line of a file, one take each. Reads the same "
+                        "'key | text' rows --narrate-file does; the key becomes the "
+                        "filename. Resumable — rerun to continue where you stopped.")
+    p.add_argument("--device", default=None, metavar="NAME",
+                   help="microphone to record from (--record). See --list-devices. "
+                        "default: the system default input")
+    p.add_argument("--list-devices", dest="list_devices", action="store_true",
+                   help="list microphones this machine can record from, and exit")
+    p.add_argument("--record-rate", dest="record_rate", type=int, default=48000,
+                   metavar="N", help="capture sample rate (--record). default 48000")
     # --- song mode (ACE-Step 1.5): full songs with vocals, lyrics, BPM, key ---
     p.add_argument("--song", action="store_true",
                    help="FULL SONG mode via ACE-Step 1.5 — real vocals and lyrics. "
@@ -763,7 +795,8 @@ def main():
 
     if a.show_help or (not a.prompt and not a.batch and not a.list_formats
                        and not a.list_styles and not a.list_keys and not a.list_voices
-                       and not a.narrate_file):
+                       and not a.narrate_file and not a.record_file
+                       and not a.list_devices):
         print_help()
         return
     if a.list_formats:
@@ -798,6 +831,30 @@ def main():
         for q in ("major", "minor"):
             ks = [k for k in KEYS if k.endswith(q)]
             print(f"  {c['grn']}{q:<6}{c['rst']} {c['dim']}{', '.join(k.rsplit(' ',1)[0] for k in ks)}{c['rst']}")
+        return
+    # --lufs is parsed HERE, not with the rest of the diffusion-side setup below.
+    # The narrate/record hand-offs return before that setup ever runs, so leaving
+    # the parse down there meant a.lufs_target did not exist yet and the loudness
+    # cap silently did nothing on the two engines that ask for it by getattr.
+    a.lufs_target = None
+    if str(a.lufs).lower() not in ("off", "none", "no", ""):
+        try:
+            a.lufs_target = float(a.lufs)
+        except ValueError:
+            p.error(f"--lufs must be a number or 'off', got {a.lufs!r}")
+
+    if a.list_devices:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import record
+        record.list_devices()
+        return
+    # Recording is its own pipeline too — a terminal booth around a microphone,
+    # no model of any kind. It shares --narrate's manifest parser and the whole
+    # output tail, so a hand-voiced pack and a generated one are interchangeable.
+    if a.record or a.record_file:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import record
+        record.run(a, slug, to_ogg, loudness_normalize)
         return
     # Narration is its own pipeline (Kokoro on CPU) — it never touches ComfyUI,
     # so it short-circuits before any of the diffusion-side setup below.
@@ -859,13 +916,6 @@ def main():
             a.scheduler = "simple"
     else:
         a.steps = (16 if a.fast else 50) if a.steps is None else a.steps
-
-    a.lufs_target = None
-    if str(a.lufs).lower() not in ("off", "none", "no", ""):
-        try:
-            a.lufs_target = float(a.lufs)
-        except ValueError:
-            p.error(f"--lufs must be a number or 'off', got {a.lufs!r}")
 
     if a.negative is None:
         a.negative = (SONG_NEGATIVE if a.song
