@@ -56,6 +56,18 @@ except Exception:
     SERVERS = {}
 SERVERS.setdefault("local", "http://127.0.0.1:8188")
 
+# Stable Audio 3's prompt-rewriter system prompts, lifted verbatim from
+# ComfyUI's official SA3 workflow (JsonExtractString node). SA3 is trained on
+# richly structured prompts — named instrumentation, arrangement, and a
+# "BPM: X. Length: Y seconds" tail — and these turn a loose description into
+# that shape. Skipping this stage yields technically clean but musically weak
+# results; it is part of the pipeline, not a nicety.
+try:
+    with open(os.path.join(_SCRIPT_DIR, "sa3_reprompt.json"), encoding="utf-8") as _rf:
+        SA3_REPROMPT = json.load(_rf)
+except Exception:
+    SA3_REPROMPT = {}
+
 # Default negatives. The SFX one pushes *music and speech* away, because an SFX
 # request drifts into a little musical phrase surprisingly often — but that same
 # negative sabotages --music, which is why the two are separate. Either can be
@@ -140,6 +152,8 @@ def print_help():
         opt("--cfg N", "prompt adherence (higher = stricter)", "5.0"),
         opt("--fast", "16 steps: ~3x faster, rougher"),
         opt("--no-trim", "keep the model's leading/trailing silence"),
+        opt("--loop", "crossfade tail over head so the track loops seamlessly"),
+        opt("--loop-crossfade SEC", "crossfade length for --loop", "2.0"),
         opt("--normalize-db N", "peak level after generation", "-1.0"),
         opt("--fade-ms N", "de-click fade on both ends", "5"),
         opt("--list-formats", "show every hardware format"),
@@ -151,14 +165,16 @@ def print_help():
         opt("--lufs N", "loudness CEILING in LUFS, attenuate-only ('off')", "-16"),
         opt("--true-peak N", "true-peak ceiling in dBTP", "-1.0"),
         opt("--ogg", "compress to OGG Vorbis (~25x smaller) — off by default"),
-        opt("--ogg-quality N", "OGG quality 0-10", "5"),
+        opt("--ogg-quality N", "OGG quality 0-10 (accuracy, not bandwidth)", "8"),
         opt("--flac / --mp3 / --opus", "save compressed instead of WAV"),
         opt('--negative "..."', "negative prompt (what to avoid)"),
         opt("--name NAME", "output filename base", "from description"),
         opt("--sampler NAME", "ksampler sampler", "dpmpp_3m_sde_gpu"),
         opt("--scheduler NAME", "ksampler scheduler", "exponential"),
         opt("--threshold-db N", "silence floor for trimming", "-45"),
-        opt("--base FILE", "Stable Audio checkpoint", "stable-audio-open-1.0"),
+        opt("--engine NAME", "sa3 (full-band, fast) / sao (2024, 16kHz cut)", "sa3"),
+        opt("--sa3-size N", "small (specialist) / medium (generalist)", "small"),
+        opt("--base FILE", "checkpoint override", "per --engine"),
         opt("--text-encoder FILE", "T5 text encoder", "t5_base"),
         opt("--no-open", "don't auto-play the result"),
         opt("--output-to DIR", "move outputs into DIR (relative to cwd)"),
@@ -234,6 +250,40 @@ def print_styles():
 def slug(text):
     out = "".join(c if c.isalnum() else "_" for c in text.lower()).strip("_")
     return out[:40] or "sound"
+
+
+def _reprompt_nodes(a, text, seconds):
+    """Qwen 3.5 rewrites `text` into the form Stable Audio 3 expects.
+
+    Returns (nodes, text_ref) where text_ref is a graph reference usable as a
+    CLIPTextEncode `text` input. The theme's own wording goes INTO the LLM
+    input rather than being appended afterwards — the rewriter otherwise has no
+    idea what pack it is serving and will cheerfully put electric guitars in an
+    orchestral cue.
+
+    The nested sampling params must be dot-namespaced (`sampling_mode.seed`);
+    `sampling_mode` is a COMFY_DYNAMICCOMBO_V3, which is only discoverable from
+    /object_info.
+    """
+    category = "Music" if a.music else "SFX"
+    sysp = SA3_REPROMPT.get(category, "")
+    if not sysp:
+        return {}, None
+    full = (f"{sysp}\n\nInput: {text}\n"
+            f"Target audio length: {max(1, int(round(seconds)))} seconds.\nOutput:")
+    return {
+        "20": {"class_type": "CLIPLoader",
+               "inputs": {"clip_name": a.reprompt_model, "type": "stable_diffusion"}},
+        "21": {"class_type": "TextGenerate",
+               "inputs": {"clip": ["20", 0], "prompt": full, "max_length": 256,
+                          "sampling_mode": "on",
+                          "sampling_mode.temperature": a.reprompt_temp,
+                          "sampling_mode.top_k": 64, "sampling_mode.top_p": 0.95,
+                          "sampling_mode.min_p": 0.05,
+                          "sampling_mode.repetition_penalty": 1.05,
+                          "sampling_mode.seed": 0,
+                          "thinking": False, "use_default_template": True}},
+    }, ["21", 0]
 
 
 def _song_nodes(a, seed, subject):
@@ -334,6 +384,14 @@ def build_graph(a, seed, subject=None, server=None):
                           "normalize_db": a.normalize_db, "fade_ms": a.fade_ms}},
     }
 
+    # Prompt rewriter: replace the literal positive text with the LLM's output.
+    # Only for SA3 — Stable Audio Open 1.0 was not trained this way.
+    if a.engine == "sa3" and not a.no_reprompt and not a.song:
+        rp, ref = _reprompt_nodes(a, prompt, a.seconds)
+        if ref:
+            g.update(rp)
+            g["6"]["inputs"]["text"] = ref
+
     return _attach_save(a, g, prefix)
 
 
@@ -418,6 +476,88 @@ def server_has_ckpt(server, ckpt):
 
 def _short(url):
     return url.split("//", 1)[-1]
+
+
+def loop_wrap(path, crossfade=2.0):
+    """Make a track loop seamlessly by mixing its own tail back over its head.
+
+    WHY THIS EXISTS, and why the obvious fix was the wrong one.
+
+    Music that plays continuously has to survive its last sample running into
+    its first. Generated music does not, for a reason that has nothing to do
+    with this tool: **the model composes an ending.** Asked for 60 seconds it
+    writes a 60-second piece of music, with a ritardando and a decay, because
+    that is what its training data does. Measured on raw output, the final two
+    seconds fall ~40 dB.
+
+    The tempting fix is to stop post-processing from touching the endpoints —
+    `--no-trim --fade-ms 0` — on the theory that trimming and de-click fades are
+    what flattened the tail. That was measured here and it is **backwards**:
+
+        tail level relative to body, souls pack, same models, same prompts
+          trim on,  5 ms fade   ->  -30.4 dB   (trim cuts into the model's decay)
+          trim off, no fade     ->  -66.6 dB   (the model's full decay survives)
+
+    Trimming *helped*, because near-silence trimming eats most of the composed
+    fade-out. It just cannot finish the job: a decay is only "silence" at the
+    very end, so trimming leaves the quiet part it never crossed the threshold
+    for. No endpoint policy fixes this, because the hole is musical content, not
+    processing damage.
+
+    So: construct the loop instead of hoping for one. Given source S of length
+    L and a crossfade of X, the output is T = L - X samples:
+
+        O[i]      = S[i]                              for i in [X, T)
+        O[0:X]    = S[0:X]*fade_in + S[T:L]*fade_out
+
+    The seam is then continuous *by construction*, not by luck. Play O[T-1] into
+    O[0] and you get S[T-1] into S[T] — adjacent samples of the original take.
+    The composed ending is still there; it now lands underneath the opening
+    instead of on top of a hard cut.
+
+    Equal-power (sin/cos) curves rather than linear: the two halves are
+    uncorrelated material, so linear curves lose ~3 dB in the middle of the
+    blend and you hear a dip pass by once per loop.
+
+    Costs X seconds of length — a 60 s render becomes a 58 s loop. Ask the model
+    for the longer number if the exact duration matters.
+
+    Returns (path, seconds_of_output) — or (path, None) if it declined to act.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+    except ImportError:
+        # Same treatment --narrate gets: the dependency is real but optional, so
+        # a box without it degrades to "not looped" rather than failing the run.
+        return path, None
+
+    try:
+        info = sf.info(path)
+        audio, sr = sf.read(path, always_2d=True)
+    except Exception:
+        return path, None
+
+    n = len(audio)
+    x = int(sr * crossfade)
+    # Refuse rather than mangle. Below 4x the crossfade there is not enough
+    # material left over for the loop to be anything but the crossfade itself.
+    if x < 1 or n < 4 * x:
+        return path, None
+
+    t = np.linspace(0.0, 1.0, x, endpoint=False, dtype=audio.dtype)[:, None]
+    out = audio[:n - x].copy()
+    out[:x] = audio[:x] * np.sin(t * np.pi / 2) + audio[n - x:] * np.cos(t * np.pi / 2)
+
+    tmp = os.path.splitext(path)[0] + ".loop.wav"
+    try:
+        sf.write(tmp, out, sr, subtype=info.subtype)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return path, None
+    return path, len(out) / sr
 
 
 def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
@@ -615,6 +755,11 @@ def run_farm(a, work):
             advanced = True
             dest_dir = d or os.path.join(OUTPUT, "soundmon")
             files = [fetch_audio(it, dest_dir, srv) for it in audio_outs(outs)]
+            # Before loudness: the wrap MIXES two signals, so it changes level.
+            # Anything that changes gain after normalizing invalidates it.
+            if a.loop:
+                for f in files:
+                    loop_wrap(f, a.loop_crossfade)
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             if a.ogg:
@@ -723,6 +868,16 @@ def main():
                         "riffs — the model does NOT do full songs or vocals.")
     p.add_argument("--negative", default=None,
                    help="what to avoid (defaults differ for SFX vs --music)")
+    p.add_argument("--loop", action="store_true",
+                   help="make the result loop seamlessly by crossfading its tail "
+                        "over its head. Costs --loop-crossfade seconds of length. "
+                        "For music that plays continuously — the model composes an "
+                        "ENDING, which no trim/fade setting can undo.")
+    p.add_argument("--loop-crossfade", dest="loop_crossfade", type=float, default=2.0,
+                   metavar="SEC",
+                   help="crossfade length for --loop (default: 2.0). Longer hides "
+                        "a bigger composed ending but blurs more of the opening; "
+                        "shorter keeps the opening crisp but can let the decay show.")
     p.add_argument("--name", default=None, help="output filename base (default: from description)")
     # --- post-processing (the RetroSFX node) ---
     p.add_argument("--no-trim", dest="no_trim", action="store_true",
@@ -754,8 +909,11 @@ def main():
                    help="compress the finished audio to OGG Vorbis (~25x smaller). "
                         "Off by default. Done client-side with ffmpeg, so farm boxes "
                         "need nothing extra.")
-    p.add_argument("--ogg-quality", dest="ogg_quality", type=int, default=5, metavar="N",
-                   help="OGG Vorbis quality 0-10, higher = bigger/better. default 5")
+    p.add_argument("--ogg-quality", dest="ogg_quality", type=int, default=8, metavar="N",
+                   help="OGG Vorbis quality 0-10, higher = bigger/better. default 8. "
+                        "Quality does NOT extend bandwidth — measured identical 17.3 kHz "
+                        "rolloff from q=3 to q=10 — it buys accuracy BELOW the rolloff: "
+                        "19.6 dB signal-to-error at q=5 vs 22.7 dB at q=8 for 23%% more size.")
     p.add_argument("--keep-wav", dest="keep_wav", action="store_true",
                    help="with --ogg, keep the original WAV alongside the .ogg")
     p.add_argument("--flac", action="store_true", help="save FLAC instead of WAV")
@@ -775,8 +933,26 @@ def main():
                    help="render on a remote ComfyUI: a servers.json alias or host[:port]/URL. "
                         "comma-list = RENDER FARM, jobs fan across all GPUs. "
                         "default: local (also honors $SOUNDMON_SERVER)")
-    p.add_argument("--base", default="stable-audio-open-1.0.safetensors",
-                   help="Stable Audio checkpoint")
+    p.add_argument("--no-reprompt", dest="no_reprompt", action="store_true",
+                   help="skip the Qwen prompt rewriter (--engine sa3). On by default: SA3 "
+                        "is trained on structured prompts and a loose description yields "
+                        "technically clean but musically weaker results.")
+    p.add_argument("--reprompt-model", dest="reprompt_model",
+                   default="qwen3.5_2b_bf16.safetensors",
+                   help="LLM used by the prompt rewriter (models/text_encoders/)")
+    p.add_argument("--reprompt-temp", dest="reprompt_temp", type=float, default=0.7,
+                   help="rewriter sampling temperature. default 0.7")
+    p.add_argument("--engine", default="sa3", choices=["sa3", "sao"],
+                   help="which model makes SFX and --music: 'sa3' = Stable Audio 3 "
+                        "(default; full-band to 22kHz, ~20x faster), 'sao' = Stable Audio "
+                        "Open 1.0 (the 2024 model; its VAE hard-cuts at 16kHz)")
+    p.add_argument("--sa3-size", dest="sa3_size", default="medium",
+                   choices=["small", "medium"],
+                   help="Stable Audio 3 variant. 'medium' (default) is the only one with an "
+                        "official ComfyUI workflow and the only one verified to sound right; "
+                        "the 'small' sfx/music specialists produced scrambled audio here.")
+    p.add_argument("--base", default=None,
+                   help="checkpoint override (else chosen by --engine)")
     p.add_argument("--text-encoder", dest="text_encoder", default="t5_base.safetensors",
                    help="T5 text encoder (models/text_encoders/)")
     p.add_argument("--sampler", default="dpmpp_3m_sde_gpu", help="ksampler sampler_name")
@@ -836,6 +1012,35 @@ def main():
     # The narrate/record hand-offs return before that setup ever runs, so leaving
     # the parse down there meant a.lufs_target did not exist yet and the loudness
     # cap silently did nothing on the two engines that ask for it by getattr.
+    # Engine selection. The GRAPH is identical for Stable Audio 1 and 3 — same
+    # CLIPLoader, ConditioningStableAudio, EmptyLatentAudio, VAEDecodeAudio —
+    # so switching models is just different files and sampler settings.
+    # ComfyUI detects T5-Gemma vs T5-base from the weights themselves, which is
+    # why one CLIPLoader serves both.
+    if not a.song:
+        if a.engine == "sa3":
+            if a.sa3_size == "medium":
+                _ck = "stable_audio_3_medium.safetensors"   # covers sfx and music
+            else:
+                _ck = ("stable_audio_3_small_music.safetensors" if a.music
+                       else "stable_audio_3_small_sfx.safetensors")
+            a.base = a.base or _ck
+            if a.text_encoder == "t5_base.safetensors":
+                a.text_encoder = "t5gemma_b_b_ul2.safetensors"
+            # ComfyUI's official Stable Audio 3 workflow: lcm / simple / 8 steps
+            # / cfg 1. Verified by ear — 50 steps at cfg 7 produces clacking and
+            # popping, and euler produces noise. These are not tunables.
+            if a.sampler == "dpmpp_3m_sde_gpu":
+                a.sampler = "lcm"
+            if a.scheduler == "exponential":
+                a.scheduler = "simple"
+            if a.steps is None:
+                a.steps = 8
+            if a.cfg == 5.0:
+                a.cfg = 1.0
+        else:
+            a.base = a.base or "stable-audio-open-1.0.safetensors"
+
     a.lufs_target = None
     if str(a.lufs).lower() not in ("off", "none", "no", ""):
         try:
@@ -886,8 +1091,13 @@ def main():
                     a.lyrics = f.read()
             except OSError as e:
                 p.error(f"--lyrics-file: {e}")
-    elif a.seconds <= 0 or a.seconds > 47:
-        p.error("--seconds must be between 0 and 47 (Stable Audio's trained maximum)")
+    else:
+        # 47s is Stable Audio Open 1.0's trained maximum. Stable Audio 3 goes
+        # further — verified 60s and 90s generating correctly (and in 3-4s), so
+        # the old cap would needlessly block the manifest's 60s loops.
+        _max = 120.0 if a.engine == "sa3" else 47.0
+        if a.seconds <= 0 or a.seconds > _max:
+            p.error(f"--seconds must be between 0 and {_max:g} for --engine {a.engine}")
 
     # Resolve --style guide(s) into prompt/negative additions (used by build_graph).
     a.style_add, a.style_neg = "", ""
@@ -928,6 +1138,24 @@ def main():
     # came back 22.84s. So --song keeps silence unless you ask for --trim.
     if a.song and not a.trim:
         a.no_trim = True
+
+    # --loop dictates its own endpoint policy, because the two settings people
+    # reach for here are each half-wrong on their own:
+    #
+    #   trim  MUST stay on  — it removes the model's silent lead-in/run-out, so
+    #                         the crossfade blends music with music. Wrapping an
+    #                         untrimmed take just crossfades two silences and
+    #                         leaves the hole exactly where it was. (Measured:
+    #                         --no-trim made the tail 36 dB WORSE, not better.)
+    #   fade  MUST be off   — a de-click ramp at the endpoints lands inside the
+    #                         blend region and puts a dip at the seam, which is
+    #                         the one artifact the wrap exists to remove.
+    #
+    # The seam is a butt-join between adjacent source samples after wrapping, so
+    # there is nothing left to de-click.
+    if a.loop:
+        a.no_trim = False
+        a.fade_ms = 0
 
     n = max(1, a.number)
     subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
@@ -973,8 +1201,9 @@ def main():
         print(f"🎵 tags: {subj_label}  |  {a.seconds:g}s  |  {a.bpm}bpm  |  {a.key}  |  "
               f"{a.timesig}/4  |  {lyr}  |  {a.steps}st  |  {count_label}")
     else:
+        eng = "SA3" if a.engine == "sa3" else "SAO1"
         print(f"🔊 {subj_label}  |  {a.seconds:g}s  |  {fmt_label}{style_label}  |  "
-              f"{'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
+              f"{eng} {'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
     if total > 1:
         eta = total * per
         tip = "" if a.fast else "  (tip: add --fast for quick variations)"
@@ -988,6 +1217,17 @@ def main():
             seed = (a.seed + k) if a.seed >= 0 else random.randint(0, 2**31 - 1)
             work.append((subj, seed, dests[subj]))
             k += 1
+
+    # Capability check for the single-server path too. run_farm() already routes
+    # around boxes that lack the model; without this, a single --server pointed at
+    # a box missing the checkpoint dumped a raw ComfyUI validation blob instead of
+    # saying which file was missing where.
+    if len(POOL) <= 1 and (REMOTE or POOL):
+        need = a.song_base if a.song else a.base
+        if need and not server_has_ckpt(SERVER, need):
+            sys.exit(f"{_short(SERVER)} doesn't have {need}\n"
+                     f"  provision it:  ./download-models.sh"
+                     f"{' --song' if a.song else (' --sa3' if a.engine == 'sa3' else '')}")
 
     t0 = time.time()
     first_open = None
@@ -1015,6 +1255,14 @@ def main():
                             shutil.move(f, tgt)
                             moved.append(tgt)
                     files = moved
+            # Before loudness: the wrap MIXES two signals, so it changes level.
+            # Anything that changes gain after normalizing invalidates it.
+            if a.loop:
+                for f in files:
+                    _, sec = loop_wrap(f, a.loop_crossfade)
+                    if sec:
+                        print(f"   ↻ looped  {os.path.basename(f)}  "
+                              f"({sec:.1f}s, {a.loop_crossfade:g}s crossfade)")
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             if a.ogg:

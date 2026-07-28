@@ -1,9 +1,9 @@
 # soundmon — text-to-audio generator: SFX, music loops, songs, and narration
 
 Describe audio, get a WAV — with **one command**, entirely on your own machines.
-Behind one CLI: **Stable Audio Open 1.0** for sound effects and musical elements,
-**ACE-Step 1.5** for full songs with sung vocals, **Kokoro** for spoken
-narration — and a recording booth for when you would rather narrate it yourself.
+Behind one CLI: **Stable Audio 3** for sound effects and music, **ACE-Step 1.5**
+for full songs with sung vocals, **Kokoro** for spoken narration — and a
+recording booth for when you would rather narrate it yourself.
 Shares pixelmon's ComfyUI engine, render farm, and CLI conventions.
 
 ```bash
@@ -31,10 +31,23 @@ You describe a sound; you get a WAV. The visual node-graph is handled behind the
 scenes.
 
 **The single most important lesson** (same shape as pixelmon's): the model has to
-be trained on the thing you want. **Stable Audio Open 1.0** was trained on
-Freesound + the Free Music Archive and is explicitly built for *sound effects and
-production elements* — not songs. A music model asked for "a door creak" gives
-you a song *about* a door.
+be trained on the thing you want, and it has to be run the way it was trained. A
+music model asked for "a door creak" gives you a song *about* a door — and the
+right model run at the wrong precision gives you static. Both failure modes cost
+a full day here; see [Lessons learned](#lessons-learned-the-gotchas).
+
+### Which engine makes what
+
+| You want | Flag | Engine | Notes |
+|---|---|---|---|
+| a sound effect | *(default)* | Stable Audio 3 medium | 44.1 kHz, full-band |
+| a music loop / bed / sting | `--music` | Stable Audio 3 medium | same checkpoint, different conditioning |
+| a full song with sung vocals | `--song` | ACE-Step 1.5 turbo | lyrics, BPM, key; 48 kHz |
+| a spoken line | `--narrate` | Kokoro | CPU, in-process, no ComfyUI |
+| a spoken line **in your voice** | `--record` | your microphone | no models at all |
+
+`--engine sao` falls back to the original **Stable Audio Open 1.0** if you want
+it, but SA3 supersedes it for both SFX and music.
 
 ### It shares everything with pixelmon
 
@@ -42,7 +55,7 @@ soundmon deliberately reuses pixelmon's engine rather than duplicating it:
 
 | Shared | Not shared |
 |---|---|
-| `~/ComfyUI` + its venv + torch | the models (audio, ~5.3 GB) |
+| `~/ComfyUI` + its venv + torch | the models (audio, ~14 GB for SA3) |
 | `~/launch-comfyui.sh` (GPU autodetect) | the custom node (`retro_sfx`) |
 | port 8188, `servers.json`, the whole farm | the workflow graph |
 
@@ -56,8 +69,8 @@ Any box already running ComfyUI for pixelmon becomes a soundmon box by running
 
 ```bash
 git clone <your-remote> ~/git/soundmon && cd ~/git/soundmon
-./install.sh            # links files; reuses an existing ComfyUI if present
-./download-models.sh    # ~5.3 GB from Hugging Face (no login/token needed)
+./install.sh                  # links files; reuses an existing ComfyUI if present
+./download-models.sh --sa3    # the default engine (~14 GB, ungated)
 # restart ComfyUI so it picks up the retro_sfx node
 soundmon "a heavy wooden door creaking open"
 ```
@@ -66,17 +79,41 @@ If you don't have ComfyUI yet, `install.sh` will tell you to run pixelmon's
 installer first — it builds exactly the engine soundmon needs (ComfyUI + venv +
 the right torch for your GPU).
 
-`download-models.sh` fetches into `~/ComfyUI/models/`:
+`download-models.sh` fetches into `~/ComfyUI/models/`. The bare command gets the
+legacy Stable Audio Open set; the flags get the engines you actually want:
 
-| File | Size | Goes to |
+| Flag | Fetches | Size |
 |---|---|---|
-| `stable-audio-open-1.0.safetensors` | 4.85 GB | `models/checkpoints/` |
-| `t5_base.safetensors` (text encoder) | 438 MB | `models/text_encoders/` |
+| `--sa3` | **Stable Audio 3** medium + specialists + T5Gemma + **Qwen 3.5 rewriter** | ~14 GB |
+| `--song` | ACE-Step 1.5 turbo (all-in-one) | ~9.3 GB |
+| *(none)* | Stable Audio Open 1.0 + T5-base — only needed for `--engine sao` | ~5.3 GB |
+
+> **The Qwen rewriter is not optional.** ComfyUI's official Stable Audio 3
+> workflow runs an LLM over your description *before* the audio model ever sees
+> it, with different system prompts per category. `--sa3` therefore pulls it
+> automatically. Skipping this stage is what produced a batch of technically
+> valid, musically worthless audio here — see gotcha 10.
 
 > **Gating note.** `stabilityai/stable-audio-open-1.0` is a **gated** repo — it
 > 401s without an HF token and a license click. `download-models.sh` pulls from
 > an ungated mirror so setup stays one-command. Use the official repo with
-> `HF_TOKEN=hf_xxx ./download-models.sh --official`.
+> `HF_TOKEN=hf_xxx ./download-models.sh --official`. The Stable Audio 3 and
+> ACE-Step repackages are **ungated** — no token needed.
+
+### ⚠ Stable Audio 3 requires `--force-fp32`
+
+ComfyUI defaults audio models to fp16, and `StableAudio3` declares no
+`supported_inference_dtypes` to override that. **In fp16 the model outputs
+noise** — buzzing, radio-scramble, no usable audio. Start ComfyUI like this:
+
+```bash
+~/launch-comfyui.sh --force-fp32
+```
+
+`bin/soundmon` passes it automatically when it starts the server itself. If
+ComfyUI is **already running** (e.g. for pixelmon's SDXL), restart it with the
+flag before generating audio. It roughly doubles VRAM and halves throughput,
+which is why it isn't simply always on.
 
 ---
 
@@ -87,20 +124,27 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | Flag | What it does | Default |
 |---|---|---|
 | `-n, --number N` | how many to make, each a different seed | `1` |
-| `--seconds N` | length (model max 47). **Conditions the model** — it shapes the sound, not just its length | `10` |
+| `--seconds N` | length. **Conditions the model** — it shapes the sound, not just its length | `10` |
+| `--engine NAME` | `sa3` (Stable Audio 3) or `sao` (Stable Audio Open 1.0) | `sa3` |
+| `--sa3-size NAME` | `medium` / `small_music` / `small_sfx` / `medium_base` | `medium` |
+| `--no-reprompt` | skip the Qwen rewrite stage — **usually a mistake**, see gotcha 10 | off |
 | `--style NAMES` | append proven prompt guide(s), comma-separated — `--list-styles` | — |
 | `--format NAME` | hardware format lock (rate + bit depth + channels) — `--list-formats` | `none` |
 | `--bits N` | WAV bit depth: 8 / 16 / 24 | `16` |
 | `--batch "a,b,c"` | round-robin subjects, one of each per pass, each into its own folder | — |
-| `--fast` | 16 steps instead of 50: ~1.6× faster, rougher | off |
+| `--fast` | fewer steps: faster, rougher | off |
 | `--seed N` | lock / repeat a result | random |
-| `--no-trim` | keep the model's leading/trailing silence | off |
+| `--no-trim` | keep the model's leading/trailing silence. **Not** for loops — use `--loop` | off |
 | `--max-seconds N` | hard length cap (0 = none). Truncates — trimming only removes *silence* | `0` |
-| `--normalize-db N` | peak level after generation | `-1.0` |
-| `--fade-ms N` | de-click fade on both ends | `5` |
+| `--normalize-db N` | peak ceiling after generation | `-1.0` |
+| `--lufs N` | EBU R128 loudness ceiling (`off` to disable) | `-16` |
+| `--true-peak N` | true-peak ceiling in dBTP | `-1.0` |
+| `--fade-ms N` | de-click fade on both ends (`--loop` forces this to 0) | `5` |
 | `--ogg` | compress the result to OGG Vorbis (~25× smaller). **Optional, off by default** | off |
-| `--ogg-quality N` | OGG quality 0–10 | `5` |
+| `--ogg-quality N` | OGG quality 0–10 | `8` |
 | `--flac` / `--mp3` / `--opus` | save compressed instead of WAV | WAV |
+| `--loop` | crossfade the tail over the head so the track loops seamlessly | off |
+| `--loop-crossfade N` | crossfade length in seconds for `--loop` | `2.0` |
 | `--server NAME[,...]` | remote ComfyUI; comma-list = render farm | local |
 
 The seed is in every filename, so to make a full-quality version of a fast draft
@@ -110,6 +154,86 @@ you liked, just re-run that seed:
 soundmon "a laser blast" --fast          # prints e.g. seed=12345
 soundmon "a laser blast" --seed 12345    # same blast, full quality
 ```
+
+### Stable Audio 3 (the default engine)
+
+SA3 replaced Stable Audio Open as the default for both SFX and music. It is
+full-band — measured cutoff at Nyquist (22.1 kHz) on raw WAV output, versus
+ACE-Step's hard 16 kHz VAE ceiling — and it is markedly better at music.
+
+**It only works run the way it was trained.** ComfyUI's official SA3 workflow is
+not a suggestion; every parameter below was verified by ear, and every wrong
+value produced unusable audio rather than merely worse audio:
+
+| Setting | Value | What the wrong value sounds like |
+|---|---|---|
+| precision | **fp32** (`--force-fp32`) | buzzing / radio static |
+| checkpoint | **medium** | scrambled, "record scratching" |
+| sampler | **lcm** | noise |
+| scheduler | **simple** | — |
+| steps | **8** | 50 steps gives clacking and popping |
+| cfg | **1.0** | 7.0 gives noise |
+| prompt | **Qwen-rewritten** | valid audio, poor musical content |
+
+soundmon applies all of these automatically when `--engine sa3` is active, which
+it is by default. The one you must supply yourself is `--force-fp32` on the
+ComfyUI server, because that is a server-launch flag, not a graph parameter.
+
+**The rewrite stage.** Your description goes to Qwen 3.5 first, under one of four
+system prompts (Music / Instrument / SFX / One-shot, verbatim from the official
+workflow, in `sa3_reprompt.json`), and only the rewritten text reaches the audio
+model. `--no-reprompt` skips it. Skipping is defensible in exactly one case:
+you are batching and have pre-computed the rewrites yourself, so the LLM does
+not have to be swapped in and out of VRAM per job.
+
+> **Why you would pre-compute.** On an 8 GB card, SA3 medium in fp32 (~8.6 GB)
+> and Qwen (~4.5 GB) do not co-reside, so ComfyUI evicts and reloads a model on
+> *every* job — measured 75.6 s per asset, nearly all of it moving weights across
+> PCIe. Rewriting a whole batch first, then generating with `--no-reprompt`,
+> turns hundreds of model swaps into two model loads. Same output, ~20× faster.
+
+### Seamless loops (`--loop`)
+
+Music that plays continuously has to survive its last sample running into its
+first, and generated music does not — for a reason that has nothing to do with
+this tool. **The model composes an ending.** Asked for 60 seconds it writes a
+60-second *piece of music*, with a decay, because that is what its training data
+does. Measured on raw output, the final two seconds fall ~40 dB.
+
+```bash
+soundmon "brooding dungeon bed" --music --seconds 60 --loop
+```
+
+`--loop` crossfades the track's tail back over its head, so the seam is
+contiguous **by construction** rather than by luck:
+
+```
+    O[i]   = S[i]                            for i in [X, T)
+    O[0:X] = S[0:X]·fade_in + S[T:L]·fade_out
+```
+
+Play `O[T-1]` into `O[0]` and you get `S[T-1]` into `S[T]` — adjacent samples of
+the original take. The composed ending is still there; it now sits underneath
+the opening instead of on top of a hard cut. Measured on a real 39 s track:
+
+| | tail vs body |
+|---|---|
+| before | **−39.4 dB** |
+| after `--loop` | **+0.7 dB** |
+
+Costs `--loop-crossfade` seconds of length (default 2.0), so a 60 s render
+becomes a 58 s loop — ask for the longer number if the exact duration matters.
+
+> **The intuitive fix is the wrong one, and it is worse than doing nothing.**
+> `--no-trim --fade-ms 0` looks right — stop the post-processing from touching
+> the endpoints — and it makes the seam *deeper*, because silence-trimming was
+> quietly eating most of the composed fade-out. Measured across one pack, same
+> models, same prompts: **−30.4 dB tail with trim on, −66.6 dB with it off.**
+> `--loop` therefore forces `trim` on and `fade_ms` to 0 itself; you cannot
+> misconfigure it from the outside.
+
+Leave `--lufs` and `--normalize-db` on. They scale the whole file uniformly and
+so cannot introduce a seam.
 
 ### Style guides (`--style`)
 
@@ -128,10 +252,9 @@ the model drifting into **music** or **speech**.
 
 ### Music (`--music`)
 
-Yes, within limits. Stable Audio Open makes **musical elements** — loops, beds,
-stings, riffs, drum grooves — but **not full songs, and no vocals**. Stability
-trained and describes it for "short samples, sound effects and production
-elements"; asking for a finished track gets you a 47-second sketch that wanders.
+Yes — and with Stable Audio 3 this got a lot better. `--music` makes **loops,
+beds, stings, riffs, drum grooves and full instrumental cues**. What it does not
+do is **sung vocals**; that's `--song` and a different engine.
 
 ```bash
 soundmon "a lo-fi hip hop piano loop" --music --seconds 12
@@ -359,6 +482,10 @@ Per-platform notes from provisioning a real mixed fleet:
 | **WSL2** | The distro **shuts down when idle**, which takes sshd *and* ComfyUI with it — the box still pings (Windows is up) while every WSL port reads `filtered`. Wake it with `wsl` in PowerShell, then `sudo service ssh start`. |
 | **Linux** | `loginctl enable-linger "$USER"` once, or systemd kills tmux on logout. |
 
+> ⚠ **Farm boxes need `--force-fp32` too.** A box running ComfyUI without it
+> returns buzzing static for every SA3 job — and it returns it *quickly*, so
+> dynamic dispatch will happily route most of the batch to the one broken box.
+
 > ⚠ **Don't `pkill -f "…main.py"` over SSH** — the pattern matches the very shell
 > running it, so the command kills itself before it can restart anything. Get the
 > PID from `ps`/`pgrep` and `kill` that, or just let `bin/soundmon` auto-start.
@@ -368,12 +495,21 @@ Per-platform notes from provisioning a real mixed fleet:
 ## How it works
 
 ```
-description ──► ComfyUI API
-                 CheckpointLoaderSimple (Stable Audio Open) ─┐
-                 CLIPLoader (T5, type=stable_audio) ─► CLIPTextEncode ×2
-                   └─ ConditioningStableAudio ─► KSampler ─► VAEDecodeAudio
-                        └─► RetroSFX ─► SaveSFX (WAV)
+description
+   └─► CLIPLoader (Qwen 3.5) ─► TextGenerate  ← the rewrite stage
+         └─► rewritten prompt
+               └─► ComfyUI API
+                    CheckpointLoaderSimple (Stable Audio 3 medium) ─┐
+                    CLIPLoader (T5Gemma) ─► CLIPTextEncode ×2       │
+                      └─ ConditioningStableAudio ─► KSampler ───────┘
+                           (lcm / simple / 8 steps / cfg 1.0, fp32)
+                           └─► VAEDecodeAudio ─► RetroSFX ─► SaveSFX (WAV)
 ```
+
+Every engine lands its AUDIO on the **same graph node (`"10"`)**, so the tail —
+`RetroSFX` then `SaveSFX` — is shared verbatim by SFX, music and songs. Adding a
+fourth engine means writing a node-builder that ends at `"10"`; nothing
+downstream changes.
 
 The custom **`RetroSFX`** node is the finishing pass that makes output an actual
 asset, exactly as `PixelArtPalette` did for pixelmon:
@@ -436,22 +572,67 @@ These cost real time; they're why the setup looks the way it does.
 6. **Negative prompts matter more here than in images.** Without pushing *music,
    melody, speech, voice* into the negative, an SFX request drifts into a little
    musical phrase surprisingly often.
+7. **fp16 does not merely degrade audio diffusion — it destroys it.** ComfyUI
+   picks fp16 by default and `StableAudio3` declares no
+   `supported_inference_dtypes` to say otherwise, so the sane-looking default is
+   the broken one. Output is buzzing static, not slightly-worse audio. **This is
+   the single highest-value line in this file:** `--force-fp32`.
+8. **A checkpoint with no published workflow is a research project.** The
+   `small_music` / `small_sfx` specialists look like the obvious pick — smaller,
+   purpose-trained — and both produced scrambled output at every setting tried.
+   Only `medium` has an official ComfyUI workflow, and only `medium` worked.
+9. **More steps is not more quality.** SA3 medium wants **8** steps at **cfg 1.0**
+   with the **lcm** sampler. At 50/cfg7 it produces noise; at 50 steps on the
+   correct sampler it produces audible clacking and popping. Diffusion intuition
+   carried over from images ("50 steps is the safe default") is actively wrong
+   here.
+10. **Do not drop stages of a published pipeline and expect the published
+    result.** The Qwen rewrite looked like optional prompt-polish, so it got
+    deferred. With it, output was described as "stunning"; without it, "audio
+    quality identical, musical quality lower". The pipeline is the product.
+11. **Every automated check can pass while the audio is garbage.** Duration,
+    peak, LUFS, true-peak and readability were all green across **1,122 files**
+    that sounded, per the person who could actually hear them, like "trash".
+    Automated audio QA is a smoke test for *plumbing*, not a judgement of sound.
+    `tools/spectral-check.py` narrows the gap — it catches missing high end —
+    but it cannot tell you a track is musically incoherent. **Listen to the
+    output, or have someone who can.**
+12. **One-shot defaults silently break loops.** `trim_silence` plus a de-click
+    fade is exactly right for a door slam and exactly wrong for a track that
+    plays for an hour; it leaves a 45–50 dB hole at the seam. Loops need
+    `--no-trim --fade-ms 0`. If your asset list distinguishes loops from
+    one-shots, key off *that* rather than a global default.
+13. **A fast-failing farm box eats the entire queue.** With dynamic dispatch,
+    work goes to whichever box is free — and a box that fails in two seconds
+    becomes free far more often than one that succeeds in ninety. One broken
+    machine took **30 of 46 jobs** before anything noticed. Dispatch needs a
+    circuit-breaker: drop a box after N consecutive failures and requeue its
+    work.
 
 ---
 
 ## Performance
 
-Measured on an **AMD RX 6600** (RDNA2, 8 GB, ROCm, `--lowvram`), 4-second clips:
+Audio is dramatically cheaper than SDXL — a 4-second latent is far smaller than
+a 1024×1024 image, and SA3 needs only 8 steps. Generation is cheap enough that
+the intended workflow is *make 8 and keep one*, which is exactly what the cloud
+tools charge you per-generation for.
 
-| Mode | steps | per clip |
+**What actually costs time is model swapping, not sampling.** On an 8 GB card,
+SA3 medium in fp32 (~8.6 GB) and the Qwen rewriter (~4.5 GB) cannot co-reside,
+so a naive run pays a full model reload per asset:
+
+| Approach | per asset | 336 assets |
 |---|---|---|
-| default | 50 | ~6.4 s |
-| `--fast` | 16 | ~4 s |
+| inline rewrite, 8 GB card | ~75.6 s | ~7 hours |
+| pre-computed rewrites, then `--no-reprompt` | ~4 s | ~1 hour |
 
-Audio is dramatically cheaper than SDXL — a 4-second mono-ish latent is far
-smaller than a 1024×1024 image. Generation is cheap enough that the intended
-workflow is *make 8 and keep one*, which is exactly what the cloud tools charge
-you per-generation for.
+The fix is phase separation: rewrite every prompt in one pass while Qwen stays
+resident, cache the results, then generate audio with the LLM out of the picture.
+On a card that fits both models at once this doesn't arise.
+
+For reference, the legacy `--engine sao` path on an **AMD RX 6600** (RDNA2, 8 GB,
+ROCm, `--lowvram`) ran 4-second clips at ~6.4 s (50 steps) or ~4 s (`--fast`).
 
 ---
 
@@ -460,26 +641,51 @@ you per-generation for.
 ```
 soundmon/
 ├── README.md
+├── AGENTS.md                  orientation for coding agents working on this repo
 ├── install.sh                 links files; reuses pixelmon's ComfyUI if present
-├── download-models.sh         fetch Stable Audio Open 1.0 + T5 (ungated mirror)
+├── download-models.sh         fetch models: --sa3 (default engine), --song, or legacy
 ├── soundmon.py                the CLI brains (talks to ComfyUI's API)
 ├── narrate.py                 --narrate: Kokoro TTS, in-process on CPU, no ComfyUI
 ├── record.py                  --record: the terminal recording booth (mic → pack)
 ├── sounds.json                --style guide snippets (edit / add your own)
+├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI
 ├── servers.example.json       template for --server aliases (copy to servers.json)
 ├── bin/soundmon               wrapper: ensures the server is up, then runs soundmon.py
+├── tools/
+│   └── spectral-check.py      measure spectral cutoff — catches hollow output
 └── custom_nodes/
     └── retro_sfx/             the finishing node (trim→format→fade→normalize) + WAV saver
         └── nodes.py           FORMATS registry — add your own hardware formats here
 ```
+
+### Checking output (`tools/spectral-check.py`)
+
+soundmon's built-in checks verify duration, level and readability — none of which
+notice a spectrally hollow file. This measures where the spectrum falls 40 dB
+below the 500–2000 Hz reference band:
+
+```bash
+tools/spectral-check.py --min 20 render.wav              # WAV: expect Nyquist
+tools/spectral-check.py --min 17 assets/music/*.ogg      # OGG: Vorbis rolls off
+```
+
+> **Compare like with like.** Vorbis imposes its own rolloff, so an OGG of
+> perfect source still reads ~17 kHz — that is the codec, not a defect. And a
+> low reading on a genuinely dark, bass-heavy track is *correct*; real DAW
+> masters measured here ranged 9.5–22.1 kHz. This tool tells you whether a
+> pipeline lost content, not whether a track is good.
 
 ---
 
 ## Credits & licenses
 
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — the engine (GPL-3.0)
+- [Stable Audio 3](https://huggingface.co/Comfy-Org/stable-audio-3) — Stability AI, the default engine for SFX and music
 - [Stable Audio Open 1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0) — Stability AI (Stability AI Community License). Trained on Freesound + Free Music Archive.
-- [T5](https://huggingface.co/google-t5/t5-base) — Google, the text encoder
+- [ACE-Step 1.5](https://huggingface.co/Comfy-Org/ace_step_1.5_ComfyUI_files) — full songs with sung vocals (`--song`)
+- [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) — 82 M TTS, Apache-2.0 (`--narrate`)
+- [Qwen 3.5](https://huggingface.co/Comfy-Org/Qwen3.5) — the SA3 prompt rewriter
+- [T5](https://huggingface.co/google-t5/t5-base) / T5Gemma — the text encoders
 
 The code in this repo (the CLI, wrapper, installer, and custom node) is released
 under the MIT License.

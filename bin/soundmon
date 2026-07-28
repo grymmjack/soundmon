@@ -40,7 +40,15 @@ fi
 
 if [ "$needs_server" = 1 ] && ! up; then
     echo "[soundmon] ComfyUI server isn't running — starting it (first run ~15s)..."
-    nohup "$HOME/launch-comfyui.sh" >"$COMFY/server.log" 2>&1 &
+    # --force-fp32 is REQUIRED for Stable Audio 3. ComfyUI defaults audio models
+    # to fp16 (StableAudio3 declares no supported_inference_dtypes), and fp16
+    # inference produces noise and buzzing instead of audio. Verified by ear.
+    #
+    # It is NOT free: fp32 roughly doubles VRAM and halves throughput, which
+    # matters for pixelmon's SDXL on the same shared ComfyUI. So it is applied
+    # only when soundmon starts the server itself. If ComfyUI is already running
+    # for pixelmon, restart it with --force-fp32 before generating audio.
+    nohup "$HOME/launch-comfyui.sh" --force-fp32 >"$COMFY/server.log" 2>&1 &
     for _ in $(seq 1 90); do
         up && break
         sleep 1

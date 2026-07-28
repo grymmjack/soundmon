@@ -6,15 +6,20 @@ in [README.md](README.md); this file is the stuff that is expensive to rediscove
 ## What this is
 
 A CLI that turns a text description into audio, running entirely on local
-hardware. **Three engines behind one command**, chosen by flag:
+hardware. **Five engines behind one command**, chosen by flag:
 
 | Mode | Engine | Runs on | Output |
 |---|---|---|---|
-| default | Stable Audio Open 1.0 | ComfyUI / GPU | sound effects |
-| `--music` | Stable Audio Open 1.0 | ComfyUI / GPU | loops, beds, stings |
+| default | **Stable Audio 3 medium** | ComfyUI / GPU | sound effects |
+| `--music` | **Stable Audio 3 medium** | ComfyUI / GPU | loops, beds, stings |
+| `--engine sao` | Stable Audio Open 1.0 | ComfyUI / GPU | legacy fallback |
 | `--song` | ACE-Step 1.5 | ComfyUI / GPU | full songs, sung vocals |
 | `--narrate` | Kokoro | **CPU, in-process** | spoken narration |
 | `--record` | **a human + a microphone** | CPU, in-process | spoken narration |
+
+> **Before you change anything about the SA3 path, read gotchas 11–14.** Four
+> independent settings each turn its output into unusable noise, and none of them
+> fail loudly — you get a valid WAV of the correct length containing static.
 
 Sibling project to **pixelmon** (`~/pixelmon`, github.com/grymmjack/pixelmon),
 which does the same thing for pixel-art sprites. soundmon deliberately mirrors
@@ -26,12 +31,14 @@ its architecture and reuses its ComfyUI install.
 to `/prompt`, polls `/history/<id>`, and fetches results from `/view`. That is
 the whole reason the render farm is ~150 lines and vendor-agnostic.
 
-**The engines share a tail.** Both GPU pipelines land their finished `AUDIO` on
+**The engines share a tail.** Every GPU pipeline lands its finished `AUDIO` on
 graph node `"10"`; `build_graph()` then attaches `RetroSFX` as `"11"` and a save
 node as `"12"`. Adding a fourth GPU engine means writing a `_yourengine_nodes()`
 that also ends at `"10"` — do not rewrite the tail.
 
 ```
+_reprompt_nodes()  ──► rewritten text ──┐   (nodes "20"/"21", SA3 only)
+                                        ▼
 _sfx_nodes()  ─┐
                ├─► node "10" (AUDIO) ─► "11" RetroSFX ─► "12" Save*
 _song_nodes() ─┘
@@ -39,6 +46,17 @@ _song_nodes() ─┘
 
 This is the same trick pixelmon's `--animate` uses: swap the pipeline, keep the
 CLI. Follow it.
+
+**`_reprompt_nodes()` is a stage, not a decoration.** SA3's official workflow
+runs Qwen 3.5 over the description first, under one of four system prompts
+(`sa3_reprompt.json`, verbatim from ComfyUI). It is on by default; `--no-reprompt`
+exists for batch runs that pre-compute rewrites to avoid VRAM thrash, not as a
+"skip the slow part" convenience.
+
+> **`TextGenerate`'s nested sampling params are dot-namespaced.** They go in flat
+> as `"sampling_mode.temperature"`, `"sampling_mode.top_k"`, … alongside
+> `"sampling_mode": "on"` — *not* as a nested dict. A nested dict is accepted by
+> the API and then ignored, so you get default sampling and no error.
 
 **`--narrate` is the deliberate exception** — it never touches ComfyUI. SFX and
 songs are diffusion problems where ComfyUI earns its keep (model loading, VRAM,
@@ -148,6 +166,52 @@ per OS, and each one has a different way to be told to *stop*:
     did nothing instead of raising. The parse now sits above both hand-offs.
     Any future per-engine option has the same trap: a `getattr` default will
     hide it.
+11. **fp16 destroys audio diffusion — it does not merely degrade it.** ComfyUI
+    defaults audio models to fp16 and `StableAudio3` declares no
+    `supported_inference_dtypes` to override that, so the *default* path is the
+    broken one. Output is buzzing static. The server must run `--force-fp32`.
+    `bin/soundmon` passes it when it starts the server itself, but a ComfyUI
+    already up for pixelmon will not have it — **check before blaming the graph.**
+12. **Only `stable_audio_3_medium` works.** The `small_music` / `small_sfx`
+    specialists look like the obvious choice and produce scrambled output at
+    every setting tried. They have no published ComfyUI workflow; `medium` does.
+    Treat "no official workflow" as "unsupported", not "undocumented".
+13. **SA3 medium wants lcm / simple / 8 steps / cfg 1.0.** Not euler, not 50
+    steps, not cfg 5–7. At 50/cfg7 it emits noise; at 50 steps on the right
+    sampler it emits audible clacking. Image-diffusion intuition ("more steps is
+    safer") is actively wrong here. `soundmon.py` rewrites these defaults when
+    `--engine sa3` is active — do not "restore" them for consistency.
+14. **Do not drop stages from a published pipeline.** The Qwen rewrite was
+    deferred as optional prompt-polish. Result: "audio quality identical,
+    musical quality lower." With it: "stunning." If a reference workflow has a
+    stage you do not understand, that is a reason to keep it, not to cut it.
+15. **Loops are broken by the MODEL, not by post-processing — and the obvious
+    fix makes it worse.** A track that plays continuously has a hole at the
+    seam because the model *composes an ending*: a 60 s request returns a 60 s
+    piece of music with a decay. The instinct is to stop touching the endpoints
+    (`--no-trim --fade-ms 0`). Measured, same pack, same models, same prompts:
+
+        trim on,  5 ms fade  ->  tail -30.4 dB vs body
+        trim off, no fade    ->  tail -66.6 dB vs body
+
+    Trimming was *helping* — near-silence trimming eats most of the composed
+    fade. It cannot finish the job, because a decay is only "silence" at the
+    very end. **No endpoint policy fixes this.** Use `--loop`, which crossfades
+    the tail over the head so the seam is contiguous by construction (verified:
+    tail -39.4 dB -> +0.7 dB). `--loop` forces `trim` on and `fade_ms` to 0
+    itself, so the combination cannot be got wrong from outside.
+
+    The meta-lesson is the expensive one: **the first plausible cause was
+    asserted and acted on without measuring.** The measurement took two minutes
+    and reversed the conclusion. Measure first — especially when you cannot hear
+    the result.
+
+
+16. **A fast-failing farm box eats the queue.** Dynamic dispatch gives work to
+    whoever is free, and a box that fails in 2 s becomes free far more often than
+    one that succeeds in 90 s. One broken machine took **30 of 46 jobs**. Any
+    dispatcher needs a circuit-breaker: drop a box after N consecutive failures
+    and requeue its in-flight work.
 
 ## Environment gotchas
 
@@ -181,23 +245,55 @@ behind the slowest card.
 models but not the 9.3 GB song model is skipped with a message rather than
 failing jobs mid-batch. Extend `server_has_ckpt()` if you add a model.
 
+**Capability is not the only way a box is wrong.** A box with every model present
+but ComfyUI running *without* `--force-fp32` passes `server_has_ckpt()` and then
+returns static for every SA3 job — quickly, so dispatch sends it more work. There
+is no API surface that reports the server's dtype, so this cannot currently be
+checked; treat "one box's output sounds different" as a launch-flag question
+before a model question.
+
 Aliases live in `servers.json` (gitignored — real LAN IPs stay out of the repo);
 `servers.example.json` is the template.
 
 ## Working on this repo
 
-- **Models are not in git** (~15 GB). `./download-models.sh` fetches SFX models,
-  `--song` adds ACE-Step. It downloads to `.part` and renames on success, so an
-  interrupted transfer can never masquerade as a complete file.
+- **Models are not in git** (~29 GB across all engines). `./download-models.sh
+  --sa3` fetches the default engine + the Qwen rewriter, `--song` adds ACE-Step,
+  bare fetches the legacy Stable Audio Open set. It downloads to `.part` and
+  renames on success, so an interrupted transfer can never masquerade as a
+  complete file.
 - **`install.sh` symlinks** this repo into `~/ComfyUI` — the repo stays the
   source of truth. Editing `custom_nodes/retro_sfx/nodes.py` requires a
   **ComfyUI restart** to take effect, and on every farm box, or they will reject
   graphs using a new node input.
-- **No test suite.** Verify by generating and measuring: check duration, peak
-  dBFS, sample rate, and print an amplitude envelope. An envelope catches
-  "generated silence" and "generated noise instead of the thing" faster than
-  listening does. Semantic sanity is visible there too — footsteps show as
-  discrete spaced impacts, a drone as a flat bar.
+- **No test suite.** Verify by generating and measuring: duration, peak dBFS,
+  sample rate, LUFS, and an amplitude envelope. An envelope catches "generated
+  silence" fast, and some semantic sanity is visible — footsteps show as discrete
+  spaced impacts, a drone as a flat bar.
+
+- **⚠ Every one of those checks can pass on unusable audio.** This is the most
+  expensive lesson in the repo. **1,122 files** shipped green on duration, peak,
+  LUFS, true-peak and readability while sounding, to the person who could
+  actually hear them, like "trash" — buzzing, radio-scramble, garbled. The
+  envelope did *not* catch it: fp16 noise has a perfectly plausible envelope.
+
+  If you are an agent working here, **you cannot hear the output.** Every metric
+  in this repo is a proxy, and the four SA3 bugs above were each found by a human
+  listening, not by any check that existed. Practical consequences:
+
+  1. **Do not report audio as working because the checks passed.** Say what was
+     measured and that it has not been heard.
+  2. **Get output auditioned early and in small batches.** A 6-pack, 1,100-file
+     run that turns out to be noise costs hours; three files cost minutes.
+  3. **`tools/spectral-check.py` closes part of the gap** — it catches a missing
+     top end, which is what "spectrally processed, frequencies just gone" reads
+     as. It cannot tell you a track is musically incoherent. Compare like with
+     like: OGG always reads ~17 kHz because of Vorbis's rolloff, and a genuinely
+     dark track legitimately reads low.
+  4. **When a cause is uncertain, run the decisive test, not the cheap one.**
+     The four SA3 bugs were untangled by an A/B matrix (dtype × checkpoint ×
+     sampler × prompt) that should have been run first — asserting a cause and
+     testing it cheaply just produced several confident wrong answers in a row.
 - **Style guides live in `sounds.json`**, formats in `custom_nodes/retro_sfx/nodes.py`
   (`FORMATS`), voices in `narrate.py` (`VOICES`). The CLI reads all three at
   runtime, so `--list-styles` / `--list-formats` / `--list-voices` never drift
