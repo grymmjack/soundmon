@@ -784,10 +784,11 @@ def main():
                    help="which model makes SFX and --music: 'sa3' = Stable Audio 3 "
                         "(default; full-band to 22kHz, ~20x faster), 'sao' = Stable Audio "
                         "Open 1.0 (the 2024 model; its VAE hard-cuts at 16kHz)")
-    p.add_argument("--sa3-size", dest="sa3_size", default="small",
+    p.add_argument("--sa3-size", dest="sa3_size", default="medium",
                    choices=["small", "medium"],
-                   help="Stable Audio 3 variant: 'small' picks the purpose-trained "
-                        "sfx/music specialist, 'medium' the 8.6GB generalist. default small")
+                   help="Stable Audio 3 variant. 'medium' (default) is the only one with an "
+                        "official ComfyUI workflow and the only one verified to sound right; "
+                        "the 'small' sfx/music specialists produced scrambled audio here.")
     p.add_argument("--base", default=None,
                    help="checkpoint override (else chosen by --engine)")
     p.add_argument("--text-encoder", dest="text_encoder", default="t5_base.safetensors",
@@ -857,21 +858,24 @@ def main():
     if not a.song:
         if a.engine == "sa3":
             if a.sa3_size == "medium":
-                _ck = "stable_audio_3_medium.safetensors"
+                _ck = "stable_audio_3_medium.safetensors"   # covers sfx and music
             else:
-                # The specialists genuinely differ: one is trained on music, the
-                # other on sound effects. Pick by what is being made.
                 _ck = ("stable_audio_3_small_music.safetensors" if a.music
                        else "stable_audio_3_small_sfx.safetensors")
             a.base = a.base or _ck
             if a.text_encoder == "t5_base.safetensors":
                 a.text_encoder = "t5gemma_b_b_ul2.safetensors"
+            # ComfyUI's official Stable Audio 3 workflow: lcm / simple / 8 steps
+            # / cfg 1. Verified by ear — 50 steps at cfg 7 produces clacking and
+            # popping, and euler produces noise. These are not tunables.
             if a.sampler == "dpmpp_3m_sde_gpu":
-                a.sampler = "euler"
+                a.sampler = "lcm"
             if a.scheduler == "exponential":
                 a.scheduler = "simple"
             if a.steps is None:
-                a.steps = 16 if a.fast else 50
+                a.steps = 8
+            if a.cfg == 5.0:
+                a.cfg = 1.0
         else:
             a.base = a.base or "stable-audio-open-1.0.safetensors"
 

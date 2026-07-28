@@ -88,5 +88,13 @@ if [ "${1:-}" = "--sa3" ] || [ "${SA3_MODEL:-0}" = 1 ]; then
     get "$SA3/checkpoints/stable_audio_3_medium.safetensors"      "$CKPT/stable_audio_3_medium.safetensors"
     get "$SA3/checkpoints/stable_audio_3_small_music.safetensors" "$CKPT/stable_audio_3_small_music.safetensors"
     get "$SA3/checkpoints/stable_audio_3_small_sfx.safetensors"   "$CKPT/stable_audio_3_small_sfx.safetensors"
-    echo "✅ Stable Audio 3 ready (medium + music/sfx specialists)."
+    get "$SA3/checkpoints/stable_audio_3_medium_base.safetensors"  "$CKPT/stable_audio_3_medium_base.safetensors"
+    # The Qwen REPROMPT encoder. Not optional: ComfyUI's official SA3 medium
+    # workflow runs an LLM over your description first, with distinct system
+    # prompts for Music / Instrument / SFX / One-shot, and only the rewritten
+    # text reaches the audio model. Skipping it and feeding raw prompts is
+    # exactly what produced a batch of unusable audio.
+    get "https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_2b_bf16.safetensors" \
+        "$TENC/qwen3.5_2b_bf16.safetensors"
+    echo "✅ Stable Audio 3 ready (medium, medium_base, specialists, qwen reprompt)."
 fi
