@@ -9,10 +9,17 @@ URL="http://127.0.0.1:8188"
 
 up() { curl -fsS "$URL/system_stats" >/dev/null 2>&1; }
 
-# Help / listings / no args don't touch the GPU — never start the server.
+# Help, listings and the CPU-only engines don't touch the GPU — never start the
+# server. --narrate runs Kokoro in-process and --record is a microphone and a
+# terminal; neither has anything for ComfyUI to do, so waiting up to 90s for it
+# (or failing outright on a box that has no ComfyUI at all) is pure obstruction.
 needs_server=1
 case " $* " in
-    *" -h "*|*" --help "*|*" --list-formats "*|*" --list-styles "*) needs_server=0 ;;
+    *" -h "*|*" --help "* \
+    |*" --list-formats "*|*" --list-styles "*|*" --list-keys "* \
+    |*" --list-voices "*|*" --list-devices "* \
+    |*" --narrate "*|*" --narrate-file "* \
+    |*" --record "*|*" --record-file "*) needs_server=0 ;;
 esac
 [ "$#" -eq 0 ] && needs_server=0
 

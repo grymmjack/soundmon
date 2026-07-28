@@ -1,15 +1,18 @@
-# soundmon — text-to-audio generator: SFX, music loops, and full songs
+# soundmon — text-to-audio generator: SFX, music loops, songs, and narration
 
 Describe audio, get a WAV — with **one command**, entirely on your own machines.
-Two engines behind one CLI: **Stable Audio Open 1.0** for sound effects and
-musical elements, **ACE-Step 1.5** for full songs with sung vocals. Shares
-pixelmon's ComfyUI engine, render farm, and CLI conventions.
+Behind one CLI: **Stable Audio Open 1.0** for sound effects and musical elements,
+**ACE-Step 1.5** for full songs with sung vocals, **Kokoro** for spoken
+narration — and a recording booth for when you would rather narrate it yourself.
+Shares pixelmon's ComfyUI engine, render farm, and CLI conventions.
 
 ```bash
 soundmon "a heavy wooden door creaking open"              # a sound effect
 soundmon "a lo-fi piano loop" --music --seconds 12        # a musical loop
 soundmon "dark fantasy, choir" --song --bpm 90 \
          --key "D minor" --lyrics-file ballad.txt         # a full song, sung
+soundmon --narrate-file lines.txt --voice bm_george       # a spoken script
+soundmon --record-file lines.txt                          # ...or read it yourself
 soundmon --batch "door,glass,fire" -n 16 --server rtx,titan,local,mac
 ```
 
@@ -222,6 +225,74 @@ string tables work directly and the key becomes the filename.
 > via `HSA_OVERRIDE_GFX_VERSION`) Kokoro dies with `HIP error: invalid device
 > function`. At 82 M params there was nothing to win on the GPU anyway.
 
+### Recording it yourself (`--record`)
+
+Sometimes you want *your* voice, not a model's. `--record` is a recording booth
+in the terminal: it reads **the same `key | text` manifest `--narrate` does**,
+shows you a line, records you reading it, and writes the file under the same
+name a generated line would have used.
+
+```bash
+soundmon --list-devices                              # which mics can I see?
+soundmon --record-file lines.txt --ogg \
+         --output-to ~/game/assets/narration/me --create-dirs
+```
+
+```
+soundmon record  ·  line 12/71  ·  3 done  ·  ~/game/assets/narration/me
+────────────────────────────────────────────────────────────────────────
+  key  intro.descent
+
+  Beneath the hills, the old dungeon waits. Nine levels down, and every
+  one of them hungry. Others have gone before you. None of them came
+  back up. Take your steel, take your nerve, and begin the descent.
+
+  takes  1  ▸2
+  take 2  14.28s  peak  -6.2 dBFS
+  ▁▁▃▇█▇▅▃▂▁▁▂▅▇█▆▃▁▁▂▆█▇▄▂▁▁▃▇█▆▃▂▁▁▂▅▇█▅▃▁▁▁▂▄▇█▆▄▂▁▁
+────────────────────────────────────────────────────────────────────────
+  R record   P play   A cycle take   ENTER accept + next   S skip
+  B back     D delete take   Q quit (progress is on disk — just rerun)
+```
+
+| Key | What |
+|---|---|
+| `R` | start recording (a live VU meter runs while you read) |
+| `SPACE` | stop — `ESC` instead throws the take away |
+| `P` | play the selected take back |
+| `A` | cycle through takes of this line |
+| `D` | delete the selected take |
+| `ENTER` | master the selected take, write the pack file, move to the next line |
+| `S` / `B` | skip forward / step back |
+| `Q` | quit — **progress lives on disk, so rerunning resumes** |
+
+| Flag | What | Default |
+|---|---|---|
+| `--record-file` | record every `key \| text` row of a file | — |
+| `--device` | which microphone — see `--list-devices` | system default |
+| `--record-rate` | capture sample rate | 48000 |
+| `--threshold-db` | silence floor used to trim each take | -45 |
+| `--fade-ms` | de-click fade on both ends | 5 |
+
+**Takes are kept, and the pick becomes the pack file.** Every `R` writes
+`takes/<key>.takeNN.wav`; `ENTER` masters whichever take is selected out to
+`<key>.ogg`. Record a line three times, `A` between them, `P` to compare, then
+accept the good one. Sweeping the rejects afterwards is one `rm -r takes/`.
+
+**Each accepted take goes through the same mastering the generated packs get** —
+leading and trailing silence trimmed (that's the gap between hitting record and
+actually speaking), a 5 ms de-click fade, peak normalize, then the `--lufs`
+loudness ceiling and `--ogg` compression. That is what makes a hand-voiced pack
+and a generated one interchangeable *per line*: record the ten lines you care
+about most, generate the other sixty, and nothing audibly switches between them.
+
+> **Recording works on Windows, macOS and Linux**, but each needs a different
+> capture backend — DirectShow, AVFoundation and PipeWire respectively. Windows
+> and macOS need `ffmpeg` on PATH; Linux uses `pw-record` (or falls back to
+> ffmpeg/ALSA/`arecord`). Nothing else is required — in particular `--record`
+> does **not** need the Kokoro TTS stack installed, so the machine with your
+> good microphone does not have to be the machine with the GPU.
+
 ### Compressing output (`--ogg`)
 
 WAV is the default because it is lossless and every tool reads it. When size
@@ -392,6 +463,8 @@ soundmon/
 ├── install.sh                 links files; reuses pixelmon's ComfyUI if present
 ├── download-models.sh         fetch Stable Audio Open 1.0 + T5 (ungated mirror)
 ├── soundmon.py                the CLI brains (talks to ComfyUI's API)
+├── narrate.py                 --narrate: Kokoro TTS, in-process on CPU, no ComfyUI
+├── record.py                  --record: the terminal recording booth (mic → pack)
 ├── sounds.json                --style guide snippets (edit / add your own)
 ├── servers.example.json       template for --server aliases (copy to servers.json)
 ├── bin/soundmon               wrapper: ensures the server is up, then runs soundmon.py
