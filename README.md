@@ -134,15 +134,17 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | `--batch "a,b,c"` | round-robin subjects, one of each per pass, each into its own folder | — |
 | `--fast` | fewer steps: faster, rougher | off |
 | `--seed N` | lock / repeat a result | random |
-| `--no-trim` | keep the model's leading/trailing silence — **required for loops** | off |
+| `--no-trim` | keep the model's leading/trailing silence. **Not** for loops — use `--loop` | off |
 | `--max-seconds N` | hard length cap (0 = none). Truncates — trimming only removes *silence* | `0` |
 | `--normalize-db N` | peak ceiling after generation | `-1.0` |
 | `--lufs N` | EBU R128 loudness ceiling (`off` to disable) | `-16` |
 | `--true-peak N` | true-peak ceiling in dBTP | `-1.0` |
-| `--fade-ms N` | de-click fade on both ends — **use `0` for loops** | `5` |
+| `--fade-ms N` | de-click fade on both ends (`--loop` forces this to 0) | `5` |
 | `--ogg` | compress the result to OGG Vorbis (~25× smaller). **Optional, off by default** | off |
 | `--ogg-quality N` | OGG quality 0–10 | `8` |
 | `--flac` / `--mp3` / `--opus` | save compressed instead of WAV | WAV |
+| `--loop` | crossfade the tail over the head so the track loops seamlessly | off |
+| `--loop-crossfade N` | crossfade length in seconds for `--loop` | `2.0` |
 | `--server NAME[,...]` | remote ComfyUI; comma-list = render farm | local |
 
 The seed is in every filename, so to make a full-quality version of a fast draft
@@ -190,22 +192,48 @@ not have to be swapped in and out of VRAM per job.
 > PCIe. Rewriting a whole batch first, then generating with `--no-reprompt`,
 > turns hundreds of model swaps into two model loads. Same output, ~20× faster.
 
-### Seamless loops
+### Seamless loops (`--loop`)
 
-Music that plays continuously needs its endpoints left alone. soundmon's
-defaults are *one-shot* defaults — `trim_silence` removes trailing decay and
-`--fade-ms 5` ramps both ends — and on a looping track that produces an audible
-hole at every seam. Measured on a first pass here: tails sat **45–50 dB below
-the body** of the track.
+Music that plays continuously has to survive its last sample running into its
+first, and generated music does not — for a reason that has nothing to do with
+this tool. **The model composes an ending.** Asked for 60 seconds it writes a
+60-second *piece of music*, with a decay, because that is what its training data
+does. Measured on raw output, the final two seconds fall ~40 dB.
 
 ```bash
-soundmon "brooding dungeon bed, seamless loop" --music --seconds 45 \
-         --no-trim --fade-ms 0
+soundmon "brooding dungeon bed" --music --seconds 60 --loop
 ```
 
-Tell the model too — "seamless loop" in the description genuinely changes what
-it generates. Leave `--lufs` and `--normalize-db` on; they scale the whole file
-uniformly and so cannot introduce a seam.
+`--loop` crossfades the track's tail back over its head, so the seam is
+contiguous **by construction** rather than by luck:
+
+```
+    O[i]   = S[i]                            for i in [X, T)
+    O[0:X] = S[0:X]·fade_in + S[T:L]·fade_out
+```
+
+Play `O[T-1]` into `O[0]` and you get `S[T-1]` into `S[T]` — adjacent samples of
+the original take. The composed ending is still there; it now sits underneath
+the opening instead of on top of a hard cut. Measured on a real 39 s track:
+
+| | tail vs body |
+|---|---|
+| before | **−39.4 dB** |
+| after `--loop` | **+0.7 dB** |
+
+Costs `--loop-crossfade` seconds of length (default 2.0), so a 60 s render
+becomes a 58 s loop — ask for the longer number if the exact duration matters.
+
+> **The intuitive fix is the wrong one, and it is worse than doing nothing.**
+> `--no-trim --fade-ms 0` looks right — stop the post-processing from touching
+> the endpoints — and it makes the seam *deeper*, because silence-trimming was
+> quietly eating most of the composed fade-out. Measured across one pack, same
+> models, same prompts: **−30.4 dB tail with trim on, −66.6 dB with it off.**
+> `--loop` therefore forces `trim` on and `fade_ms` to 0 itself; you cannot
+> misconfigure it from the outside.
+
+Leave `--lufs` and `--normalize-db` on. They scale the whole file uniformly and
+so cannot introduce a seam.
 
 ### Style guides (`--style`)
 

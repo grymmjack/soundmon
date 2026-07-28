@@ -185,12 +185,28 @@ per OS, and each one has a different way to be told to *stop*:
     deferred as optional prompt-polish. Result: "audio quality identical,
     musical quality lower." With it: "stunning." If a reference workflow has a
     stage you do not understand, that is a reason to keep it, not to cut it.
-15. **Loop assets need `--no-trim --fade-ms 0`.** The defaults are one-shot
-    defaults: `trim_silence` eats the decay and a 5 ms fade ramps both ends,
-    which puts a 45–50 dB hole at every loop seam. Measured on real output —
-    `head −21.4 dB / tail −50.0 dB / body −3.3 dB`. If the caller's asset list
-    labels loops (the dungeon manifest does: `"30-60s loop"` vs `"3s one-shot"`),
-    key off that label rather than guessing or applying a global default.
+15. **Loops are broken by the MODEL, not by post-processing — and the obvious
+    fix makes it worse.** A track that plays continuously has a hole at the
+    seam because the model *composes an ending*: a 60 s request returns a 60 s
+    piece of music with a decay. The instinct is to stop touching the endpoints
+    (`--no-trim --fade-ms 0`). Measured, same pack, same models, same prompts:
+
+        trim on,  5 ms fade  ->  tail -30.4 dB vs body
+        trim off, no fade    ->  tail -66.6 dB vs body
+
+    Trimming was *helping* — near-silence trimming eats most of the composed
+    fade. It cannot finish the job, because a decay is only "silence" at the
+    very end. **No endpoint policy fixes this.** Use `--loop`, which crossfades
+    the tail over the head so the seam is contiguous by construction (verified:
+    tail -39.4 dB -> +0.7 dB). `--loop` forces `trim` on and `fade_ms` to 0
+    itself, so the combination cannot be got wrong from outside.
+
+    The meta-lesson is the expensive one: **the first plausible cause was
+    asserted and acted on without measuring.** The measurement took two minutes
+    and reversed the conclusion. Measure first — especially when you cannot hear
+    the result.
+
+
 16. **A fast-failing farm box eats the queue.** Dynamic dispatch gives work to
     whoever is free, and a box that fails in 2 s becomes free far more often than
     one that succeeds in 90 s. One broken machine took **30 of 46 jobs**. Any

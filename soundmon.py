@@ -152,6 +152,8 @@ def print_help():
         opt("--cfg N", "prompt adherence (higher = stricter)", "5.0"),
         opt("--fast", "16 steps: ~3x faster, rougher"),
         opt("--no-trim", "keep the model's leading/trailing silence"),
+        opt("--loop", "crossfade tail over head so the track loops seamlessly"),
+        opt("--loop-crossfade SEC", "crossfade length for --loop", "2.0"),
         opt("--normalize-db N", "peak level after generation", "-1.0"),
         opt("--fade-ms N", "de-click fade on both ends", "5"),
         opt("--list-formats", "show every hardware format"),
@@ -476,6 +478,88 @@ def _short(url):
     return url.split("//", 1)[-1]
 
 
+def loop_wrap(path, crossfade=2.0):
+    """Make a track loop seamlessly by mixing its own tail back over its head.
+
+    WHY THIS EXISTS, and why the obvious fix was the wrong one.
+
+    Music that plays continuously has to survive its last sample running into
+    its first. Generated music does not, for a reason that has nothing to do
+    with this tool: **the model composes an ending.** Asked for 60 seconds it
+    writes a 60-second piece of music, with a ritardando and a decay, because
+    that is what its training data does. Measured on raw output, the final two
+    seconds fall ~40 dB.
+
+    The tempting fix is to stop post-processing from touching the endpoints —
+    `--no-trim --fade-ms 0` — on the theory that trimming and de-click fades are
+    what flattened the tail. That was measured here and it is **backwards**:
+
+        tail level relative to body, souls pack, same models, same prompts
+          trim on,  5 ms fade   ->  -30.4 dB   (trim cuts into the model's decay)
+          trim off, no fade     ->  -66.6 dB   (the model's full decay survives)
+
+    Trimming *helped*, because near-silence trimming eats most of the composed
+    fade-out. It just cannot finish the job: a decay is only "silence" at the
+    very end, so trimming leaves the quiet part it never crossed the threshold
+    for. No endpoint policy fixes this, because the hole is musical content, not
+    processing damage.
+
+    So: construct the loop instead of hoping for one. Given source S of length
+    L and a crossfade of X, the output is T = L - X samples:
+
+        O[i]      = S[i]                              for i in [X, T)
+        O[0:X]    = S[0:X]*fade_in + S[T:L]*fade_out
+
+    The seam is then continuous *by construction*, not by luck. Play O[T-1] into
+    O[0] and you get S[T-1] into S[T] — adjacent samples of the original take.
+    The composed ending is still there; it now lands underneath the opening
+    instead of on top of a hard cut.
+
+    Equal-power (sin/cos) curves rather than linear: the two halves are
+    uncorrelated material, so linear curves lose ~3 dB in the middle of the
+    blend and you hear a dip pass by once per loop.
+
+    Costs X seconds of length — a 60 s render becomes a 58 s loop. Ask the model
+    for the longer number if the exact duration matters.
+
+    Returns (path, seconds_of_output) — or (path, None) if it declined to act.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+    except ImportError:
+        # Same treatment --narrate gets: the dependency is real but optional, so
+        # a box without it degrades to "not looped" rather than failing the run.
+        return path, None
+
+    try:
+        info = sf.info(path)
+        audio, sr = sf.read(path, always_2d=True)
+    except Exception:
+        return path, None
+
+    n = len(audio)
+    x = int(sr * crossfade)
+    # Refuse rather than mangle. Below 4x the crossfade there is not enough
+    # material left over for the loop to be anything but the crossfade itself.
+    if x < 1 or n < 4 * x:
+        return path, None
+
+    t = np.linspace(0.0, 1.0, x, endpoint=False, dtype=audio.dtype)[:, None]
+    out = audio[:n - x].copy()
+    out[:x] = audio[:x] * np.sin(t * np.pi / 2) + audio[n - x:] * np.cos(t * np.pi / 2)
+
+    tmp = os.path.splitext(path)[0] + ".loop.wav"
+    try:
+        sf.write(tmp, out, sr, subtype=info.subtype)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return path, None
+    return path, len(out) / sr
+
+
 def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
     """Enforce a loudness CEILING and a true-peak ceiling. Attenuate-only.
 
@@ -671,6 +755,11 @@ def run_farm(a, work):
             advanced = True
             dest_dir = d or os.path.join(OUTPUT, "soundmon")
             files = [fetch_audio(it, dest_dir, srv) for it in audio_outs(outs)]
+            # Before loudness: the wrap MIXES two signals, so it changes level.
+            # Anything that changes gain after normalizing invalidates it.
+            if a.loop:
+                for f in files:
+                    loop_wrap(f, a.loop_crossfade)
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             if a.ogg:
@@ -779,6 +868,16 @@ def main():
                         "riffs — the model does NOT do full songs or vocals.")
     p.add_argument("--negative", default=None,
                    help="what to avoid (defaults differ for SFX vs --music)")
+    p.add_argument("--loop", action="store_true",
+                   help="make the result loop seamlessly by crossfading its tail "
+                        "over its head. Costs --loop-crossfade seconds of length. "
+                        "For music that plays continuously — the model composes an "
+                        "ENDING, which no trim/fade setting can undo.")
+    p.add_argument("--loop-crossfade", dest="loop_crossfade", type=float, default=2.0,
+                   metavar="SEC",
+                   help="crossfade length for --loop (default: 2.0). Longer hides "
+                        "a bigger composed ending but blurs more of the opening; "
+                        "shorter keeps the opening crisp but can let the decay show.")
     p.add_argument("--name", default=None, help="output filename base (default: from description)")
     # --- post-processing (the RetroSFX node) ---
     p.add_argument("--no-trim", dest="no_trim", action="store_true",
@@ -1040,6 +1139,24 @@ def main():
     if a.song and not a.trim:
         a.no_trim = True
 
+    # --loop dictates its own endpoint policy, because the two settings people
+    # reach for here are each half-wrong on their own:
+    #
+    #   trim  MUST stay on  — it removes the model's silent lead-in/run-out, so
+    #                         the crossfade blends music with music. Wrapping an
+    #                         untrimmed take just crossfades two silences and
+    #                         leaves the hole exactly where it was. (Measured:
+    #                         --no-trim made the tail 36 dB WORSE, not better.)
+    #   fade  MUST be off   — a de-click ramp at the endpoints lands inside the
+    #                         blend region and puts a dip at the seam, which is
+    #                         the one artifact the wrap exists to remove.
+    #
+    # The seam is a butt-join between adjacent source samples after wrapping, so
+    # there is nothing left to de-click.
+    if a.loop:
+        a.no_trim = False
+        a.fade_ms = 0
+
     n = max(1, a.number)
     subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
     base = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
@@ -1138,6 +1255,14 @@ def main():
                             shutil.move(f, tgt)
                             moved.append(tgt)
                     files = moved
+            # Before loudness: the wrap MIXES two signals, so it changes level.
+            # Anything that changes gain after normalizing invalidates it.
+            if a.loop:
+                for f in files:
+                    _, sec = loop_wrap(f, a.loop_crossfade)
+                    if sec:
+                        print(f"   ↻ looped  {os.path.basename(f)}  "
+                              f"({sec:.1f}s, {a.loop_crossfade:g}s crossfade)")
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             if a.ogg:
