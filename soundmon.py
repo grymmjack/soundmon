@@ -56,6 +56,18 @@ except Exception:
     SERVERS = {}
 SERVERS.setdefault("local", "http://127.0.0.1:8188")
 
+# Stable Audio 3's prompt-rewriter system prompts, lifted verbatim from
+# ComfyUI's official SA3 workflow (JsonExtractString node). SA3 is trained on
+# richly structured prompts — named instrumentation, arrangement, and a
+# "BPM: X. Length: Y seconds" tail — and these turn a loose description into
+# that shape. Skipping this stage yields technically clean but musically weak
+# results; it is part of the pipeline, not a nicety.
+try:
+    with open(os.path.join(_SCRIPT_DIR, "sa3_reprompt.json"), encoding="utf-8") as _rf:
+        SA3_REPROMPT = json.load(_rf)
+except Exception:
+    SA3_REPROMPT = {}
+
 # Default negatives. The SFX one pushes *music and speech* away, because an SFX
 # request drifts into a little musical phrase surprisingly often — but that same
 # negative sabotages --music, which is why the two are separate. Either can be
@@ -238,6 +250,40 @@ def slug(text):
     return out[:40] or "sound"
 
 
+def _reprompt_nodes(a, text, seconds):
+    """Qwen 3.5 rewrites `text` into the form Stable Audio 3 expects.
+
+    Returns (nodes, text_ref) where text_ref is a graph reference usable as a
+    CLIPTextEncode `text` input. The theme's own wording goes INTO the LLM
+    input rather than being appended afterwards — the rewriter otherwise has no
+    idea what pack it is serving and will cheerfully put electric guitars in an
+    orchestral cue.
+
+    The nested sampling params must be dot-namespaced (`sampling_mode.seed`);
+    `sampling_mode` is a COMFY_DYNAMICCOMBO_V3, which is only discoverable from
+    /object_info.
+    """
+    category = "Music" if a.music else "SFX"
+    sysp = SA3_REPROMPT.get(category, "")
+    if not sysp:
+        return {}, None
+    full = (f"{sysp}\n\nInput: {text}\n"
+            f"Target audio length: {max(1, int(round(seconds)))} seconds.\nOutput:")
+    return {
+        "20": {"class_type": "CLIPLoader",
+               "inputs": {"clip_name": a.reprompt_model, "type": "stable_diffusion"}},
+        "21": {"class_type": "TextGenerate",
+               "inputs": {"clip": ["20", 0], "prompt": full, "max_length": 256,
+                          "sampling_mode": "on",
+                          "sampling_mode.temperature": a.reprompt_temp,
+                          "sampling_mode.top_k": 64, "sampling_mode.top_p": 0.95,
+                          "sampling_mode.min_p": 0.05,
+                          "sampling_mode.repetition_penalty": 1.05,
+                          "sampling_mode.seed": 0,
+                          "thinking": False, "use_default_template": True}},
+    }, ["21", 0]
+
+
 def _song_nodes(a, seed, subject):
     """ACE-Step 1.5 graph — full songs with vocals, lyrics, BPM and key.
 
@@ -335,6 +381,14 @@ def build_graph(a, seed, subject=None, server=None):
                           "threshold_db": a.threshold_db,
                           "normalize_db": a.normalize_db, "fade_ms": a.fade_ms}},
     }
+
+    # Prompt rewriter: replace the literal positive text with the LLM's output.
+    # Only for SA3 — Stable Audio Open 1.0 was not trained this way.
+    if a.engine == "sa3" and not a.no_reprompt and not a.song:
+        rp, ref = _reprompt_nodes(a, prompt, a.seconds)
+        if ref:
+            g.update(rp)
+            g["6"]["inputs"]["text"] = ref
 
     return _attach_save(a, g, prefix)
 
@@ -780,6 +834,15 @@ def main():
                    help="render on a remote ComfyUI: a servers.json alias or host[:port]/URL. "
                         "comma-list = RENDER FARM, jobs fan across all GPUs. "
                         "default: local (also honors $SOUNDMON_SERVER)")
+    p.add_argument("--no-reprompt", dest="no_reprompt", action="store_true",
+                   help="skip the Qwen prompt rewriter (--engine sa3). On by default: SA3 "
+                        "is trained on structured prompts and a loose description yields "
+                        "technically clean but musically weaker results.")
+    p.add_argument("--reprompt-model", dest="reprompt_model",
+                   default="qwen3.5_2b_bf16.safetensors",
+                   help="LLM used by the prompt rewriter (models/text_encoders/)")
+    p.add_argument("--reprompt-temp", dest="reprompt_temp", type=float, default=0.7,
+                   help="rewriter sampling temperature. default 0.7")
     p.add_argument("--engine", default="sa3", choices=["sa3", "sao"],
                    help="which model makes SFX and --music: 'sa3' = Stable Audio 3 "
                         "(default; full-band to 22kHz, ~20x faster), 'sao' = Stable Audio "
