@@ -153,6 +153,10 @@ def print_help():
         opt("--fast", "16 steps: ~3x faster, rougher"),
         opt("--no-trim", "keep the model's leading/trailing silence"),
         opt("--loop", "crossfade tail over head so the track loops seamlessly"),
+        opt("--blip", "JRPG text-box narration (Undertale / Animal Crossing)"),
+        opt("--blip-style S", "synth = no model at all | voice = Animalese", "synth"),
+        opt("--blip-wave W", "square / triangle / sine / saw / noise", "square"),
+        opt("--blip-rate N", "characters per second (typing speed)", "14"),
         opt("--loop-crossfade SEC", "crossfade length for --loop", "2.0"),
         opt("--normalize-db N", "peak level after generation", "-1.0"),
         opt("--fade-ms N", "de-click fade on both ends", "5"),
@@ -801,6 +805,29 @@ def main():
     p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 5.0")
     p.add_argument("--fast", action="store_true", help="16 steps: ~3x faster, rougher")
     p.add_argument("--seed", type=int, default=-1, help="-1 = random each run")
+    # --- blip mode: JRPG text-box narration, CPU, and 'synth' needs no model ---
+    p.add_argument("--blip", action="store_true",
+                   help="BLIP mode — JRPG text-box narration (Undertale / Animal "
+                        "Crossing style). 'synth' needs no model at all.")
+    p.add_argument("--blip-file", dest="blip_file", default=None, metavar="FILE",
+                   help="blip every line of a file — same 'key | text' rows --narrate-file reads")
+    p.add_argument("--blip-style", dest="blip_style", default="synth",
+                   choices=["synth", "voice"],
+                   help="synth = one oscillator blip per character (Undertale, no model); "
+                        "voice = Kokoro sped up, i.e. Animalese (Animal Crossing)")
+    p.add_argument("--blip-wave", dest="blip_wave", default="square",
+                   choices=["square", "triangle", "sine", "saw", "noise"],
+                   help="oscillator for --blip-style synth (default: square)")
+    p.add_argument("--blip-rate", dest="blip_rate", type=float, default=14.0, metavar="N",
+                   help="characters per second — the text-box typing speed (default: 14)")
+    p.add_argument("--blip-pitch", dest="blip_pitch", type=float, default=0.0, metavar="ST",
+                   help="base pitch in semitones from A4. Lower = bigger character")
+    p.add_argument("--blip-jitter", dest="blip_jitter", type=float, default=1.5, metavar="ST",
+                   help="per-character pitch spread. 0 = flat (authentic Undertale)")
+    p.add_argument("--blip-duty", dest="blip_duty", type=float, default=0.55, metavar="F",
+                   help="fraction of each character slot that sounds (default: 0.55)")
+    p.add_argument("--blip-speed", dest="blip_speed", type=float, default=3.0, metavar="X",
+                   help="playback speed-up for --blip-style voice (default: 3.0)")
     # --- narration mode (Kokoro TTS): spoken lines, runs on CPU, no ComfyUI ---
     p.add_argument("--narrate", action="store_true",
                    help="NARRATION mode — speak the text with a TTS voice (Kokoro). "
@@ -972,6 +999,7 @@ def main():
     if a.show_help or (not a.prompt and not a.batch and not a.list_formats
                        and not a.list_styles and not a.list_keys and not a.list_voices
                        and not a.narrate_file and not a.record_file
+                       and not a.blip_file
                        and not a.list_devices):
         print_help()
         return
@@ -1064,6 +1092,15 @@ def main():
     # Narration is its own pipeline (Kokoro on CPU) — it never touches ComfyUI,
     # so it short-circuits before any of the diffusion-side setup below.
     # Same shape as pixelmon handing --animate off to animate.py.
+    # --blip is checked BEFORE --narrate so `--blip --narrate-file lines.txt`
+    # reads the manifest in blip mode rather than being captured by narration.
+    # The synth style needs no model at all, so this must also short-circuit
+    # ahead of anything that would load one.
+    if a.blip or a.blip_file:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import blip
+        blip.run(a, slug, to_ogg, loudness_normalize)
+        return
     if a.narrate or a.narrate_file:
         sys.path.insert(0, _SCRIPT_DIR)
         import narrate

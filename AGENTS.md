@@ -6,7 +6,7 @@ in [README.md](README.md); this file is the stuff that is expensive to rediscove
 ## What this is
 
 A CLI that turns a text description into audio, running entirely on local
-hardware. **Five engines behind one command**, chosen by flag:
+hardware. **Six engines behind one command**, chosen by flag:
 
 | Mode | Engine | Runs on | Output |
 |---|---|---|---|
@@ -16,6 +16,7 @@ hardware. **Five engines behind one command**, chosen by flag:
 | `--song` | ACE-Step 1.5 | ComfyUI / GPU | full songs, sung vocals |
 | `--narrate` | Kokoro | **CPU, in-process** | spoken narration |
 | `--record` | **a human + a microphone** | CPU, in-process | spoken narration |
+| `--blip` | **an oscillator** (synth) / Kokoro (voice) | CPU, in-process | JRPG text-box blips |
 
 > **Before you change anything about the SA3 path, read gotchas 11–14.** Four
 > independent settings each turn its output into unusable noise, and none of them
@@ -84,6 +85,30 @@ next to `--narrate`, and deliberately **shares two things with it**:
 
 The payoff is that a hand-voiced pack and a generated pack are interchangeable
 *per line* — record the ten lines you care about, generate the other sixty.
+
+## --blip is the far end of the same spectrum
+
+`--narrate` skips ComfyUI because Kokoro is too small to be worth a node graph.
+`--record` skips the model entirely. **`--blip-style synth` skips even the audio
+*library* stack** — it is `numpy` plus an oscillator, so it runs anywhere,
+including a box that has never downloaded a checkpoint.
+
+That is deliberate and worth preserving. It means a game's whole text-box voice
+can be regenerated in CI, on a laptop, or by a contributor with no GPU. If you
+extend it, do not introduce a torch/kokoro import into the `synth` path — the
+Kokoro import in `blip.py` sits *inside* the `voice` branch for exactly this
+reason, mirroring how `narrate.py` defers its imports so `--record` stays free
+of a TTS dependency.
+
+Two things future-you will be tempted to "fix" and should not:
+
+1. **Per-character pitch is deterministic, not random.** `_char_semitones()`
+   hashes the codepoint. Randomizing it sounds like a malfunction; the same word
+   producing the same little melody is what makes it read as speech.
+2. **`voice` style resamples, it does not pitch-shift.** `narrate._pitch_shift`
+   goes to trouble to move pitch *without* changing duration. Animalese is
+   speech played fast — the duration change is the effect, so a plain resample
+   is correct and calling `_pitch_shift` here would defeat the point.
 
 ## Recording — cross-platform gotchas
 

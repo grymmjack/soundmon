@@ -45,6 +45,7 @@ a full day here; see [Lessons learned](#lessons-learned-the-gotchas).
 | a full song with sung vocals | `--song` | ACE-Step 1.5 turbo | lyrics, BPM, key; 48 kHz |
 | a spoken line | `--narrate` | Kokoro | CPU, in-process, no ComfyUI |
 | a spoken line **in your voice** | `--record` | your microphone | no models at all |
+| JRPG text-box blips | `--blip` | an oscillator | no model at all |
 
 `--engine sao` falls back to the original **Stable Audio Open 1.0** if you want
 it, but SA3 supersedes it for both SFX and music.
@@ -259,7 +260,10 @@ do is **sung vocals**; that's `--song` and a different engine.
 ```bash
 soundmon "a lo-fi hip hop piano loop" --music --seconds 12
 soundmon "a driving rock drum beat" --music --style drums
-soundmon "an 8-bit boss battle theme" --music --style chipmusic --format nes --bits 8
+soundmon "a boss battle theme" --music --style chipmusic
+soundmon "a village theme" --music --style gbmusic          # Game Boy DMG
+soundmon "a driving stage theme" --music --style fmsynth    # Genesis / YM2612
+soundmon "a demoscene intro loop" --music --style tracker   # Amiga MOD
 ```
 
 `--music` matters more than it looks: the **default negative prompt actively
@@ -267,7 +271,8 @@ fights music.** For SFX the default pushes *music, melody, song, voice, vocals*
 away, because an SFX request drifts into a little musical phrase surprisingly
 often. That same negative sabotages a music request. `--music` swaps in
 `MUSIC_NEGATIVE` and drops the "sound effect" tail from the prompt. Music style
-guides: `musicloop`, `sting`, `drums`, `chipmusic`, `cinematic`.
+guides: `musicloop`, `sting`, `drums`, `cinematic`, and the chip family
+below (`chipmusic`, `gbmusic`, `fmsynth`, `tracker`).
 
 ### Full songs (`--song`)
 
@@ -347,6 +352,51 @@ string tables work directly and the key becomes the filename.
 > **It runs on CPU on purpose.** On the RX 6600 (gfx1032 masquerading as gfx1030
 > via `HSA_OVERRIDE_GFX_VERSION`) Kokoro dies with `HIP error: invalid device
 > function`. At 82 M params there was nothing to win on the GPU anyway.
+
+### Blippy JRPG narration (`--blip`)
+
+The voice in an Undertale or Animal Crossing text box is not processed speech —
+it is a short instrument note fired once per character as the text types. You
+"hear" the words because your eye is reading them at the same rate your ear is
+getting blips. `--blip` does both traditions:
+
+```bash
+soundmon --blip --blip-file lines.txt --output-to assets/narration/blips
+soundmon "You found a rusted key!" --blip --blip-wave triangle --blip-pitch -5
+soundmon --blip --blip-style voice --blip-file lines.txt --voice bm_george
+```
+
+| Style | What it is | Needs |
+|---|---|---|
+| `synth` *(default)* | one oscillator blip per character — Undertale, Earthbound, Zelda | **nothing** |
+| `voice` | Kokoro speech resampled faster, i.e. "Animalese" — Animal Crossing | Kokoro |
+
+| Flag | What | Default |
+|---|---|---|
+| `--blip-file` | blip every line of a file — the same `key \| text` rows `--narrate-file` reads | — |
+| `--blip-style` | `synth` / `voice` | `synth` |
+| `--blip-wave` | `square` / `triangle` / `sine` / `saw` / `noise` | `square` |
+| `--blip-rate` | characters per second — the text-box typing speed | `14` |
+| `--blip-pitch` | base pitch in semitones from A4. Lower = bigger character | `0` |
+| `--blip-jitter` | per-character pitch spread. **`0` = flat, authentic Undertale** | `1.5` |
+| `--blip-duty` | fraction of each character slot that sounds | `0.55` |
+| `--blip-speed` | playback speed-up for `--blip-style voice` | `3.0` |
+
+**Pitch is deterministic per character, not random.** A random offset per blip
+sounds like a machine malfunctioning; the same word producing the same little
+melody every time is what makes it read as a *voice saying that word*. Vowels
+sit ~2.6 semitones above consonants, a crude nod to how vowels carry the
+pitched part of real speech. Punctuation drives the rhythm — a comma pauses two
+character-slots, a period four — so the timing comes out of your text for free.
+
+> **`--blip-style synth` needs no model, no GPU and no ComfyUI.** It is an
+> oscillator and an envelope, so it renders a seventy-line script in well under
+> a second on any machine — including one that has never downloaded a checkpoint.
+> That also makes it the one engine here you can run on a CI box.
+
+To change the *character* of the voice, change `_char_semitones()` in `blip.py`.
+It is the whole personality: `return 0.0` is authentic Undertale, a wider vowel
+lift makes it sing, a larger `--blip-jitter` makes it chatter.
 
 ### Recording it yourself (`--record`)
 
@@ -646,6 +696,7 @@ soundmon/
 ├── download-models.sh         fetch models: --sa3 (default engine), --song, or legacy
 ├── soundmon.py                the CLI brains (talks to ComfyUI's API)
 ├── narrate.py                 --narrate: Kokoro TTS, in-process on CPU, no ComfyUI
+├── blip.py                    --blip: JRPG text-box blips (synth needs no model)
 ├── record.py                  --record: the terminal recording booth (mic → pack)
 ├── sounds.json                --style guide snippets (edit / add your own)
 ├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI

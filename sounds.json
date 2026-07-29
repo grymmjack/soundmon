@@ -1,70 +1,153 @@
 {
   "_comment": "soundmon style guides — proven prompt snippets appended to your description to steer the sound. The analog of pixelmon's styles.json. Combine them: --style impact,metal. Add your own; the key becomes the --style name.",
-
-  "ui":        {"prompt": "clean UI sound effect, short, crisp, digital interface, dry, no reverb",
-                "negative": "music, melody, reverb, long tail, ambience"},
-  "impact":    {"prompt": "heavy impact, punchy transient, strong attack, thud, weighty",
-                "negative": "music, melody, soft, gentle, sustained"},
-  "whoosh":    {"prompt": "fast whoosh, air movement, swoosh, doppler sweep",
-                "negative": "music, melody, static, tonal"},
-  "explosion": {"prompt": "explosion, deep boom, debris, low-end rumble, sharp attack then decay",
-                "negative": "music, melody, soft, thin, tinny"},
-  "pickup":    {"prompt": "bright pickup sound, cheerful chime, collect item, short and rewarding",
-                "negative": "music, melody, dark, harsh, long"},
-  "footstep":  {"prompt": "single footstep, foley, close-mic, dry, natural",
-                "negative": "music, melody, reverb, crowd, multiple"},
-  "door":      {"prompt": "door foley, hinge creak, latch click, wood and metal",
-                "negative": "music, melody, voice, crowd"},
-  "weapon":    {"prompt": "weapon sound, metallic ring, sharp swing, blade",
-                "negative": "music, melody, dull, muffled"},
-  "gun":       {"prompt": "gunshot, sharp crack, mechanical action, percussive",
-                "negative": "music, melody, soft, sustained"},
-  "magic":     {"prompt": "magic spell effect, shimmering, ethereal sparkle, rising energy",
-                "negative": "music, melody, dry, mundane, mechanical"},
-  "machine":   {"prompt": "mechanical sound, servo, motor whir, industrial, gears",
-                "negative": "music, melody, organic, natural, soft"},
-  "electric":  {"prompt": "electric zap, arcing electricity, crackling energy, high voltage",
-                "negative": "music, melody, warm, soft, muffled"},
-  "water":     {"prompt": "water sound, liquid, splash, flowing, bubbles",
-                "negative": "music, melody, dry, harsh, metallic"},
-  "fire":      {"prompt": "fire sound, crackling flames, roaring burn, embers",
-                "negative": "music, melody, cold, digital, tonal"},
-  "glass":     {"prompt": "glass sound, sharp shatter, bright shards, brittle ring",
-                "negative": "music, melody, dull, soft, warm"},
-  "ambience":  {"prompt": "ambient background loop, atmospheric bed, steady, immersive room tone",
-                "negative": "music, melody, sudden transient, sharp attack"},
-  "horror":    {"prompt": "unsettling horror sound design, dissonant, tense drone, eerie",
-                "negative": "music, melody, cheerful, bright, warm"},
-  "arcade":    {"prompt": "retro arcade sound effect, synthesized bleep, square wave, 1980s video game",
-                "negative": "realistic, orchestral, acoustic, organic"},
-  "chiptune":  {"prompt": "8-bit chiptune sound effect, square and noise channel, NES style, synthesized",
-                "negative": "realistic, acoustic, orchestral, high fidelity"},
-  "nature":    {"prompt": "natural outdoor sound, organic, field recording, wildlife",
-                "negative": "music, melody, synthetic, digital, mechanical"},
-  "vehicle":   {"prompt": "vehicle sound, engine, motor load, mechanical rumble",
-                "negative": "music, melody, quiet, delicate"},
-  "loop":      {"prompt": "seamless loop, continuous, no fade, consistent level throughout",
-                "negative": "fade in, fade out, sudden ending, one-shot"},
-
+  "ui": {
+    "prompt": "clean UI sound effect, short, crisp, digital interface, dry, no reverb",
+    "negative": "music, melody, reverb, long tail, ambience"
+  },
+  "impact": {
+    "prompt": "heavy impact, punchy transient, strong attack, thud, weighty",
+    "negative": "music, melody, soft, gentle, sustained"
+  },
+  "whoosh": {
+    "prompt": "fast whoosh, air movement, swoosh, doppler sweep",
+    "negative": "music, melody, static, tonal"
+  },
+  "explosion": {
+    "prompt": "explosion, deep boom, debris, low-end rumble, sharp attack then decay",
+    "negative": "music, melody, soft, thin, tinny"
+  },
+  "pickup": {
+    "prompt": "bright pickup sound, cheerful chime, collect item, short and rewarding",
+    "negative": "music, melody, dark, harsh, long"
+  },
+  "footstep": {
+    "prompt": "single footstep, foley, close-mic, dry, natural",
+    "negative": "music, melody, reverb, crowd, multiple"
+  },
+  "door": {
+    "prompt": "door foley, hinge creak, latch click, wood and metal",
+    "negative": "music, melody, voice, crowd"
+  },
+  "weapon": {
+    "prompt": "weapon sound, metallic ring, sharp swing, blade",
+    "negative": "music, melody, dull, muffled"
+  },
+  "gun": {
+    "prompt": "gunshot, sharp crack, mechanical action, percussive",
+    "negative": "music, melody, soft, sustained"
+  },
+  "magic": {
+    "prompt": "magic spell effect, shimmering, ethereal sparkle, rising energy",
+    "negative": "music, melody, dry, mundane, mechanical"
+  },
+  "machine": {
+    "prompt": "mechanical sound, servo, motor whir, industrial, gears",
+    "negative": "music, melody, organic, natural, soft"
+  },
+  "electric": {
+    "prompt": "electric zap, arcing electricity, crackling energy, high voltage",
+    "negative": "music, melody, warm, soft, muffled"
+  },
+  "water": {
+    "prompt": "water sound, liquid, splash, flowing, bubbles",
+    "negative": "music, melody, dry, harsh, metallic"
+  },
+  "fire": {
+    "prompt": "fire sound, crackling flames, roaring burn, embers",
+    "negative": "music, melody, cold, digital, tonal"
+  },
+  "glass": {
+    "prompt": "glass sound, sharp shatter, bright shards, brittle ring",
+    "negative": "music, melody, dull, soft, warm"
+  },
+  "ambience": {
+    "prompt": "ambient background loop, atmospheric bed, steady, immersive room tone",
+    "negative": "music, melody, sudden transient, sharp attack"
+  },
+  "horror": {
+    "prompt": "unsettling horror sound design, dissonant, tense drone, eerie",
+    "negative": "music, melody, cheerful, bright, warm"
+  },
+  "arcade": {
+    "prompt": "retro arcade sound effect, synthesized bleep, square wave, 1980s video game",
+    "negative": "realistic, orchestral, acoustic, organic"
+  },
+  "lofi8bit": {
+    "prompt": "lo-fi 8-bit sound effect, crunchy low sample rate, aliased and gritty, early DOS PC game sample, SoundBlaster era, harsh and dry",
+    "negative": "clean, high fidelity, smooth, orchestral, realistic, reverb"
+  },
+  "pcspeaker": {
+    "prompt": "PC speaker beep, 1-bit square wave buzzer, harsh monophonic tone, IBM PC internal speaker, no envelope",
+    "negative": "rich, realistic, reverb, orchestral, polyphonic, smooth"
+  },
+  "chiptune": {
+    "prompt": "8-bit chiptune sound effect, NES 2A03 square wave and noise channel, short synthesized game blip, dry and punchy",
+    "negative": "realistic, acoustic, orchestral, high fidelity, reverb, ambience"
+  },
+  "nature": {
+    "prompt": "natural outdoor sound, organic, field recording, wildlife",
+    "negative": "music, melody, synthetic, digital, mechanical"
+  },
+  "vehicle": {
+    "prompt": "vehicle sound, engine, motor load, mechanical rumble",
+    "negative": "music, melody, quiet, delicate"
+  },
+  "loop": {
+    "prompt": "seamless loop, continuous, no fade, consistent level throughout",
+    "negative": "fade in, fade out, sudden ending, one-shot"
+  },
   "_music": "pair these with --music, which drops the anti-music negative prompt",
-  "musicloop": {"prompt": "seamless instrumental music loop, steady tempo, consistent, no vocals",
-                "negative": "vocals, singing, speech, fade out, tempo change"},
-  "sting":     {"prompt": "short musical sting, a few seconds, decisive ending, instrumental",
-                "negative": "vocals, singing, long, ambient, sustained drone"},
-  "drums":     {"prompt": "drum loop, tight groove, punchy kick and snare, steady tempo",
-                "negative": "vocals, melody, pitched instruments, ambient"},
-  "chipmusic": {"prompt": "chiptune music loop, square and triangle wave, NES style, catchy, instrumental",
-                "negative": "vocals, realistic instruments, orchestral, acoustic"},
-  "cinematic": {"prompt": "cinematic orchestral music, strings and brass, dramatic, instrumental",
-                "negative": "vocals, singing, electronic, lo-fi, distorted"},
-
+  "musicloop": {
+    "prompt": "seamless instrumental music loop, steady tempo, consistent, no vocals",
+    "negative": "vocals, singing, speech, fade out, tempo change"
+  },
+  "sting": {
+    "prompt": "short musical sting, a few seconds, decisive ending, instrumental",
+    "negative": "vocals, singing, long, ambient, sustained drone"
+  },
+  "drums": {
+    "prompt": "drum loop, tight groove, punchy kick and snare, steady tempo",
+    "negative": "vocals, melody, pitched instruments, ambient"
+  },
+  "chipmusic": {
+    "prompt": "chiptune music, NES 2A03 sound chip, square wave lead, triangle wave bass, noise channel percussion, catchy 8-bit video game melody, instrumental",
+    "negative": "vocals, realistic instruments, orchestral, acoustic, live recording, reverb"
+  },
+  "gbmusic": {
+    "prompt": "Game Boy chiptune, DMG sound chip, two pulse channels, soft wave channel, buzzy noise percussion, lo-fi handheld video game music, instrumental",
+    "negative": "vocals, orchestral, acoustic, realistic instruments, high fidelity"
+  },
+  "fmsynth": {
+    "prompt": "FM synthesis video game music, Sega Genesis YM2612, metallic FM bass, bright synth brass stabs, punchy digital drums, 16-bit era instrumental",
+    "negative": "vocals, acoustic, orchestral, analog tape, live recording"
+  },
+  "tracker": {
+    "prompt": "Amiga MOD tracker music, demoscene, sampled 8-bit instruments, tight sequenced drums, hard-panned stereo, early 90s computer game music, instrumental",
+    "negative": "vocals, orchestral, modern production, high fidelity"
+  },
+  "cinematic": {
+    "prompt": "cinematic orchestral music, strings and brass, dramatic, instrumental",
+    "negative": "vocals, singing, electronic, lo-fi, distorted"
+  },
   "_modifiers": "shorthand qualities you can stack onto any of the above",
-  "dry":       {"prompt": "dry, close-mic, no reverb, tight",
-                "negative": "reverb, echo, room, hall, distant"},
-  "big":       {"prompt": "large, cinematic, wide stereo, deep low end",
-                "negative": "thin, small, tinny, narrow"},
-  "small":     {"prompt": "small, delicate, subtle, close and quiet",
-                "negative": "huge, booming, cinematic, overwhelming"},
-  "clean":     {"prompt": "clean, high fidelity, well recorded, low noise floor",
-                "negative": "distorted, noisy, clipping, lo-fi, hiss"}
+  "dry": {
+    "prompt": "dry, close-mic, no reverb, tight",
+    "negative": "reverb, echo, room, hall, distant"
+  },
+  "big": {
+    "prompt": "large, cinematic, wide stereo, deep low end",
+    "negative": "thin, small, tinny, narrow"
+  },
+  "small": {
+    "prompt": "small, delicate, subtle, close and quiet",
+    "negative": "huge, booming, cinematic, overwhelming"
+  },
+  "clean": {
+    "prompt": "clean, high fidelity, well recorded, low noise floor",
+    "negative": "distorted, noisy, clipping, lo-fi, hiss"
+  },
+  "lofi": {
+    "prompt": "lo-fi, low sample rate, aliased, bit-crushed, gritty digital artifacts",
+    "negative": "high fidelity, clean, smooth, pristine"
+  }
 }
