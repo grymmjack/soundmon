@@ -121,6 +121,14 @@
     "prompt": "FM synthesis video game music, Sega Genesis YM2612, metallic FM bass, bright synth brass stabs, punchy digital drums, 16-bit era instrumental",
     "negative": "vocals, acoustic, orchestral, analog tape, live recording"
   },
+  "adlib": {
+    "prompt": "AdLib OPL2 FM synthesis, 2-operator Yamaha YM3812, nasal buzzy synth brass and bell tones, gritty mono DOS game soundtrack, 1991 PC, instrumental",
+    "negative": "vocals, acoustic, orchestral, realistic instruments, stereo width, reverb, high fidelity"
+  },
+  "opl3": {
+    "prompt": "Sound Blaster 16 OPL3 FM synthesis, 4-operator Yamaha YMF262, rich metallic FM brass stabs, detuned synth leads, punchy FM drums, mid-90s DOS game music, stereo, instrumental",
+    "negative": "vocals, acoustic, orchestral, live recording, analog tape, lo-fi mono"
+  },
   "tracker": {
     "prompt": "Amiga MOD tracker music, demoscene, sampled 8-bit instruments, tight sequenced drums, hard-panned stereo, early 90s computer game music, instrumental",
     "negative": "vocals, orchestral, modern production, high fidelity"
