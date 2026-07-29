@@ -413,10 +413,47 @@ another composer.
 | `--key` | e.g. `"D minor"`, `"f# dorian"` — also picks the progression | `C minor` |
 | `--bpm` | tempo | `120` |
 | `--seconds` | length; rounded to whole bars | `60` |
-| `--chip-scale` | override the scale implied by `--key` | from `--key` |
-| `--chip-arp` | arpeggio speed in 16ths — `1` is the classic buzz | `1` |
+| `--mood NAME` | **the big one** — see below. `auto` reads it from your description | `auto` |
+| `--scale` | override the scale the mood/key would pick | from mood |
+| `--arp` | arpeggio speed in 16ths — `1` is the classic buzz, `0` = mood decides | `0` |
 | `--opl-bank` | external patch bank (`.sbi`); omit for the built-in | built-in |
 | `--opl-lead` / `--opl-arp` / `--opl-bass` | per-voice instrument | brass / organ / bass |
+
+### Mood is the main control (`--mood`)
+
+A mood is a **bundle** of composition parameters, not a label — and that is the
+whole point. Changing the scale alone does almost nothing; you get minor-key
+cheerfulness, which is the classic failure of procedural music. `ominous` is a
+dark scale **and** a slow tempo **and** a thin duty cycle **and** sparse drums
+**and** a falling melodic contour, all at once.
+
+```bash
+soundmon "the crypt"    --chip --mood solemn
+soundmon "boss fight"   --chip --mood frantic
+soundmon "found a door" --opl  --mood eerie
+soundmon --list-moods
+```
+
+| | |
+|---|---|
+| bright | `heroic` `triumphant` `playful` `wondrous` `serene` |
+| dark | `ominous` `eerie` `melancholy` `solemn` `tense` |
+| kinetic | `driving` `frantic` `grand` `mysterious` |
+
+**`auto` is the default, and it reads your description.** Mood words are already
+in the text you wrote — so `"the TORTURE CHAMBER -- dried blood and remembered
+pain"` infers `eerie`, and `"an intense, fast combat loop"` infers `frantic`,
+with nothing extra to specify. Run against a real 24-track manifest it picked 12
+distinct moods with no hand-tuning.
+
+Inference is not always right — *"a memorial to triumphant champions"* reads as
+`triumphant` when it wants to be `solemn`. That is what explicit `--mood` is for.
+
+**Every parameter it touches:** scale, chord progression, tempo multiplier,
+rhythm density, arpeggio speed, duty cycle, drum pattern, lead register, melodic
+contour, vibrato depth, and how far the motif roams from the chord. The table is
+at the top of `chip.py` and is meant to be edited — add your own mood in six
+lines.
 
 **Arpeggios are the signature.** With one note per channel you cannot play a
 chord, so chip music fakes them by cycling chord tones every frame or two —

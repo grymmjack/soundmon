@@ -154,7 +154,8 @@ def print_help():
         opt("--no-trim", "keep the model's leading/trailing silence"),
         opt("--loop", "crossfade tail over head so the track loops seamlessly"),
         opt("--chip", "real 2A03 chiptune synthesis — no model, loops perfectly"),
-        opt("--chip-arp N", "arpeggio speed in 16ths (1 = classic buzz)", "1"),
+        opt("--mood NAME", "heroic/ominous/eerie/... or auto — see --list-moods", "auto"),
+        opt("--arp N", "arpeggio speed in 16ths (0 = let the mood choose)", "0"),
         opt("--opl", "real AdLib/OPL3 FM via the Nuked core — no model"),
         opt("--opl-bank F", "external patch bank (.sbi); omit for built-in"),
         opt("--chipfx", "synthesize an 8-bit SFX (PSG) — sfxr-style, no model"),
@@ -816,11 +817,20 @@ def main():
     p.add_argument("--chip", action="store_true",
                    help="CHIPTUNE mode — synthesize real 2A03 chiptune (2 pulse + "
                         "triangle + noise). Authentic by construction; loops seamlessly.")
-    p.add_argument("--chip-scale", dest="chip_scale", default=None,
+    # --scale, not --chip-scale: opl.py shares chip.compose(), so this drives
+    # AdLib as well. The old name stays as an alias — it is in scripts already.
+    p.add_argument("--scale", "--chip-scale", dest="chip_scale", default=None,
                    choices=["minor", "harmonic", "dorian", "phrygian", "major",
                             "mixolydian", "pentatonic"],
                    help="override the scale implied by --key")
-    p.add_argument("--chip-arp", dest="chip_arp", type=int, default=1, metavar="N",
+    p.add_argument("--mood", default="auto",
+                   help="mood for --chip/--opl: heroic, ominous, eerie, melancholy, "
+                        "solemn, mysterious, tense, frantic, driving, playful, serene, "
+                        "grand, wondrous, triumphant. 'auto' reads it from your "
+                        "description. --list-moods")
+    p.add_argument("--list-moods", dest="list_moods", action="store_true",
+                   help="show every mood and what it changes")
+    p.add_argument("--arp", "--chip-arp", dest="chip_arp", type=int, default=0, metavar="N",
                    help="arpeggio speed in 16ths — 1 is the classic buzzy chord (default: 1)")
     # --- opl mode: real AdLib / Sound Blaster FM via the Nuked OPL3 core ---
     p.add_argument("--opl", action="store_true",
@@ -1041,9 +1051,24 @@ def main():
                        and not a.list_styles and not a.list_keys and not a.list_voices
                        and not a.narrate_file and not a.record_file
                        and not a.blip_file and not a.chip and not a.opl
-                       and not a.chipfx and not a.oplfx
+                       and not a.chipfx and not a.oplfx and not a.list_moods
                        and not a.list_devices):
         print_help()
+        return
+    if a.list_moods:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import chip as _c
+        print("\n  MOODS — for --chip and --opl\n")
+        print(f"  {'mood':<13}{'scales':<24}{'bpm':>5}  {'arp':>3} {'duty':>4} "
+              f"{'oct':>3} {'lean':>4}")
+        for name, m in _c.MOODS.items():
+            print(f"  {name:<13}{'/'.join(m['scales']):<24}{m['bpm']:>5.2f}  "
+                  f"{m['arp']:>3} {_c.DUTIES[m['duty']]:>4.3g} {m['octave']:>+3} "
+                  f"{('up' if m['contour']>0 else 'down' if m['contour']<0 else '--'):>4}")
+        print("\n  'auto' (the default) infers the mood from your description.")
+        print("  A mood sets scale, progression, tempo, rhythm density, arpeggio")
+        print("  speed, duty cycle, drum pattern, register and melodic contour —")
+        print("  changing only the scale gives you minor-key cheerfulness.\n")
         return
     if a.list_formats:
         print_formats()

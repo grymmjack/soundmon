@@ -86,6 +86,107 @@ DRUMS = [
 
 DUTIES = (0.125, 0.25, 0.5, 0.75)
 
+# --- moods -------------------------------------------------------------------
+# A mood is a BUNDLE of composition parameters, not a label. Changing the scale
+# alone does very little: "ominous" is a dark scale AND a slow tempo AND a thin
+# duty cycle AND sparse drums AND a falling melodic contour, all at once. Pull
+# one lever and you get minor-key cheerfulness, which is the usual failure of
+# procedural music.
+#
+#   scales    preferred scales, in order of preference
+#   progs     chord progressions as scale degrees
+#   bpm       multiplier on the requested tempo
+#   rhythms   which RHYTHMS entries the motif may use (dense vs sparse)
+#   arp       arpeggio speed in 16ths — 1 is a buzzy chord, 4 is an audible figure
+#   duty      index into DUTIES — 0 is thin/nasal, 2 is full/bold
+#   drums     index into DRUMS
+#   octave    lead register shift
+#   contour   melodic bias: +1 tends to rise, -1 tends to fall
+#   vib       vibrato depth on sustained notes
+#   span      how far the motif roams from the chord (small = insistent)
+MOODS = {
+    "heroic":      dict(scales=("major", "mixolydian"), progs=([0, 4, 5, 3], [0, 3, 4, 4]),
+                        bpm=1.00, rhythms=(0, 1, 2, 5), arp=1, duty=2, drums=1,
+                        octave=1, contour=+1, vib=0.006, span=4),
+    "triumphant":  dict(scales=("major",), progs=([0, 3, 4, 0], [0, 5, 3, 4]),
+                        bpm=1.05, rhythms=(1, 2, 5, 10), arp=1, duty=2, drums=1,
+                        octave=1, contour=+1, vib=0.008, span=5),
+    "ominous":     dict(scales=("phrygian", "harmonic"), progs=([0, 1, 0, 6], [0, 6, 5, 6]),
+                        bpm=0.80, rhythms=(8, 9, 3), arp=2, duty=0, drums=3,
+                        octave=0, contour=-1, vib=0.004, span=3),
+    "eerie":       dict(scales=("harmonic", "phrygian"), progs=([0, 1, 5, 0], [0, 6, 4, 0]),
+                        bpm=0.75, rhythms=(8, 9, 10), arp=3, duty=0, drums=3,
+                        octave=1, contour=0, vib=0.012, span=6),
+    "melancholy":  dict(scales=("minor", "dorian"), progs=([0, 5, 2, 6], [0, 3, 0, 6]),
+                        bpm=0.78, rhythms=(8, 9, 2, 10), arp=4, duty=1, drums=3,
+                        octave=0, contour=-1, vib=0.007, span=3),
+    "solemn":      dict(scales=("minor", "harmonic"), progs=([0, 3, 4, 0], [0, 5, 4, 0]),
+                        bpm=0.72, rhythms=(8, 9), arp=4, duty=1, drums=3,
+                        octave=0, contour=0, vib=0.005, span=2),
+    "mysterious":  dict(scales=("dorian", "minor"), progs=([0, 6, 3, 0], [0, 3, 0, 6]),
+                        bpm=0.88, rhythms=(3, 4, 7, 10), arp=2, duty=1, drums=0,
+                        octave=1, contour=0, vib=0.009, span=5),
+    "tense":       dict(scales=("phrygian", "minor"), progs=([0, 0, 5, 6], [0, 1, 0, 6]),
+                        bpm=1.02, rhythms=(7, 3, 4), arp=1, duty=0, drums=1,
+                        octave=0, contour=0, vib=0.003, span=2),
+    "frantic":     dict(scales=("phrygian", "harmonic", "minor"),
+                        progs=([0, 6, 5, 6], [0, 1, 0, 6]),
+                        bpm=1.22, rhythms=(3, 7, 4), arp=1, duty=0, drums=1,
+                        octave=1, contour=+1, vib=0.004, span=4),
+    "driving":     dict(scales=("minor", "dorian"), progs=([0, 6, 5, 6], [0, 3, 4, 0]),
+                        bpm=1.12, rhythms=(0, 3, 5, 7), arp=1, duty=2, drums=1,
+                        octave=0, contour=+1, vib=0.005, span=3),
+    "playful":     dict(scales=("pentatonic", "major", "mixolydian"),
+                        progs=([0, 3, 4, 0], [0, 4, 0, 3]),
+                        bpm=1.08, rhythms=(3, 4, 6, 7), arp=2, duty=2, drums=0,
+                        octave=1, contour=+1, vib=0.006, span=4),
+    "serene":      dict(scales=("major", "dorian", "pentatonic"),
+                        progs=([0, 5, 3, 4], [0, 3, 0, 4]),
+                        bpm=0.82, rhythms=(8, 9, 2), arp=4, duty=1, drums=0,
+                        octave=1, contour=0, vib=0.010, span=3),
+    "grand":       dict(scales=("harmonic", "minor"), progs=([0, 3, 4, 0], [0, 5, 4, 0]),
+                        bpm=0.90, rhythms=(1, 2, 9), arp=2, duty=2, drums=2,
+                        octave=0, contour=+1, vib=0.008, span=4),
+    "wondrous":    dict(scales=("major", "dorian"), progs=([0, 3, 5, 4], [0, 4, 5, 3]),
+                        bpm=0.95, rhythms=(2, 4, 6, 10), arp=2, duty=1, drums=0,
+                        octave=2, contour=+1, vib=0.011, span=6),
+}
+DEFAULT_MOOD = "mysterious"
+
+# Words -> mood, matched against the asset's description. The manifest already
+# says how each track should FEEL ("crushing finality and grand grieving
+# menace"), so the mood does not need to be specified twice — read it from the
+# text that is already there. Longer, more specific keys are checked first.
+MOOD_WORDS = [
+    ("triumphant", ("triumph", "victor", "fanfare", "champion", "glory", "won")),
+    ("heroic", ("heroic", "hero", "brave", "noble", "valiant", "hopeful", "destiny")),
+    ("frantic", ("frantic", "panic", "desperate", "chaos", "furious", "intense", "climax")),
+    ("driving", ("driving", "combat", "battle", "pursuit", "urgent", "relentless", "march")),
+    ("tense", ("tense", "tension", "uneasy", "nervous", "danger", "threat", "stalk", "dread")),
+    ("ominous", ("ominous", "menace", "malevolent", "sinister", "foreboding", "evil", "doom")),
+    ("eerie", ("eerie", "haunt", "ghost", "spectral", "unsettl", "otherworldly", "horror")),
+    ("melancholy", ("melancholy", "mourn", "grief", "griev", "sorrow", "lament", "sad", "lost")),
+    ("solemn", ("solemn", "funeral", "dirge", "memorial", "requiem", "reverent", "finality")),
+    ("grand", ("grand", "vast", "epic", "monument", "cathedral", "immense", "awe")),
+    ("wondrous", ("wonder", "wondrous", "shimmer", "glitter", "magic", "arcane", "treasure")),
+    ("mysterious", ("mystery", "mysterious", "curious", "secret", "hidden", "riddle", "unknown")),
+    ("playful", ("playful", "cheerful", "jaunty", "whimsic", "bright", "village", "merry")),
+    ("serene", ("serene", "calm", "quiet", "gentle", "peace", "contemplat", "reflect", "still")),
+]
+
+
+def infer_mood(text):
+    """Pick a mood from a description. Falls back to DEFAULT_MOOD."""
+    hay = (text or "").lower()
+    best, score = DEFAULT_MOOD, 0
+    for mood, words in MOOD_WORDS:
+        hits = sum(1 for w in words if w in hay)
+        # First match wins ties, so the table order encodes priority: a track
+        # described as both "combat" and "tense" should read as combat.
+        if hits > score:
+            best, score = mood, hits
+    return best
+
 
 def parse_key(text):
     """'D minor' / 'f# major' / 'A' -> (root_semitone, scale_name)."""
@@ -195,12 +296,30 @@ def compose(a, np, rng):
     Kept separate from rendering so the musical decisions are inspectable and
     the synthesis stays dumb.
     """
-    root, scale_name = parse_key(a.key)
-    scale = SCALES.get(getattr(a, "chip_scale", None) or scale_name, SCALES["minor"])
-    prog = PROGRESSIONS.get(scale_name, PROGRESSIONS["minor"])
-    prog = prog[rng.integers(len(prog))]
+    root, key_scale = parse_key(a.key)
 
-    bpm = max(40, min(300, a.bpm))
+    # Resolve the mood, then let it choose almost everything. Explicit --mood
+    # wins; otherwise read it out of the description, which for a manifest-driven
+    # run is already a sentence about how the track should feel.
+    mname = getattr(a, "mood", None)
+    if not mname or mname == "auto":
+        mname = infer_mood(getattr(a, "prompt", "") or "")
+    mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
+
+    # --chip-scale is an explicit override; otherwise prefer the mood's scale,
+    # but honour a scale the user actually spelled out in --key ("D dorian").
+    explicit_scale = getattr(a, "chip_scale", None)
+    if explicit_scale:
+        scale_name = explicit_scale
+    elif any(w in (a.key or "").lower() for w in
+             ("dorian", "phrygian", "harmonic", "mixolydian", "pentatonic")):
+        scale_name = key_scale
+    else:
+        scale_name = mood["scales"][int(rng.integers(len(mood["scales"])))]
+    scale = SCALES.get(scale_name, SCALES["minor"])
+    prog = list(mood["progs"][int(rng.integers(len(mood["progs"])))])
+
+    bpm = max(40, min(300, a.bpm * mood["bpm"]))
     spb = 60.0 / bpm * 4.0                       # seconds per bar (4/4)
     bars = max(2, int(round(a.seconds / spb)))
     # Even bar count keeps the progression whole, which is what makes the loop
@@ -216,10 +335,23 @@ def compose(a, np, rng):
     # One motif, reused with variation. Repetition is what makes a chiptune read
     # as a tune rather than as noodling — the format has no room for through-
     # composition and the era's music leans hard on the hook.
-    motif_r = RHYTHMS[rng.integers(len(RHYTHMS))]
-    motif_d = [int(rng.integers(0, 5)) for _ in motif_r]
-    drums = DRUMS[rng.integers(len(DRUMS))]
-    duty_lead = DUTIES[rng.integers(len(DUTIES))]
+    pool = mood["rhythms"]
+    motif_r = RHYTHMS[pool[int(rng.integers(len(pool)))] % len(RHYTHMS)]
+    # Contour: bias each motif step up or down so the phrase leans the way the
+    # mood does. A rising line reads as hope or force, a falling one as loss.
+    span, contour = mood["span"], mood["contour"]
+    motif_d = []
+    for j in range(len(motif_r)):
+        base = int(rng.integers(0, max(2, span)))
+        if contour > 0:
+            base += j // 2                       # climbs through the phrase
+        elif contour < 0:
+            base -= j // 2                       # sags through the phrase
+        motif_d.append(base)
+    drums = DRUMS[mood["drums"] % len(DRUMS)]
+    duty_lead = DUTIES[mood["duty"] % len(DUTIES)]
+    lead_oct = 1 + mood["octave"]
+    arp_rate = int(getattr(a, "chip_arp", 0) or mood["arp"])
 
     ev = {"lead": [], "arp": [], "bass": [], "drum": []}
     for bar in range(bars):
@@ -233,14 +365,14 @@ def compose(a, np, rng):
             step = motif_d[j]
             if vary and rng.random() < 0.5:
                 step += int(rng.integers(-1, 3))
-            n = deg(ch + step, 1)
+            n = deg(ch + step, lead_oct)
             if j == 0:
-                n = chord[0] + 12                        # land on the root
+                n = chord[0] + 12 * lead_oct             # land on the root
             ev["lead"].append((bar, pos, d, n, duty_lead))
             pos += d
 
         # --- arp: the signature. Chord tones cycled every `arp` sixteenth.
-        rate = max(1, int(getattr(a, "chip_arp", 1)))
+        rate = max(1, arp_rate)
         k = 0
         for s in range(0, STEPS, rate):
             ev["arp"].append((bar, s, rate, chord[k % 3], 0.25))
@@ -257,10 +389,10 @@ def compose(a, np, rng):
                 if drums[kind][s] == "1":
                     ev["drum"].append((bar, s, kind))
 
-    return ev, bars, spb, scale_name, prog
+    return ev, bars, spb, scale_name, prog, mname, mood
 
 
-def render(a, ev, bars, spb, np):
+def render(a, ev, bars, spb, np, mood=None):
     sr = SAMPLE_RATE
     total = int(round(bars * spb * sr))
     step_s = spb / STEPS
@@ -274,7 +406,8 @@ def render(a, ev, bars, spb, np):
         if n < 8:
             continue
         f = _hz(note)
-        vib = _vibrato(n, sr, 0.006 if dur >= 6 else 0.0, 6.0, np)
+        depth = (mood or {}).get("vib", 0.006)
+        vib = _vibrato(n, sr, depth if dur >= 6 else 0.0, 6.0, np)
         t = np.arange(n, dtype=np.float64) / sr
         ph = 2 * np.pi * f * np.cumsum(vib) / sr
         w = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
@@ -344,8 +477,8 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        ev, bars, spb, scale_name, prog = compose(a, np, rng)
-        audio = render(a, ev, bars, spb, np)
+        ev, bars, spb, scale_name, prog, mname, mood = compose(a, np, rng)
+        audio = render(a, ev, bars, spb, np, mood)
 
         # The seed goes in EVERY filename, as it does for every other engine.
         # That is the documented way to re-run a take you liked, and the pack
@@ -361,10 +494,9 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
-        shown = a.key if not getattr(a, "chip_scale", None) else f"{a.key}->{scale_name}"
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars} bars  {shown}  "
-              f"{a.bpm}bpm  seed={seed}")
+              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar  {mname:<11}"
+              f"{scale_name:<11}{a.bpm*mood['bpm']:.0f}bpm  seed={seed}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}")
     print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")

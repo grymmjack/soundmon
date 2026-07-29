@@ -17,7 +17,7 @@ needs_server=1
 case " $* " in
     *" -h "*|*" --help "* \
     |*" --list-formats "*|*" --list-styles "*|*" --list-keys "* \
-    |*" --list-voices "*|*" --list-devices "* \
+    |*" --list-voices "*|*" --list-devices "*|*" --list-moods "* \
     |*" --narrate "*|*" --narrate-file "* \
     |*" --blip "*|*" --blip-file "*|*" --chip "*|*" --opl "*|*" --chipfx "*|*" --oplfx "* \
     |*" --record "*|*" --record-file "*) needs_server=0 ;;

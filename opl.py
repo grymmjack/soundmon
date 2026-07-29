@@ -350,7 +350,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        ev, bars, spb, scale_name, _prog = chipmod.compose(a, np, rng)
+        ev, bars, spb, scale_name, _prog, mname, _mood = chipmod.compose(a, np, rng)
         audio = render(a, ev, bars, spb, np, bank)
 
         # Seed in every filename — see the note in chip.py.
@@ -363,10 +363,9 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
-        shown = a.key if not getattr(a, "chip_scale", None) else f"{a.key}->{scale_name}"
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars} bars  {shown}  "
-              f"{a.bpm}bpm  seed={seed}")
+              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar  {mname:<11}"
+              f"{scale_name:<11}seed={seed}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}  ({SAMPLE_RATE} Hz, OPL3 native)")
     print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")
