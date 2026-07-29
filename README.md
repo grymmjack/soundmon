@@ -2,8 +2,10 @@
 
 Describe audio, get a WAV — with **one command**, entirely on your own machines.
 Behind one CLI: **Stable Audio 3** for sound effects and music, **ACE-Step 1.5**
-for full songs with sung vocals, **Kokoro** for spoken narration — and a
-recording booth for when you would rather narrate it yourself.
+for full songs with sung vocals, **Kokoro** for spoken narration, a recording
+booth for when you would rather narrate it yourself — and, where a model is the
+wrong tool, **real synthesis**: a NES 2A03, the **Nuked OPL3** core DOSBox uses,
+and sfxr-style effect recipes, none of which need a model or a GPU at all.
 Shares pixelmon's ComfyUI engine, render farm, and CLI conventions.
 
 ```bash
@@ -13,6 +15,9 @@ soundmon "dark fantasy, choir" --song --bpm 90 \
          --key "D minor" --lyrics-file ballad.txt         # a full song, sung
 soundmon --narrate-file lines.txt --voice bm_george       # a spoken script
 soundmon --record-file lines.txt                          # ...or read it yourself
+soundmon "dungeon level 3" --chip --key "A minor" --bpm 125   # a REAL chiptune
+soundmon "dungeon level 3" --opl --key "D minor" --bpm 110    # a REAL OPL3 track
+soundmon "heavy door" --chipfx --name door                    # a REAL 8-bit SFX
 soundmon --batch "door,glass,fire" -n 16 --server rtx,titan,local,mac
 ```
 
