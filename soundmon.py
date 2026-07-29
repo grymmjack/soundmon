@@ -157,6 +157,9 @@ def print_help():
         opt("--chip-arp N", "arpeggio speed in 16ths (1 = classic buzz)", "1"),
         opt("--opl", "real AdLib/OPL3 FM via the Nuked core — no model"),
         opt("--opl-bank F", "external patch bank (.sbi); omit for built-in"),
+        opt("--chipfx", "synthesize an 8-bit SFX (PSG) — sfxr-style, no model"),
+        opt("--oplfx", "synthesize an SFX through the OPL3 FM core"),
+        opt("--fx-archetype N", "force the archetype (hit/boom/coin/creak/...)"),
         opt("--blip", "JRPG text-box narration (Undertale / Animal Crossing)"),
         opt("--blip-style S", "synth = no model at all | voice = Animalese", "synth"),
         opt("--blip-wave W", "square / triangle / sine / saw / noise", "square"),
@@ -834,6 +837,15 @@ def main():
                    help="instrument for the bass voice (default: bass)")
     p.add_argument("--opl-lib", dest="opl_lib", default=None, metavar="PATH",
                    help="explicit path to libopl3.so (default: auto-detect)")
+    p.add_argument("--chipfx", action="store_true",
+                   help="CHIP SFX mode — synthesize an 8-bit sound effect (PSG: "
+                        "pulse/triangle/LFSR noise), sfxr-style. No model.")
+    p.add_argument("--oplfx", action="store_true",
+                   help="OPL SFX mode — the same effect recipes rendered through "
+                        "the Nuked OPL3 FM core instead of a PSG.")
+    p.add_argument("--fx-archetype", dest="fx_archetype", default=None, metavar="NAME",
+                   help="force the effect archetype instead of inferring it from "
+                        "the name/description (e.g. hit, boom, coin, creak)")
     # --- blip mode: JRPG text-box narration, CPU, and 'synth' needs no model ---
     p.add_argument("--blip", action="store_true",
                    help="BLIP mode — JRPG text-box narration (Undertale / Animal "
@@ -1029,6 +1041,7 @@ def main():
                        and not a.list_styles and not a.list_keys and not a.list_voices
                        and not a.narrate_file and not a.record_file
                        and not a.blip_file and not a.chip and not a.opl
+                       and not a.chipfx and not a.oplfx
                        and not a.list_devices):
         print_help()
         return
@@ -1127,6 +1140,11 @@ def main():
     # ahead of anything that would load one.
     # --opl and --chip are pure synthesis — short-circuit before anything
     # contacts ComfyUI or loads a checkpoint.
+    if a.chipfx or a.oplfx:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import chipfx
+        chipfx.run(a, slug, to_ogg, loudness_normalize)
+        return
     if a.opl:
         sys.path.insert(0, _SCRIPT_DIR)
         import opl

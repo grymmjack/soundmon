@@ -48,6 +48,7 @@ a full day here; see [Lessons learned](#lessons-learned-the-gotchas).
 | JRPG text-box blips | `--blip` | an oscillator | no model at all |
 | **authentic** NES chiptune | `--chip` | a 2A03 emulation | no model at all |
 | **authentic** AdLib / OPL3 FM | `--opl` | Nuked OPL3 (DOSBox's core) | no model at all |
+| **authentic** 8-bit sound effects | `--chipfx` / `--oplfx` | PSG or OPL3 | no model at all |
 
 `--engine sao` falls back to the original **Stable Audio Open 1.0** if you want
 it, but SA3 supersedes it for both SFX and music.
@@ -427,6 +428,46 @@ fetch; `--opl-bank foo.sbi` loads a specific game's voices if you have them.
 > a *composed ending* — these don't have one, so `--loop` is ignored (with a
 > notice) rather than shortening the track for nothing.
 
+### Synthesized sound effects (`--chipfx`, `--oplfx`)
+
+The same argument as `--chip`, and it applies harder to short effects. A 0.12 s
+footstep is 5,300 samples; a diffusion model asked for one gives you a fragment
+of a *recording* of a footstep, with a room around it. A 2A03 footstep is a 30 ms
+burst of LFSR noise with a fast decay, and there is nothing to record.
+
+```bash
+soundmon "heavy door" --chipfx --name door --max-seconds 0.4     # PSG
+soundmon "heavy door" --oplfx  --name door --max-seconds 0.4     # FM
+soundmon "boom" --chipfx --fx-archetype boom -n 12               # 12 takes, free
+```
+
+Every effect is a **recipe** — a pitch contour, a waveform, an envelope — which
+is how sfxr/bfxr and the era's actual sound designers worked. There are ~30
+archetypes (`click`, `creak`, `boom`, `coin`, `hit`, `growl`, `rattle`, …) and the
+archetype is inferred from the asset name, so `door` becomes a creak and `boom`
+becomes an explosion with no prompt involved.
+
+| | |
+|---|---|
+| `--chipfx` | PSG: pulse / triangle / 15-bit LFSR noise — nothing to install |
+| `--oplfx` | the same recipes rendered through the Nuked OPL3 FM core |
+| `--fx-archetype NAME` | force the archetype instead of inferring it |
+
+**The recipes are the sound design, and they're meant to be edited.** Don't like
+`hit`? It's six numbers in `render_psg()`. That's a faster iteration loop than any
+prompt, and it's deterministic — the seed is in the filename.
+
+> **FM has no noise channel.** Outside fixed rhythm mode the OPL can't make
+> noise, so `--oplfx` fakes it with an extreme modulator ratio plus high
+> feedback — an inharmonic wash. That isn't a workaround, it's the period-correct
+> technique; it's how AdLib-only games made explosions.
+
+> **Inference is the fallback, not the mechanism.** Archetypes come from an
+> explicit name→archetype table. Keyword matching is only used for names not in
+> it, because substring matching on short words is a trap: **"dice" contains
+> "ice"**, so `diceroll` classified as a frost shimmer until the table existed.
+> When the asset list is finite and known, a table beats inference.
+
 ### Blippy JRPG narration (`--blip`)
 
 The voice in an Undertale or Animal Crossing text box is not processed speech —
@@ -771,6 +812,9 @@ soundmon/
 ├── soundmon.py                the CLI brains (talks to ComfyUI's API)
 ├── narrate.py                 --narrate: Kokoro TTS, in-process on CPU, no ComfyUI
 ├── blip.py                    --blip: JRPG text-box blips (synth needs no model)
+├── chip.py                    --chip: NES 2A03 synthesis + the shared composer
+├── chipfx.py                  --chipfx/--oplfx: sfxr-style effect recipes
+├── opl.py                     --opl: Nuked OPL3 FM (core fetched, not vendored)
 ├── record.py                  --record: the terminal recording booth (mic → pack)
 ├── sounds.json                --style guide snippets (edit / add your own)
 ├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI

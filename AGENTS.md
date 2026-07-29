@@ -6,7 +6,7 @@ in [README.md](README.md); this file is the stuff that is expensive to rediscove
 ## What this is
 
 A CLI that turns a text description into audio, running entirely on local
-hardware. **Six engines behind one command**, chosen by flag:
+hardware. **Nine engines behind one command**, chosen by flag:
 
 | Mode | Engine | Runs on | Output |
 |---|---|---|---|
@@ -17,6 +17,9 @@ hardware. **Six engines behind one command**, chosen by flag:
 | `--narrate` | Kokoro | **CPU, in-process** | spoken narration |
 | `--record` | **a human + a microphone** | CPU, in-process | spoken narration |
 | `--blip` | **an oscillator** (synth) / Kokoro (voice) | CPU, in-process | JRPG text-box blips |
+| `--chip` | **2A03 synthesis** (pure Python) | CPU, in-process | authentic chiptune music |
+| `--opl` | **Nuked OPL3** via ctypes | CPU, in-process | authentic AdLib/OPL3 music |
+| `--chipfx` / `--oplfx` | PSG / OPL3 recipes | CPU, in-process | authentic retro SFX |
 
 > **Before you change anything about the SA3 path, read gotchas 11–14.** Four
 > independent settings each turn its output into unusable noise, and none of them
@@ -116,6 +119,13 @@ input.
 first. `loop_wrap()` exists to hide a composed ending and these have none, so
 `--loop` is explicitly ignored for them. Do not "fix" that by wrapping anyway —
 it would shorten the track to solve a problem that isn't there.
+
+**Archetype selection is a TABLE, not inference.** `chipfx.NAME_MAP` names all
+46 of the caller's effects explicitly; keyword matching is only the fallback.
+Substring matching on short words is unsafe in a namespace you do not control —
+"dice" contains "ice", so `diceroll` classified as a frost shimmer. When the asset
+list is finite and known, a table is faster, inspectable, and lets each effect be
+hand-tuned rather than approximated.
 
 **`--opl` is fetched, not vendored.** Nuked OPL3 is LGPL-2.1; this repo is MIT.
 `./download-models.sh --opl` fetches and compiles it into `vendor/` alongside its
