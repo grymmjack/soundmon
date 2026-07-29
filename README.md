@@ -46,6 +46,8 @@ a full day here; see [Lessons learned](#lessons-learned-the-gotchas).
 | a spoken line | `--narrate` | Kokoro | CPU, in-process, no ComfyUI |
 | a spoken line **in your voice** | `--record` | your microphone | no models at all |
 | JRPG text-box blips | `--blip` | an oscillator | no model at all |
+| **authentic** NES chiptune | `--chip` | a 2A03 emulation | no model at all |
+| **authentic** AdLib / OPL3 FM | `--opl` | Nuked OPL3 (DOSBox's core) | no model at all |
 
 `--engine sao` falls back to the original **Stable Audio Open 1.0** if you want
 it, but SA3 supersedes it for both SFX and music.
@@ -352,6 +354,78 @@ string tables work directly and the key becomes the filename.
 > **It runs on CPU on purpose.** On the RX 6600 (gfx1032 masquerading as gfx1030
 > via `HSA_OVERRIDE_GFX_VERSION`) Kokoro dies with `HIP error: invalid device
 > function`. At 82 M params there was nothing to win on the GPU anyway.
+
+### Real chip music (`--chip`, `--opl`)
+
+**The most important thing in this README, if you want retro music.** Asked for
+"chiptune", Stable Audio 3 gives you modern chiptune-*influenced* music: made in
+a DAW, with reverb, sampled drums and unlimited polyphony. That genre exists and
+the model renders it well. It is simply not what a 2A03 sounds like.
+
+Real chip music is not a genre a model imitates — it is a **constraint**:
+
+```
+NES 2A03    2 pulse channels (duty 12.5/25/50/75%), 1 triangle, 1 noise
+OPL3        FM synthesis: operator ratios, envelopes, feedback
+both        no reverb, nothing sampled, a handful of voices, forever
+```
+
+No prompt adds a channel limit a model doesn't have. So these two modes
+**synthesize the audio directly** — authentic by construction, because there is
+no code path that produces reverb or a sampled drum.
+
+```bash
+soundmon "dungeon level 3" --chip --key "A minor" --bpm 125 --seconds 60
+soundmon "dungeon level 3" --opl  --key "D minor" --bpm 110 --seconds 60
+soundmon "boss theme" --chip -n 20        # 20 takes, keep one. Costs nothing.
+```
+
+| Mode | Chip | Engine |
+|---|---|---|
+| `--chip` | NES 2A03 PSG | pure Python oscillators — **nothing to install** |
+| `--opl` | Yamaha YMF262 (AdLib / SB Pro 2 / SB16) | **Nuked OPL3**, the cycle-accurate core DOSBox uses |
+
+`--opl` needs its core built once (~200 KB of C, no build system):
+
+```bash
+./download-models.sh --opl      # fetches nukeykt/Nuked-OPL3, compiles libopl3
+```
+
+> **Why fetched and not committed.** Nuked OPL3 is LGPL-2.1 and soundmon is MIT.
+> Building it locally keeps the licences separate and attributed rather than
+> quietly relicensing someone's work — same reason the models aren't in git.
+
+**They share a composer, not a synthesizer.** `chip.compose()` produces note
+events — bars, chords, a motif, drum hits — with no idea how they'll be voiced.
+Both renderers consume the same events. The musical decisions are hard and worth
+writing once; "what does a voice sound like" is exactly what differs between a
+2A03 and a YMF262. Adding a SID or a YM2612 means writing a renderer, not
+another composer.
+
+| Flag | What | Default |
+|---|---|---|
+| `--key` | e.g. `"D minor"`, `"f# dorian"` — also picks the progression | `C minor` |
+| `--bpm` | tempo | `120` |
+| `--seconds` | length; rounded to whole bars | `60` |
+| `--chip-scale` | override the scale implied by `--key` | from `--key` |
+| `--chip-arp` | arpeggio speed in 16ths — `1` is the classic buzz | `1` |
+| `--opl-bank` | external patch bank (`.sbi`); omit for the built-in | built-in |
+| `--opl-lead` / `--opl-arp` / `--opl-bass` | per-voice instrument | brass / organ / bass |
+
+**Arpeggios are the signature.** With one note per channel you cannot play a
+chord, so chip music fakes them by cycling chord tones every frame or two —
+fast enough that the ear fuses it into a buzzy, shimmering chord. That fast
+arpeggio *is* the sound of the format, more than the square waves are.
+
+**The OPL patch bank is the sound.** An instrument is ~11 bytes of operator
+config, and the whole difference between authentic AdLib and awful lives in
+those bytes. The built-in bank is hand-authored so this works with nothing to
+fetch; `--opl-bank foo.sbi` loads a specific game's voices if you have them.
+
+> **Both loop seamlessly with no crossfade.** Music is composed in whole bars,
+> so the last sample runs into the first by construction. `--loop` exists to hide
+> a *composed ending* — these don't have one, so `--loop` is ignored (with a
+> notice) rather than shortening the track for nothing.
 
 ### Blippy JRPG narration (`--blip`)
 

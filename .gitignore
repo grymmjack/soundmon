@@ -9,3 +9,9 @@ __pycache__/
 *.flac
 *.mp3
 *.opus
+
+# Nuked OPL3 is fetched and built by ./download-models.sh --opl.
+# It is LGPL-2.1 and this repo is MIT, so the source and the compiled library
+# stay OUT of git rather than being silently relicensed. Same reason the models
+# are not in here.
+vendor/

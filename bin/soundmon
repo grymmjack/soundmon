@@ -19,7 +19,7 @@ case " $* " in
     |*" --list-formats "*|*" --list-styles "*|*" --list-keys "* \
     |*" --list-voices "*|*" --list-devices "* \
     |*" --narrate "*|*" --narrate-file "* \
-    |*" --blip "*|*" --blip-file "* \
+    |*" --blip "*|*" --blip-file "*|*" --chip "*|*" --opl "* \
     |*" --record "*|*" --record-file "*) needs_server=0 ;;
 esac
 [ "$#" -eq 0 ] && needs_server=0

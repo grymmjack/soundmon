@@ -86,6 +86,43 @@ next to `--narrate`, and deliberately **shares two things with it**:
 The payoff is that a hand-voiced pack and a generated pack are interchangeable
 *per line* — record the ten lines you care about, generate the other sixty.
 
+## Diffusion is the wrong tool for chip music — know when to stop prompting
+
+The most valuable judgement call in this repo's history: **when a format is
+defined by a constraint, no prompt reaches it.**
+
+Stable Audio 3 asked for "chiptune" returns modern chiptune-influenced music —
+DAW-made, reverb, sampled drums, unlimited polyphony. That is a real genre and
+the model renders it well. It is not a 2A03. Real chip music is not a style the
+model imitates; it is a hardware limit:
+
+    2A03    2 pulse + 1 triangle + 1 noise, no reverb, nothing sampled
+    OPL3    FM operator ratios, envelopes, feedback
+
+A model trained on recordings has no representation of an operator ratio and no
+way to honour a channel count. Prompting harder produced "closer, still wrong"
+for a full round-trip before this was accepted. `--chip` and `--opl` synthesize
+directly instead, which makes them authentic *by construction*: there is no code
+path that emits reverb, so it cannot.
+
+**Both share `chip.compose()` and nothing else.** Composition returns note
+events with no notion of voicing; each renderer consumes them. Keep that seam —
+the musical decisions are the hard part and are worth writing once, while voicing
+is exactly what differs per chip. A SID or YM2612 is a new renderer, not a new
+composer. Do not "unify" the renderers; they have nothing in common but their
+input.
+
+**Both loop with no crossfade.** Whole bars, so the last sample runs into the
+first. `loop_wrap()` exists to hide a composed ending and these have none, so
+`--loop` is explicitly ignored for them. Do not "fix" that by wrapping anyway —
+it would shorten the track to solve a problem that isn't there.
+
+**`--opl` is fetched, not vendored.** Nuked OPL3 is LGPL-2.1; this repo is MIT.
+`./download-models.sh --opl` fetches and compiles it into `vendor/` alongside its
+licence. Do not commit the C source to make setup shorter — that quietly
+relicenses someone else's work, and the models set the precedent for
+fetch-at-setup already.
+
 ## --blip is the far end of the same spectrum
 
 `--narrate` skips ComfyUI because Kokoro is too small to be worth a node graph.

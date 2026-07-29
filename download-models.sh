@@ -98,3 +98,40 @@ if [ "${1:-}" = "--sa3" ] || [ "${SA3_MODEL:-0}" = 1 ]; then
         "$TENC/qwen3.5_2b_bf16.safetensors"
     echo "✅ Stable Audio 3 ready (medium, medium_base, specialists, qwen reprompt)."
 fi
+
+# --- Optional: Nuked OPL3 for --opl (real AdLib / Sound Blaster FM) ----------
+# ~200 KB of C. Skipped unless you ask:  ./download-models.sh --opl
+#
+# WHY THIS IS FETCHED AND BUILT RATHER THAN COMMITTED. Nuked OPL3 is LGPL-2.1
+# and soundmon is MIT. Building it locally keeps the two licences separate and
+# properly attributed instead of quietly relicensing someone's work — the same
+# reason the models aren't in git.
+#
+# It is a cycle-accurate emulation of the Yamaha YMF262, the chip in a Sound
+# Blaster Pro 2 / 16, and it is what DOSBox uses. --opl drives it directly, so
+# the output is not "FM-like": it is what an OPL3 does with those registers.
+if [ "${1:-}" = "--opl" ] || [ "${OPL_CORE:-0}" = 1 ]; then
+    VEND="$(cd "$(dirname "$0")" && pwd)/vendor"
+    mkdir -p "$VEND"
+    RAW="https://raw.githubusercontent.com/nukeykt/Nuked-OPL3/master"
+    get "$RAW/opl3.c" "$VEND/opl3.c"
+    get "$RAW/opl3.h" "$VEND/opl3.h"
+    # LGPL-2.1 requires the licence travel with the source. Keep it adjacent so
+    # nobody has to go looking for what covers vendor/.
+    get "https://raw.githubusercontent.com/nukeykt/Nuked-OPL3/master/LICENSE" \
+        "$VEND/LICENSE.Nuked-OPL3" 2>/dev/null || true
+
+    CC_BIN="${CC:-cc}"
+    command -v "$CC_BIN" >/dev/null 2>&1 || {
+        echo "✗ need a C compiler ($CC_BIN not found). Install build tools, or set \$CC." >&2
+        exit 1; }
+    case "$(uname -s)" in
+        Darwin) LIB="libopl3.dylib" ;;
+        MINGW*|MSYS*|CYGWIN*) LIB="opl3.dll" ;;
+        *) LIB="libopl3.so" ;;
+    esac
+    echo "⚙ compiling $LIB ..."
+    ( cd "$VEND" && "$CC_BIN" -O2 -fPIC -shared opl3.c -o "$LIB" -lm )
+    echo "✅ Nuked OPL3 ready -> $VEND/$LIB   (LGPL-2.1, see LICENSE.Nuked-OPL3)"
+    echo "   try:  soundmon \"dungeon theme\" --opl --key \"D minor\" --bpm 110"
+fi

@@ -153,6 +153,10 @@ def print_help():
         opt("--fast", "16 steps: ~3x faster, rougher"),
         opt("--no-trim", "keep the model's leading/trailing silence"),
         opt("--loop", "crossfade tail over head so the track loops seamlessly"),
+        opt("--chip", "real 2A03 chiptune synthesis — no model, loops perfectly"),
+        opt("--chip-arp N", "arpeggio speed in 16ths (1 = classic buzz)", "1"),
+        opt("--opl", "real AdLib/OPL3 FM via the Nuked core — no model"),
+        opt("--opl-bank F", "external patch bank (.sbi); omit for built-in"),
         opt("--blip", "JRPG text-box narration (Undertale / Animal Crossing)"),
         opt("--blip-style S", "synth = no model at all | voice = Animalese", "synth"),
         opt("--blip-wave W", "square / triangle / sine / saw / noise", "square"),
@@ -805,6 +809,31 @@ def main():
     p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 5.0")
     p.add_argument("--fast", action="store_true", help="16 steps: ~3x faster, rougher")
     p.add_argument("--seed", type=int, default=-1, help="-1 = random each run")
+    # --- chip mode: a real PSG synthesizer. No model, no GPU, no ComfyUI. ---
+    p.add_argument("--chip", action="store_true",
+                   help="CHIPTUNE mode — synthesize real 2A03 chiptune (2 pulse + "
+                        "triangle + noise). Authentic by construction; loops seamlessly.")
+    p.add_argument("--chip-scale", dest="chip_scale", default=None,
+                   choices=["minor", "harmonic", "dorian", "phrygian", "major",
+                            "mixolydian", "pentatonic"],
+                   help="override the scale implied by --key")
+    p.add_argument("--chip-arp", dest="chip_arp", type=int, default=1, metavar="N",
+                   help="arpeggio speed in 16ths — 1 is the classic buzzy chord (default: 1)")
+    # --- opl mode: real AdLib / Sound Blaster FM via the Nuked OPL3 core ---
+    p.add_argument("--opl", action="store_true",
+                   help="ADLIB/OPL3 mode — drive a cycle-accurate Nuked OPL3 core. "
+                        "Real FM synthesis, not an imitation. Build it with "
+                        "./download-models.sh --opl")
+    p.add_argument("--opl-bank", dest="opl_bank", default=None, metavar="FILE",
+                   help="load an external patch bank (.sbi). Omit for the built-in bank")
+    p.add_argument("--opl-lead", dest="opl_lead", default="brass",
+                   help="instrument for the lead voice (default: brass)")
+    p.add_argument("--opl-arp", dest="opl_arp", default="organ",
+                   help="instrument for the arpeggio voice (default: organ)")
+    p.add_argument("--opl-bass", dest="opl_bass", default="bass",
+                   help="instrument for the bass voice (default: bass)")
+    p.add_argument("--opl-lib", dest="opl_lib", default=None, metavar="PATH",
+                   help="explicit path to libopl3.so (default: auto-detect)")
     # --- blip mode: JRPG text-box narration, CPU, and 'synth' needs no model ---
     p.add_argument("--blip", action="store_true",
                    help="BLIP mode — JRPG text-box narration (Undertale / Animal "
@@ -999,7 +1028,7 @@ def main():
     if a.show_help or (not a.prompt and not a.batch and not a.list_formats
                        and not a.list_styles and not a.list_keys and not a.list_voices
                        and not a.narrate_file and not a.record_file
-                       and not a.blip_file
+                       and not a.blip_file and not a.chip and not a.opl
                        and not a.list_devices):
         print_help()
         return
@@ -1096,6 +1125,18 @@ def main():
     # reads the manifest in blip mode rather than being captured by narration.
     # The synth style needs no model at all, so this must also short-circuit
     # ahead of anything that would load one.
+    # --opl and --chip are pure synthesis — short-circuit before anything
+    # contacts ComfyUI or loads a checkpoint.
+    if a.opl:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import opl
+        opl.run(a, slug, to_ogg, loudness_normalize)
+        return
+    if a.chip:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import chip
+        chip.run(a, slug, to_ogg, loudness_normalize)
+        return
     if a.blip or a.blip_file:
         sys.path.insert(0, _SCRIPT_DIR)
         import blip
@@ -1193,6 +1234,17 @@ def main():
     if a.loop:
         a.no_trim = False
         a.fade_ms = 0
+
+    # --chip and --opl compose in whole bars, so they already loop
+    # sample-accurately. Crossfading would shorten the track to hide an ending
+    # neither of them has.
+    if a.chip or a.opl:
+        if a.seconds == 10:                  # the SFX default; wrong for music
+            a.seconds = 60
+        if a.loop:
+            mode = "--chip" if a.chip else "--opl"
+            print(f"   ℹ --loop ignored: {mode} already loops by construction")
+            a.loop = False
 
     n = max(1, a.number)
     subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
