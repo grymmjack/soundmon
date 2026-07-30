@@ -917,7 +917,7 @@ class Allocator:
                 self.free.append(ch)
         return got
 
-    def note_on(self, pitch, prog, hz, vel=None):
+    def note_on(self, pitch, prog, hz, vel=None, nid=None):
         ins = None
         if self.wopl and 0 <= prog < len(self.wopl["melodic"]):
             ins = self.wopl["melodic"][prog]
@@ -947,7 +947,8 @@ class Allocator:
             self.chip.key_on(chans[0], hz)
 
         self.age += 1
-        self.busy[(pitch, self.age)] = (self.age, pitch, chans)
+        key = nid if nid is not None else ("p", pitch, self.age)
+        self.busy[key] = (self.age, pitch, chans)
         return chans
 
     def perc_on(self, gm_note):
@@ -966,18 +967,17 @@ class Allocator:
         program_wopl(self.chip, chans[0], ins)
         key = ins["perc_key"] if ins["perc_key"] else gm_note
         self.age += 1
-        self.busy[(-gm_note, self.age)] = (self.age, -gm_note, chans)
+        self.busy[("perc", gm_note, self.age)] = (self.age, -gm_note, chans)
         self.chip.key_on(chans[0], 440.0 * (2.0 ** ((key - 69) / 12.0)))
 
-    def note_off(self, pitch):
-        for key in list(self.busy):
-            age, p, chans = self.busy[key]
-            if p == pitch:
-                for ch in chans:
-                    self.chip.key_off(ch)
-                    self.free.append(ch)
-                del self.busy[key]
-                return
+    def note_off(self, key):
+        """End a specific note by its id, not by pitch."""
+        ent = self.busy.pop(key, None)
+        if ent is None:
+            return
+        for ch in ent[2]:
+            self.chip.key_off(ch)
+            self.free.append(ch)
 
     def all_off(self):
         for key in list(self.busy):
@@ -1015,15 +1015,21 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
             chip.write(0x20 + op, 0x01); chip.write(0x40 + op, 0x00)
             chip.write(0x60 + op, 0xF8); chip.write(0x80 + op, 0xF8)
 
+    # Every note gets a unique id. Matching note_off by PITCH was the last
+    # source of holes: 47% of consecutive same-pitch pairs overlap after
+    # quantization (usually two tracks doubling a line), and the first note's
+    # off-event then silenced the SECOND note. With ids, doubled notes simply
+    # occupy two voices and each ends when it should — no clamping, so the source
+    # keeps its own articulation instead of being forced legato.
     ons, offs = {}, {}
-    for item in poly:
+    for nid, item in enumerate(poly):
         bar, st, dur, pitch, prog = item[:5]
         vel = item[5] if len(item) > 5 else None
         s = bar * steps + st
         if s >= total:
             continue
-        ons.setdefault(s, []).append((pitch, prog, vel))
-        offs.setdefault(min(total, s + max(1, dur)), []).append(pitch)
+        ons.setdefault(s, []).append((nid, pitch, prog, vel))
+        offs.setdefault(min(total, s + max(1, dur)), []).append(nid)
     dmap = {}
     for bar, st, kind in (drums or []):
         dmap.setdefault(bar * steps + st, set()).add(kind)
@@ -1036,10 +1042,10 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
     RHY = {"k": 0x10, "s": 0x08, "h": 0x01}
     out = []
     for s in range(total):
-        for p in offs.get(s, ()):
-            alloc.note_off(p)
-        for pitch, prog, vel in ons.get(s, ()):
-            alloc.note_on(pitch, prog, hz(pitch), vel)
+        for nid in offs.get(s, ()):
+            alloc.note_off(nid)
+        for nid, pitch, prog, vel in ons.get(s, ()):
+            alloc.note_on(pitch, prog, hz(pitch), vel, nid)
         if use_kit and s in kmap:
             for note in kmap[s][:3]:            # cap: a crash + a kick, not 9 toms
                 alloc.perc_on(note)
