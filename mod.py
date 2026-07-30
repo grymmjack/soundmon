@@ -477,9 +477,22 @@ def porta_rate(pitch, prev_pitch, ticks_per_row, rows=1):
     Period distance also depends on register: the same interval is far more period
     units low than high, because period is inversely proportional to frequency. So
     the rate has to be computed from the actual endpoints, every time.
+
+    TICK 0 OF EACH ROW DOES NOT SLIDE. It is the tick that reads the cell and sets
+    the target; only ticks 1..speed-1 advance the pitch. So a row contributes
+    speed-1 sliding ticks, not speed — and dividing by the wrong budget makes every
+    slide stop short and HOLD there, permanently out of tune.
+
+    This is the one I could not catch by reasoning, because my verifier simulated
+    the format using the same wrong assumption as the writer and agreed with it:
+    "83 slides, 0 land short" while the rendered audio settled 2.7 semitones below
+    its target and stayed. Tracking the pitch in libxmp's actual output found it in
+    one measurement. When a check and the code share an assumption, the check is
+    only testing arithmetic.
     """
     d = abs(_period(pitch) - _period(prev_pitch))
-    ticks = max(1, int(ticks_per_row) * max(1, int(rows)))
+    per_row = max(1, int(ticks_per_row) - 1)
+    ticks = max(1, per_row * max(1, int(rows)))
     return max(1, min(0xFF, -(-d // ticks)))          # ceil, so it does arrive
 
 
@@ -579,7 +592,10 @@ def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
         #   length  synth slides for a fixed 45/60/80 ms by level. mod.py used
         #           "up to 3 rows", which is a different duration at every grid.
         leap = abs(int(pitch) - int(prev_pitch))
-        if 3 <= leap <= 19 and gap_s < 0.12 and ident_frac < strength:
+        # At speed 1 there are no sliding ticks at all (tick 0 never slides), so a
+        # portamento would be written and then do nothing. Do not emit one.
+        if (3 <= leap <= 19 and gap_s < 0.12 and ident_frac < strength
+                and ticks_per_row >= 2):
             ms = {"some": 45.0, "lots": 60.0, "max": 80.0}.get(chippy, 60.0)
             rows = max(1, int(round(ms / 1000.0 / max(row_s, 1e-6))))
             rows = max(1, min(rows, max(1, int(dur)), avail))

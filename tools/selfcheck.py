@@ -199,7 +199,10 @@ def main():
                 tgt, rate, pp, up, j = per, b3, cur, per > cur, i
                 while j < len(cells) and (cells[j][2] & 0x0F) == 3:
                     rate = cells[j][3] or rate
-                    for _ in range(ticks):
+                    # ticks - 1: tick 0 of a row sets the target and does not
+                    # slide. Simulating `ticks` here is what made this check agree
+                    # with a writer that was stopping every slide short.
+                    for _ in range(max(1, ticks - 1)):
                         pp = pp + rate if up else pp - rate
                         if (up and pp >= tgt) or (not up and pp <= tgt):
                             pp = tgt
