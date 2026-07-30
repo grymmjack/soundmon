@@ -18,7 +18,7 @@ soundmon --record-file lines.txt                          # ...or read it yourse
 soundmon "dungeon level 3" --chip --key "A minor" --bpm 125   # a REAL chiptune
 soundmon "dungeon level 3" --opl --key "D minor" --bpm 110    # a REAL OPL3 track
 soundmon "heavy door" --chipfx --name door                    # a REAL 8-bit SFX
-soundmon --batch "door,glass,fire" -n 16 --server rtx,titan,local,mac
+soundmon --batch "door,glass,fire" -n 16 --server rtx,local,mac
 ```
 
 This is the local, free, unlimited answer to cloud generators like ElevenLabs
@@ -654,7 +654,7 @@ Identical to pixelmon's, because it's the same code — the CLI never touches th
 GPU, it just POSTs a JSON graph to `/prompt` and pulls results from `/view`.
 
 ```bash
-soundmon --batch "explosion,glass,fire" -n 30 --server rtx,titan,local
+soundmon --batch "explosion,glass,fire" -n 30 --server rtx,local
 #   -> 90 clips fanned across 3 GPUs; all land in your local output
 ```
 
