@@ -654,41 +654,11 @@ def render_timed(a, notes, drums, duration, np, mood=None):
     cfg = CHIPPY.get(getattr(a, "chippy", "off") or "off", CHIPPY["off"])
     depth = max(depth, cfg["vib"])
 
-    bass = [n for n in notes if n["pitch"] < 48]
-    lead = [n for n in notes if n["pitch"] >= 48]
+    # ONE arpeggio implementation, shared with the OPL path. This function used to
+    # carry its own copy, which is exactly how chip and opl drifted apart before.
+    notes = chippify(notes, getattr(a, "chippy", "off"))
 
-    # --- chords -> ARPEGGIOS ------------------------------------------------
-    # A 2A03 cannot sound a chord, so the era cycled the tones instead. Playing
-    # them simultaneously is technically accurate and audibly wrong.
-    rendered = set()
-    if cfg["arp_hz"] > 0:
-        for group in _cluster_chords(lead):
-            if len(group) < cfg["min_notes"]:
-                continue
-            pitches = sorted({g["pitch"] for g in group})
-            if len(pitches) < 2:
-                continue
-            t0 = min(g["t"] for g in group)
-            t1 = max(g["t"] + g["dur"] for g in group)
-            start = int(round(t0 * sr))
-            ln = min(int(round((t1 - t0) * sr)), total - start)
-            if start >= total or ln < 64:
-                continue
-            top = max(pitches)
-            duty = 0.125 if top >= 72 else (0.25 if top >= 60 else 0.5)
-            if cfg["duty_mod"]:
-                duty = 0.125 if cfg["duty_mod"] > 1 else 0.25
-            vel = max((g.get("vel") or 100) for g in group) / 127.0
-            w = _arp_voice(pitches, ln, sr, cfg["arp_hz"], duty, np, depth)
-            buf[start:start + ln] += w * _env(ln, sr, 2.0, 1.6, 0.8, np) * 0.22 * vel
-            rendered.update(id(g) for g in group)
-
-    # --- remaining melodic notes, with optional pitch SLIDES ----------------
-    prev = None
-    for n in sorted(lead, key=lambda x: x["t"]):
-        if id(n) in rendered:
-            prev = n
-            continue
+    for n in notes:
         start = int(round(n["t"] * sr))
         ln = max(int(round(n["dur"] * sr)), int(0.02 * sr))
         if start >= total:
@@ -697,37 +667,27 @@ def render_timed(a, notes, drums, duration, np, mood=None):
         pitch = n["pitch"]
         vel = (n.get("vel") or 100) / 127.0
         hz = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
+
+        if pitch < BASS_MAX_PITCH:                  # triangle bass, never arped
+            buf[start:start + ln] += (_tri_sweep_note(hz, ln, sr, np)
+                                      * _env(ln, sr, 3.0, 3.0, 0.75, np)
+                                      * 0.34 * vel)
+            continue
+
         duty = 0.125 if pitch >= 72 else (0.25 if pitch >= 60 else 0.5)
         if cfg["duty_mod"] > 1:
             duty = 0.125
-
-        leap = abs(pitch - prev["pitch"]) if prev else 0
-        gap = (n["t"] - (prev["t"] + prev["dur"])) if prev else 9.0
-        # Slide when the previous note is close in time and the interval is a real
-        # leap — which is how the era used portamento: to connect, not decorate.
-        if (cfg["slide"] > 0 and prev and 3 <= leap <= 19 and gap < 0.12
-                and (leap / 19.0) < cfg["slide"] + 0.35):
-            hz0 = 440.0 * (2.0 ** ((prev["pitch"] - 69) / 12.0))
-            w = _slide_pulse(hz0, hz, ln, sr, duty, cfg["slide_ms"], np, depth)
+        sf_from = n.get("slide_from")
+        if sf_from is not None:
+            hz0 = 440.0 * (2.0 ** ((sf_from - 69) / 12.0))
+            w = _slide_pulse(hz0, hz, ln, sr, duty,
+                             n.get("slide_ms", cfg["slide_ms"]), np, depth)
         else:
             vib = _vibrato(ln, sr, depth if n["dur"] > 0.35 else 0.0, 6.0, np)
             t = np.arange(ln, dtype=np.float64) / sr
             ph = 2 * np.pi * hz * np.cumsum(vib) / sr
             w = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
         buf[start:start + ln] += w * _env(ln, sr, 2.0, 4.0, 0.55, np) * 0.20 * vel
-        prev = n
-
-    # --- bass on the triangle ----------------------------------------------
-    for n in bass:
-        start = int(round(n["t"] * sr))
-        ln = max(int(round(n["dur"] * sr)), int(0.02 * sr))
-        if start >= total:
-            continue
-        ln = min(ln, total - start)
-        hz = 440.0 * (2.0 ** ((n["pitch"] - 69) / 12.0))
-        vel = (n.get("vel") or 100) / 127.0
-        buf[start:start + ln] += (_tri_sweep_note(hz, ln, sr, np)
-                                  * _env(ln, sr, 3.0, 3.0, 0.75, np) * 0.34 * vel)
 
     for t, gm in (drums or []):
         start = int(round(t * sr))
@@ -879,6 +839,16 @@ def _slide_pulse(hz0, hz1, n, sr, duty, slide_ms, np, vib_depth=0.0):
     return np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
 
 
+# Never arpeggiate low notes. A fast arp in the bass register turns into mud —
+# the technique works because the ear fuses RAPID HIGH tones into a chord, and
+# below roughly A3 it just hears a stuttering bass. The era used arps up top and
+# held or walked the bass underneath. A source that already arpeggiates low is
+# untouched, because chippify only ever collapses SIMULTANEOUS notes; a written-out
+# arpeggio is already sequential.
+ARP_MIN_PITCH = 57          # A3
+BASS_MAX_PITCH = 48         # below this goes to the triangle
+
+
 def chippify(notes, level, sr_hint=44100):
     """Rewrite an exact-time note list into chip idiom. Engine-agnostic.
 
@@ -895,13 +865,15 @@ def chippify(notes, level, sr_hint=44100):
     if cfg["arp_hz"] <= 0:
         return notes
 
-    bass = [n for n in notes if n["pitch"] < 48]
-    lead = [n for n in notes if n["pitch"] >= 48]
+    # Three registers: bass passes through, mid passes through, only the upper
+    # register is eligible to be collapsed into an arpeggio.
+    passthru = [n for n in notes if n["pitch"] < ARP_MIN_PITCH]
+    top = [n for n in notes if n["pitch"] >= ARP_MIN_PITCH]
     step = 1.0 / cfg["arp_hz"]
-    out = list(bass)
+    out = []
 
     handled = set()
-    for group in _cluster_chords(lead):
+    for group in _cluster_chords(top):
         pitches = sorted({g["pitch"] for g in group})
         if len(group) < cfg["min_notes"] or len(pitches) < 2:
             continue
@@ -921,7 +893,9 @@ def chippify(notes, level, sr_hint=44100):
         handled.update(id(g) for g in group)
 
     # Notes not swallowed by a chord keep their own timing, plus a slide marker.
-    rest = [n for n in lead if id(n) not in handled]
+    # Slides are computed over the melodic line only, so a bass note between two
+    # melody notes cannot trigger a spurious glide.
+    rest = [n for n in top if id(n) not in handled]
     rest.sort(key=lambda x: x["t"])
     prev = None
     for n in rest:
@@ -934,5 +908,6 @@ def chippify(notes, level, sr_hint=44100):
                 m["slide_ms"] = cfg["slide_ms"]
         out.append(m)
         prev = m
+    out.extend(passthru)
     out.sort(key=lambda x: x["t"])
     return out
