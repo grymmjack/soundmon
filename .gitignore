@@ -15,3 +15,7 @@ __pycache__/
 # stay OUT of git rather than being silently relicensed. Same reason the models
 # are not in here.
 vendor/
+
+# Mined from a local MIDI collection by tools/mine-corpus.py. Machine-specific
+# (it names a path on disk) and regenerable in minutes, so it stays out of git.
+corpus.json

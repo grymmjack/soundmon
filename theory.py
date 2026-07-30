@@ -261,14 +261,24 @@ def plan_track(name, mood, mood_name, scale_name, bars_target):
     # harmonically rather than only melodically.
     progs = {}
     for letter in dict.fromkeys(form):
-        progs[letter] = build_progression(
-            Ident(name, f"prog:{letter}:{mood_name}"), len(scale),
-            cadence=cadence, seventh_on_dominant=seventh)
+        pid = Ident(name, f"prog:{letter}:{mood_name}")
+        # Learned transitions when we have them; hand-written functional
+        # templates otherwise. Both end with a mood-appropriate cadence.
+        learned = corpus_progression(pid, scale_name, 4, len(scale))
+        if learned:
+            a_c, b_c = CADENCES.get(cadence, CADENCES["authentic"])
+            if a_c < len(scale) and b_c < len(scale):
+                learned = learned + [(a_c, seventh), (b_c, False)]
+            progs[letter] = learned
+        else:
+            progs[letter] = build_progression(
+                pid, len(scale), cadence=cadence, seventh_on_dominant=seventh)
 
     # METER. The single biggest cause of "every track has the same meter" was
     # that there was only ever one. Mood-scoped, so 7/8 lands on dread rather
     # than on a fanfare.
-    meter = ident.pick(MOOD_METERS.get(mood_name, ("4/4",)))
+    meter = (corpus_meter(ident, MOOD_METERS.get(mood_name, ("4/4",)))
+             or ident.pick(MOOD_METERS.get(mood_name, ("4/4",))))
     steps, spb_steps, quarters = meter_grid(meter)
 
     contours = mood.get("contours", ("arch", "descending", "ascending"))
@@ -284,8 +294,9 @@ def plan_track(name, mood, mood_name, scale_name, bars_target):
         sections[letter] = {
             "contour": sid.pick(contours),
             # Rhythm is GENERATED for this meter, not indexed out of a 4/4 table.
-            "rhythm": gen_rhythm(sid, steps, spb_steps, density,
-                                 rest_chance, syncopate),
+            "rhythm": (corpus_rhythm(sid, meter, steps)
+                       or gen_rhythm(sid, steps, spb_steps, density,
+                                     rest_chance, syncopate)),
             "bass_style": sid.pick(BASS_STYLES),
             "kit": sid.pick(kits),
             "transform": None if letter == first else sid.pick(TRANSFORMS),
@@ -481,3 +492,144 @@ def gen_rhythm(ident, steps, spb_steps, density, rest_chance=0.0, syncopate=0.0)
         out.append((d, ident.frac() < rest_chance))
         pos += d
     return out
+
+
+# =============================================================================
+# LEARNED IDIOM (corpus.json, from tools/mine-corpus.py)
+#
+# Everything above is hand-written: my guesses about what game music does. Where
+# a mined corpus has real measurements, they win. Two of my guesses were already
+# shown wrong by 1,107 real game MIDIs:
+#
+#   METER      I spread moods across 7/8, 5/4, 12/8 and 2/4. The corpus is 90%
+#              4/4 and 5.6% 3/4; everything else is under 1%. Exotic metres are a
+#              spice, not a palette.
+#   CADENCE    I defaulted minor keys to authentic (V-i) as classical practice
+#              suggests. In the corpus, iv->i (plagal) outnumbers V->i by 1976 to
+#              1189. Game music leans modal, not classical.
+#
+# The corpus is OPTIONAL. Without it everything falls back to the tables above,
+# so soundmon works on a machine with no MIDI collection.
+# =============================================================================
+CORPUS = None
+
+
+def load_corpus(path=None):
+    """Load corpus.json if present. Cached; returns None when absent."""
+    global CORPUS
+    if CORPUS is not None:
+        return CORPUS or None
+    import json
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in ([path] if path else []) + [os.path.join(here, "corpus.json")]:
+        if cand and os.path.exists(cand):
+            try:
+                with open(cand) as fh:
+                    CORPUS = json.load(fh)
+                return CORPUS
+            except Exception:
+                pass
+    CORPUS = {}
+    return None
+
+
+def _weighted(ident, pairs):
+    """Pick from [(value, weight), ...] using the track's identity."""
+    total = sum(w for _, w in pairs)
+    if total <= 0:
+        return pairs[0][0] if pairs else None
+    r = ident.frac() * total
+    for v, w in pairs:
+        r -= w
+        if r <= 0:
+            return v
+    return pairs[-1][0]
+
+
+def corpus_meter(ident, mood_meters, bias=0.65):
+    """Sample a time signature from the corpus, nudged toward the mood's taste.
+
+    `bias` is how much weight the mood's preferred metres get on top of their
+    corpus frequency. At 0.65 a mood that likes 7/8 will pick it sometimes rather
+    than 0.3% of the time, without pretending game music is mostly in 7/8.
+    """
+    c = load_corpus()
+    if not c or not c.get("timesigs"):
+        return None
+    pref = set(mood_meters or ())
+    pairs = []
+    for ts, count in c["timesigs"]:
+        if ts not in METERS:
+            continue
+        w = float(count)
+        if ts in pref:
+            w += bias * sum(n for _, n in c["timesigs"])
+        pairs.append((ts, w))
+    return _weighted(ident, pairs) if pairs else None
+
+
+def corpus_progression(ident, mode, length, scale_len=7):
+    """Walk the corpus's degree-transition matrix.
+
+    A Markov walk over real transitions produces progressions that are idiomatic
+    by measurement rather than by my assertion — and it naturally reproduces the
+    corpus's strong preference for lingering on the tonic, which hand-written
+    templates never did.
+    """
+    c = load_corpus()
+    if not c:
+        return None
+    tab = (c.get("transitions") or {}).get(
+        "minor" if mode != "major" else "major")
+    if not tab:
+        return None
+    nxt = {}
+    for key, count in tab.items():
+        try:
+            a, b = (int(x) for x in key.split(">"))
+        except ValueError:
+            continue
+        if a < scale_len and b < scale_len:
+            nxt.setdefault(a, []).append((b, count))
+    if not nxt:
+        return None
+    deg = 0
+    out = [(0, False)]
+    for _ in range(max(1, length - 1)):
+        opts = nxt.get(deg)
+        if not opts:
+            deg = 0
+        else:
+            # Suppress self-transitions a little: the corpus counts every bar a
+            # chord is held, so 0>0 dominates and a raw walk would sit still.
+            adj = [(b, w * (0.25 if b == deg else 1.0)) for b, w in opts]
+            deg = _weighted(ident, adj)
+        out.append((deg, False))
+    return out
+
+
+def corpus_rhythm(ident, timesig, steps):
+    """Return a real observed rhythm for this metre, as (duration, is_rest)."""
+    c = load_corpus()
+    if not c:
+        return None
+    pool = (c.get("rhythms") or {}).get(timesig)
+    if not pool:
+        return None
+    pairs = [(tuple(d), w) for d, w in pool if d and sum(d) <= steps * 2]
+    if not pairs:
+        return None
+    durs = list(_weighted(ident, pairs))
+    out, pos = [], 0
+    for d in durs:
+        d = max(1, min(int(d), steps - pos))
+        if d <= 0:
+            break
+        out.append((d, False))
+        pos += d
+        if pos >= steps:
+            break
+    if pos < steps:
+        out.append((steps - pos, ident.frac() < 0.35))   # tail: note or rest
+    return out or None
