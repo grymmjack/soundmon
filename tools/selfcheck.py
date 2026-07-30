@@ -249,6 +249,26 @@ def main():
             check("--format quantizes amplitude", lv <= 70,
                   f"{lv} distinct levels (6-bit allows 64)")
 
+        # encode() MUST be idempotent. On the diffusion path --flac attaches a
+        # ComfyUI SaveAudio node, so the server already returns a .flac —
+        # re-encoding resolved the output to the same path, ffmpeg refused, and the
+        # cleanup deleted the file. Every asset downloaded fine and was then
+        # destroyed, reported as "nothing produced".
+        import soundmon as _smm
+        import types as _t
+        for fmt, flags in (("flac", dict(flac=True, ogg=False)),
+                           ("ogg", dict(flac=False, ogg=True))):
+            p = os.path.join(tmp, f"idem.{fmt}")
+            sf.write(p, np.zeros(2205, dtype="float32"), 44100,
+                     format=fmt.upper())
+            n0 = os.path.getsize(p)
+            aa = _t.SimpleNamespace(keep_wav=False, ogg_quality=5, **flags)
+            out = _smm.encode(p, aa)
+            check(f"encode() leaves an existing .{fmt} alone",
+                  out == p and os.path.exists(p) and os.path.getsize(p) == n0,
+                  f"-> {os.path.basename(out)}, exists={os.path.exists(p)}")
+            os.path.exists(p) and os.remove(p)
+
         # EVERY engine must honour --flac. It was wired into three of seven, and
         # blip.py/narrate.py accepted a to_flac callable and never called it — so
         # the flag was accepted, plumbed, and silently dropped. Only the engines

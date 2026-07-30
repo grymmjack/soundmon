@@ -682,6 +682,11 @@ def to_flac(path, keep=False):
     if shutil.which("ffmpeg") is None:
         return path
     out = os.path.splitext(path)[0] + ".flac"
+    # NEVER transcode a file onto itself. ffmpeg refuses, and the cleanup at the
+    # bottom of this function then removes `path` — which is the same file. That
+    # deleted every ComfyUI-saved .flac after a successful download.
+    if os.path.abspath(out) == os.path.abspath(path):
+        return path
     r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                         "-i", path, "-c:a", "flac", "-compression_level", "8", out],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -714,6 +719,8 @@ def to_ogg(path, quality=5, keep=False):
         print("   ⚠ --ogg needs ffmpeg on PATH; leaving WAV")
         return path
     out = os.path.splitext(path)[0] + ".ogg"
+    if os.path.abspath(out) == os.path.abspath(path):
+        return path            # same trap as to_flac: would delete its own input
     # `-ac 2` is not optional: ffmpeg's native vorbis encoder is STEREO-ONLY
     # ("Current FFmpeg Vorbis encoder only supports 2 channels"), and narration
     # comes out of Kokoro as 24kHz mono. Upmixing costs almost nothing because
@@ -751,13 +758,22 @@ def encode(path, a):
     FLAC wins when both are asked for. It is lossless, and for the bit-crushed
     output these engines produce a lossy codec destroys the very thing that makes
     it sound like hardware.
+
+    IDEMPOTENT, and that is load-bearing rather than tidy. On the diffusion path
+    --flac attaches a ComfyUI SaveAudio node, so the server already returns a
+    .flac; re-encoding it resolved the output to the SAME path, ffmpeg refused to
+    write it, and the `if not keep: os.remove(path)` at the end deleted the file.
+    Every asset downloaded fine and was then destroyed, reported as "nothing
+    produced". So: if the file is already in the requested format, leave it alone.
     """
-    if getattr(a, "flac", False):
+    want = "flac" if getattr(a, "flac", False) else (
+        "ogg" if getattr(a, "ogg", False) else None)
+    if want is None or path.lower().endswith("." + want):
+        return path
+    if want == "flac":
         return to_flac(path, getattr(a, "keep_wav", False))
-    if getattr(a, "ogg", False):
-        return to_ogg(path, getattr(a, "ogg_quality", 5),
-                      getattr(a, "keep_wav", False))
-    return path
+    return to_ogg(path, getattr(a, "ogg_quality", 5),
+                  getattr(a, "keep_wav", False))
 
 
 def encode_all(paths, a):
