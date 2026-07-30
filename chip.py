@@ -509,7 +509,25 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
+        src = getattr(a, "from_audio", None)
+        if src:
+            # Transcribed: the composition comes from the reference recording.
+            # Mood is still resolved, because it decides how this is VOICED —
+            # notes from SA3, timbre from the chip.
+            import transcribe
+            mname = getattr(a, "mood", None)
+            if not mname or mname == "auto":
+                mname = infer_mood(getattr(a, "prompt", "") or "")
+            mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
+            got = transcribe.to_events(src, np, sf, steps_per_bar=STEPS,
+                                       beats_per_bar=4, seconds=a.seconds)
+            if not got:
+                sys.exit(f"--from-audio: could not analyze {src}")
+            ev, bars, spb, ana, scale_name = got
+            print(f"   ♪ transcribed {os.path.basename(src)}: "
+                  f"{transcribe.describe(ana)}")
+        else:
+            ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
         audio = render(a, ev, bars, spb, np, mood)
 
         # The seed goes in EVERY filename, as it does for every other engine.

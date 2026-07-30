@@ -410,7 +410,21 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        ev, bars, spb, scale_name, _prog, mname, _mood, _plan = chipmod.compose(a, np, rng)
+        src = getattr(a, "from_audio", None)
+        if src:
+            import transcribe
+            mname = getattr(a, "mood", None)
+            if not mname or mname == "auto":
+                mname = chipmod.infer_mood(getattr(a, "prompt", "") or "")
+            got = transcribe.to_events(src, np, sf, steps_per_bar=16,
+                                       beats_per_bar=4, seconds=a.seconds)
+            if not got:
+                sys.exit(f"--from-audio: could not analyze {src}")
+            ev, bars, spb, ana, scale_name = got
+            print(f"   \u266a transcribed {os.path.basename(src)}: "
+                  f"{transcribe.describe(ana)}")
+        else:
+            ev, bars, spb, scale_name, _prog, mname, _mood, _plan = chipmod.compose(a, np, rng)
         # Voices come from the MOOD unless the caller named one explicitly.
         # Without this, mood was inaudible on AdLib: every track was voiced
         # brass/organ/bass and only the pitches changed.

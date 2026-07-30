@@ -823,6 +823,11 @@ def main():
                    choices=["minor", "harmonic", "dorian", "phrygian", "major",
                             "mixolydian", "pentatonic"],
                    help="override the scale implied by --key")
+    p.add_argument("--from-audio", dest="from_audio", default=None, metavar="FILE",
+                   help="TRANSCRIBE a reference recording and play it on the chip. "
+                        "Takes the tempo, key, chords, melody, bass and drums from "
+                        "FILE — the composition is the reference's, the sound is the "
+                        "chip's. Mood still chooses the voices.")
     p.add_argument("--mood", default="auto",
                    help="mood for --chip/--opl: heroic, ominous, eerie, melancholy, "
                         "solemn, mysterious, tense, frantic, driving, playful, serene, "

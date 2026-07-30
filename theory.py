@@ -285,3 +285,182 @@ def plan_track(name, mood, mood_name, scale_name, bars_target):
             "scale": scale, "scale_name": scale_name,
             "drums": ident.rint(0, 3), "duty": mood["duty"],
             "bars_per_section": max(2, bars_target // max(1, len(form)))}
+
+
+# =============================================================================
+# METER AND RHYTHM
+#
+# The original engine hardcoded 4/4 (STEPS = 16), ONE bass rhythm
+# (`for s in (0, 4, 8, 12)`) and four drum patterns that all shared the SAME
+# snare placement. Different notes on an identical rhythmic chassis reads as
+# "the same music", which is exactly the complaint this fixes.
+#
+# No theory library helps here — music21 knows what 7/8 is, but it cannot know
+# that this synthesizer only ever emitted 4/4. The fix is to stop hardcoding.
+# =============================================================================
+
+# (beats_per_bar, beat_unit). Everything is quantized to a 16th grid, so a /4
+# meter gets 4 steps per beat and a /8 meter gets 2.
+METERS = {
+    "4/4":  (4, 4), "3/4": (3, 4), "5/4": (5, 4),
+    "6/8":  (6, 8), "12/8": (12, 8), "7/8": (7, 8), "9/8": (9, 8),
+    "2/4":  (2, 4),
+}
+
+
+def meter_grid(meter):
+    """(steps_per_bar, steps_per_beat, quarter_notes_per_bar)."""
+    beats, unit = METERS.get(meter, METERS["4/4"])
+    spb_steps = 4 if unit == 4 else 2
+    return beats * spb_steps, spb_steps, beats * (4.0 / unit)
+
+
+# Which meters suit which mood. Compound meters (6/8, 12/8) lilt; 5/4 and 7/8
+# feel unresolved, which is useful for dread and useless for a fanfare.
+MOOD_METERS = {
+    "heroic":     ("4/4", "4/4", "12/8"),
+    "triumphant": ("4/4", "4/4", "3/4"),
+    "ominous":    ("4/4", "3/4", "5/4", "7/8"),
+    "eerie":      ("5/4", "7/8", "3/4", "6/8"),
+    "melancholy": ("3/4", "6/8", "4/4"),
+    "solemn":     ("3/4", "4/4", "12/8"),
+    "mysterious": ("6/8", "5/4", "4/4", "7/8"),
+    "tense":      ("7/8", "5/4", "4/4"),
+    "frantic":    ("4/4", "7/8", "2/4"),
+    "driving":    ("4/4", "4/4", "12/8"),
+    "playful":    ("6/8", "2/4", "4/4"),
+    "serene":     ("3/4", "6/8", "4/4"),
+    "grand":      ("4/4", "3/4", "12/8"),
+    "wondrous":   ("6/8", "12/8", "3/4"),
+}
+
+# Bass rhythm styles, as functions of the meter's grid. This is the single
+# biggest contributor to "the meter feels the same" — a pedal note and a walking
+# eighth line over the same chords are unrecognisable as the same arrangement.
+BASS_STYLES = ("beats", "pedal", "eighths", "offbeat", "dotted", "halves",
+               "firstlast", "gallop")
+
+
+def bass_onsets(style, steps, spb_steps):
+    """Step indices where the bass articulates, plus the duration of each."""
+    if style == "pedal":                       # one long note, whole bar
+        return [(0, steps)]
+    if style == "beats":                       # on every beat
+        return [(s, spb_steps) for s in range(0, steps, spb_steps)]
+    if style == "eighths":
+        h = max(1, spb_steps // 2)
+        return [(s, h) for s in range(0, steps, h)]
+    if style == "offbeat":                     # skip the downbeat entirely
+        h = max(1, spb_steps // 2)
+        return [(s, h) for s in range(h, steps, spb_steps)]
+    if style == "dotted":                      # 3+3+2 feel, meter permitting
+        out, s = [], 0
+        for d in (3, 3, 2) * 4:
+            if s >= steps:
+                break
+            out.append((s, min(d, steps - s)))
+            s += d
+        return out
+    if style == "halves":
+        two = spb_steps * 2
+        return [(s, two) for s in range(0, steps, two)]
+    if style == "firstlast":
+        return [(0, spb_steps), (max(0, steps - spb_steps), spb_steps)]
+    if style == "gallop":                      # long-short-short
+        out, s = [], 0
+        while s < steps:
+            out.append((s, min(spb_steps, steps - s)))
+            s += spb_steps
+            for _ in range(2):
+                if s >= steps:
+                    break
+                h = max(1, spb_steps // 2)
+                out.append((s, min(h, steps - s)))
+                s += h
+        return out
+    return [(s, spb_steps) for s in range(0, steps, spb_steps)]
+
+
+# Drum kits described by FUNCTION rather than as fixed 16-char strings, so they
+# work in 3/4, 7/8 and 12/8 instead of only 4/4. Values are beat positions
+# (floats, in beats) — fractional entries land off the beat.
+KITS = {
+    "backbeat":  dict(k=(0, 2), s=(1, 3), h=0.5),
+    "fourfloor": dict(k=(0, 1, 2, 3), s=(2,), h=0.5),
+    "halftime":  dict(k=(0,), s=(2,), h=1.0),
+    "march":     dict(k=(0, 1, 2, 3), s=(1.5, 3.5), h=0.0),
+    "waltz":     dict(k=(0,), s=(1, 2), h=1.0),
+    "gallop":    dict(k=(0, 1.5, 2.5), s=(2,), h=0.5),
+    "sparse":    dict(k=(0,), s=(), h=0.0),
+    "tribal":    dict(k=(0, 0.75, 1.5, 2.25), s=(3,), h=0.0),
+    "heartbeat": dict(k=(0, 0.5), s=(), h=0.0),
+    "none":      dict(k=(), s=(), h=0.0),
+    "hatsonly":  dict(k=(), s=(), h=0.5),
+    "syncop":    dict(k=(0, 1.75, 3), s=(1, 2.5), h=0.25),
+}
+
+MOOD_KITS = {
+    "heroic":     ("march", "backbeat", "fourfloor"),
+    "triumphant": ("march", "fourfloor", "backbeat"),
+    "ominous":    ("halftime", "sparse", "heartbeat", "tribal"),
+    "eerie":      ("sparse", "none", "heartbeat", "hatsonly"),
+    "melancholy": ("waltz", "halftime", "sparse"),
+    "solemn":     ("halftime", "waltz", "sparse", "none"),
+    "mysterious": ("hatsonly", "sparse", "syncop", "tribal"),
+    "tense":      ("syncop", "heartbeat", "halftime", "tribal"),
+    "frantic":    ("fourfloor", "gallop", "syncop"),
+    "driving":    ("fourfloor", "backbeat", "gallop"),
+    "playful":    ("backbeat", "gallop", "waltz"),
+    "serene":     ("none", "hatsonly", "sparse"),
+    "grand":      ("march", "halftime", "tribal"),
+    "wondrous":   ("hatsonly", "waltz", "sparse"),
+}
+
+
+def kit_pattern(kit_name, steps, spb_steps):
+    """Realize a kit into {kind: set(step indices)} for this meter."""
+    kit = KITS.get(kit_name, KITS["backbeat"])
+    beats = steps / float(spb_steps)
+    out = {"k": set(), "s": set(), "h": set()}
+    for kind in ("k", "s"):
+        for b in kit[kind]:
+            if b < beats:
+                out[kind].add(int(round(b * spb_steps)) % steps)
+    if kit["h"] > 0:
+        stride = max(1, int(round(kit["h"] * spb_steps)))
+        out["h"] = set(range(0, steps, stride))
+    return out
+
+
+def gen_rhythm(ident, steps, spb_steps, density, rest_chance=0.0, syncopate=0.0):
+    """Generate a motif rhythm summing to `steps`, as (duration, is_rest) pairs.
+
+    Replaces the fixed 11-entry RHYTHMS table, which could only ever describe
+    4/4 bars and had no rests — so every lead line played continuously, in the
+    same meter, forever.
+
+    `density` 0..1 biases toward shorter notes. Rests matter more than they
+    sound like they should: a melody that never stops is a melody with no phrase
+    structure, and it is a large part of why every track felt the same.
+    """
+    # Durations available, longest first, expressed in 16th steps.
+    pool = [spb_steps * 2, spb_steps, spb_steps // 2 or 1, spb_steps + spb_steps // 2]
+    pool = [d for d in dict.fromkeys(pool) if d >= 1]
+    out, pos = [], 0
+    while pos < steps:
+        room = steps - pos
+        cands = [d for d in pool if d <= room] or [room]
+        # Denser moods weight short values; sparse ones weight long.
+        if ident.frac() < density:
+            d = min(cands)
+        else:
+            d = cands[ident._next() % len(cands)]
+        if syncopate and pos % spb_steps == 0 and ident.frac() < syncopate:
+            half = max(1, spb_steps // 2)
+            if half <= room:
+                out.append((half, True))       # push the phrase off the beat
+                pos += half
+                continue
+        out.append((d, ident.frac() < rest_chance))
+        pos += d
+    return out
