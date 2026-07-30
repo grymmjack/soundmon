@@ -633,3 +633,75 @@ def corpus_rhythm(ident, timesig, steps):
     if pos < steps:
         out.append((steps - pos, ident.frac() < 0.35))   # tail: note or rest
     return out or None
+
+
+def corpus_intervals(mode):
+    """Learned melodic step distribution: [(semitones, weight), ...] or None."""
+    c = load_corpus()
+    if not c:
+        return None
+    tab = (c.get("intervals") or {}).get("minor" if mode != "major" else "major")
+    if not tab:
+        return None
+    out = []
+    for k, v in tab.items():
+        try:
+            out.append((int(k), float(v)))
+        except ValueError:
+            continue
+    return out or None
+
+
+def corpus_motif(ident, rhythm, mode, scale_len, span):
+    """Build a motif by WALKING the corpus's interval distribution.
+
+    The hand-written CONTOURS are shapes I invented — an arch, a descent. They
+    are not wrong, but they are arbitrary, and every track using the same
+    archetype moves the same way.
+
+    Real melodies are better described by their step sizes: measured over 1,097
+    game MIDIs, 18% of moves repeat the note, 23% are a whole step either way and
+    14% a semitone — overwhelmingly stepwise, with occasional leaps. Sampling
+    from that produces motion that is idiomatic by measurement, and different
+    every time without being random.
+
+    A soft boundary keeps the line inside `span` scale degrees: when it wanders
+    too far it is nudged back rather than clamped, so the shape stays organic.
+    """
+    dist = corpus_intervals(mode)
+    if not dist:
+        return None
+    # Semitone steps -> scale steps, so the walk stays diatonic.
+    step_dist = [(int(round(iv / 2.0)), w) for iv, w in dist]
+    merged = {}
+    for k, w in step_dist:
+        merged[k] = merged.get(k, 0.0) + w
+    pairs = sorted(merged.items())
+
+    out = []
+    cur = 0
+    for item in rhythm:
+        dur, is_rest = item if isinstance(item, tuple) else (item, False)
+        mv = _weighted(ident, pairs)
+        cur += mv if mv is not None else 0
+        # Soft leash: pull back toward the centre once outside the span.
+        if cur > span:
+            cur -= 1 + (cur - span) // 2
+        elif cur < -span:
+            cur += 1 + (-span - cur) // 2
+        out.append((dur, max(-span, min(span, cur)), is_rest))
+    return out or None
+
+
+# Accent weights by position, so procedural output has DYNAMICS. Everything was
+# rendering at one level, which reads as relentless — the same defect velocity
+# fixes on the MIDI path.
+def accent(step, spb_steps, base=96):
+    """MIDI-style velocity for a grid position: downbeat > beat > off-beat."""
+    if step == 0:
+        return min(127, base + 24)
+    if spb_steps and step % spb_steps == 0:
+        return min(127, base + 10)
+    if spb_steps and step % max(1, spb_steps // 2) == 0:
+        return base
+    return max(40, base - 22)

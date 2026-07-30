@@ -19,3 +19,4 @@ vendor/
 # Mined from a local MIDI collection by tools/mine-corpus.py. Machine-specific
 # (it names a path on disk) and regenerable in minutes, so it stays out of git.
 corpus.json
+vendor/opl-calibration.json

@@ -98,6 +98,13 @@ def parse(path):
         status = 0
         sounding = {}                       # (chan, pitch) -> (start_tick, vel)
         program = [0] * 16                  # current GM program per channel
+        # CC7 (channel volume) and CC11 (expression) are how an arranger BALANCES
+        # the mix. Discarding them and playing every patch at its designed level
+        # is why one instrument came out blaring and another nearly inaudible:
+        # DMXOPL spreads 24 dB across its patches on purpose, expecting these to
+        # even it out.
+        cc_vol = [100] * 16                 # CC7,  default per GM
+        cc_expr = [127] * 16                # CC11, default full
         while i < tend:
             delta, i = _vlq(data, i)
             tick += delta
@@ -141,11 +148,22 @@ def parse(path):
                         # actual instruments for.
                         drums.append((tick, d1))
                     else:
-                        sounding[(chan, d1)] = (tick, d2)
+                        # Effective velocity = note velocity scaled by the
+                        # channel's volume and expression, which is what the MIDI
+                        # spec says and what the arranger intended.
+                        eff = d2 * (cc_vol[chan] / 127.0) * (cc_expr[chan] / 127.0)
+                        sounding[(chan, d1)] = (tick, max(1, int(round(eff))))
                 elif hi in (0x80, 0x90):                     # note off
                     st = sounding.pop((chan, d1), None)
                     if st and chan != 9:
                         notes.append((st[0], tick, d1, st[1], chan, program[chan]))
+                if hi == 0xB0:                               # control change
+                    if d1 == 7:
+                        cc_vol[chan] = d2
+                    elif d1 == 11:
+                        cc_expr[chan] = d2
+                    elif d1 == 121:                          # reset controllers
+                        cc_vol[chan], cc_expr[chan] = 100, 127
             elif hi == 0xC0:                             # program change
                 # This is what makes the GM bank usable: without recording it,
                 # every instrument in the file plays on one patch.
@@ -269,7 +287,11 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
     poly = []
     for (b, st), group in sorted(buckets.items()):
         for pitch, vel, dur, prog in group:
-            poly.append((b, st, dur, pitch, prog))
+            # Velocity carried through. It was being parsed and then dropped, so
+            # every note played at full level — no accents, no dynamics, no
+            # phrasing. On a chip that reads as relentless, which is a large part
+            # of what still separated these renders from the MIDI's intent.
+            poly.append((b, st, dur, pitch, prog, vel))
 
     info = {"bpm": bpm, "timesig": f"{beats_per_bar}/{unit}", "steps": steps,
             "poly": poly, "poly_notes": len(poly), "drums_gm": drums_gm,

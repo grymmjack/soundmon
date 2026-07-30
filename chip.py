@@ -371,8 +371,13 @@ def compose(a, np, rng):
     first = form[0]
     motifs, kits, basses = {}, {}, {}
     for letter, sec in plan["sections"].items():
-        m = theory.make_motif(theory.Ident(track, "motif:%s:%s" % (letter, mname)),
-                              sec["rhythm"], sec["contour"], mood["span"], spb_steps)
+        mid_ = theory.Ident(track, "motif:%s:%s" % (letter, mname))
+        # Learned interval walk when a corpus exists; hand-written contour
+        # archetypes otherwise.
+        m = (theory.corpus_motif(mid_, sec["rhythm"], scale_name, len(scale),
+                                 mood["span"])
+             or theory.make_motif(mid_, sec["rhythm"], sec["contour"],
+                                  mood["span"], spb_steps))
         if letter != first and sec["transform"]:
             m = theory.transform(m, sec["transform"],
                                  theory.Ident(track, "tr:" + letter))
@@ -414,13 +419,15 @@ def compose(a, np, rng):
                         n = deg(degree, lead_oct)          # anchor on the chord
                     if b == bps - 1 and j == last:
                         n = deg(0, lead_oct)               # cadence -> tonic
-                    ev["lead"].append((bar, pos, min(d, steps - pos), n, duty_lead))
+                    ev["lead"].append((bar, pos, min(d, steps - pos), n,
+                                       duty_lead, theory.accent(pos, spb_steps, 104)))
                 pos += d
 
             # --- arp: the signature. Chord tones cycled every `arp_rate` step.
             k = 0
             for s in range(0, steps, arp_rate):
-                ev["arp"].append((bar, s, arp_rate, chord[k % len(chord)], 0.25))
+                ev["arp"].append((bar, s, arp_rate, chord[k % len(chord)], 0.25,
+                                  theory.accent(s, spb_steps, 74)))
                 k += 1
 
             # --- bass: the section's rhythm STYLE, voice-led for motion
@@ -434,7 +441,8 @@ def compose(a, np, rng):
                     prev_bass = bn
                 else:
                     bn = low[si % len(low)] if si % 2 else prev_bass
-                ev["bass"].append((bar, s, min(d, steps - s), bn))
+                ev["bass"].append((bar, s, min(d, steps - s), bn,
+                                   theory.accent(s, spb_steps, 92)))
 
             # --- drums: kit realized for THIS meter
             kit = kits[letter]
@@ -456,7 +464,9 @@ def render(a, ev, bars, spb, np, mood=None, steps=STEPS):
     def at(bar, step):
         return int(round((bar * spb + step * step_s) * sr))
 
-    for bar, step, dur, note, duty in ev["lead"]:
+    for _it in ev["lead"]:
+        bar, step, dur, note, duty = _it[:5]
+        vgain = (_it[5] / 104.0) if len(_it) > 5 else 1.0
         n = int(dur * step_s * sr)
         if n < 8:
             continue
@@ -466,21 +476,25 @@ def render(a, ev, bars, spb, np, mood=None, steps=STEPS):
         t = np.arange(n, dtype=np.float64) / sr
         ph = 2 * np.pi * f * np.cumsum(vib) / sr
         w = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
-        tr.add(at(bar, step), w * _env(n, sr, 2, 6.0, 0.35, np), 0.26)
+        tr.add(at(bar, step), w * _env(n, sr, 2, 6.0, 0.35, np), 0.26 * vgain)
 
-    for bar, step, dur, note, duty in ev["arp"]:
+    for _it in ev["arp"]:
+        bar, step, dur, note, duty = _it[:5]
+        vgain = (_it[5] / 74.0) if len(_it) > 5 else 1.0
         n = int(dur * step_s * sr)
         if n < 4:
             continue
         w = _pulse(_hz(note), n, sr, duty, np)
-        tr.add(at(bar, step), w * _env(n, sr, 1, 30.0, 0.0, np), 0.15)
+        tr.add(at(bar, step), w * _env(n, sr, 1, 30.0, 0.0, np), 0.15 * vgain)
 
-    for bar, step, dur, note in ev["bass"]:
+    for _it in ev["bass"]:
+        bar, step, dur, note = _it[:4]
+        vgain = (_it[4] / 92.0) if len(_it) > 4 else 1.0
         n = int(dur * step_s * sr)
         if n < 8:
             continue
         w = _tri(_hz(note), n, sr, np)
-        tr.add(at(bar, step), w * _env(n, sr, 3, 3.0, 0.75, np), 0.34)
+        tr.add(at(bar, step), w * _env(n, sr, 3, 3.0, 0.75, np), 0.34 * vgain)
 
     # Noise hits are short and reused, so synthesize each kind once.
     hits = {

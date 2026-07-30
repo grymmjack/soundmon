@@ -430,12 +430,18 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
 
     # Index events by absolute 16th step so the sequencer is one pass.
     lead, arp, bass, drum = {}, {}, {}, {}
-    for bar, pos, dur, note, _duty in ev["lead"]:
-        lead.setdefault(bar * steps + pos, []).append((dur, note))
-    for bar, pos, dur, note, _duty in ev["arp"]:
-        arp.setdefault(bar * steps + pos, []).append((dur, note))
-    for bar, pos, dur, note in ev["bass"]:
-        bass.setdefault(bar * steps + pos, []).append((dur, note))
+    for _it in ev["lead"]:
+        bar, pos, dur, note = _it[0], _it[1], _it[2], _it[3]
+        vel = _it[5] if len(_it) > 5 else None
+        lead.setdefault(bar * steps + pos, []).append((dur, note, vel))
+    for _it in ev["arp"]:
+        bar, pos, dur, note = _it[0], _it[1], _it[2], _it[3]
+        vel = _it[5] if len(_it) > 5 else None
+        arp.setdefault(bar * steps + pos, []).append((dur, note, vel))
+    for _it in ev["bass"]:
+        bar, pos, dur, note = _it[0], _it[1], _it[2], _it[3]
+        vel = _it[4] if len(_it) > 4 else None
+        bass.setdefault(bar * steps + pos, []).append((dur, note, vel))
     for bar, pos, kind in ev["drum"]:
         drum.setdefault(bar * steps + pos, []).append(kind)
 
@@ -447,6 +453,10 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
     for s in range(total_steps):
         for st, ch, role in ((lead, CH_LEAD, "lead"), (bass, CH_BASS, "bass")):
             if s in st:
+                # Accent from the composer, so procedural output has dynamics
+                # too. Without this the 4-voice path renders every note at one
+                # level — measured 0.62 dB of spread across a whole track.
+                _v = st[s][0][2] if len(st[s][0]) > 2 else None
                 # Real GM patch for this note, when a MIDI supplied one. Real OPL
                 # drivers reprogrammed the channel per note exactly like this —
                 # without it every instrument in the file plays as one timbre.
@@ -455,6 +465,12 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
                     if p is not None:
                         _apply_program(chip, ch, p)
                 chip.key_off(ch)
+                _ins = (v_lead if role == "lead" else v_bass)
+                if _v is not None:
+                    _base = [_ins.c[2]] if hasattr(_ins, "c") else [0]
+                    add = int(round((127 - max(1, min(127, _v))) * 0.28))
+                    _m, _c = _op_pair(ch)
+                    chip.write(0x40 + _c, min(63, (_base[0] & 0x3F) + add))
                 chip.key_on(ch, hz(st[s][0][1]))
         if s in arp:
             # Alternate two channels so consecutive arp notes overlap slightly,
@@ -651,7 +667,9 @@ def load_wopl(path):
     def one(off):
         name = data[off:off + 32].split(b"\0")[0].decode("utf-8", "replace")
         key_off = int.from_bytes(data[off + 32:off + 34], "big", signed=True)
+        key_off2 = int.from_bytes(data[off + 34:off + 36], "big", signed=True)
         vel_off = int.from_bytes(data[off + 36:off + 37], "big", signed=True)
+        detune = int.from_bytes(data[off + 37:off + 38], "big", signed=True)
         perc_key = data[off + 38]
         flags = data[off + 39]
         fbc1, fbc2 = data[off + 40], data[off + 41]
@@ -659,7 +677,8 @@ def load_wopl(path):
         for k in range(4):
             b = off + 42 + k * 5
             ops.append(tuple(data[b:b + 5]))    # AVEKM, KSL|TL, AR|DR, SR|RR, WS
-        return {"name": name, "key_off": key_off, "vel_off": vel_off,
+        return {"name": name, "key_off": key_off, "key_off2": key_off2,
+                "detune": detune, "vel_off": vel_off,
                 "perc_key": perc_key, "four_op": bool(flags & 0x01),
                 "pseudo4": bool(flags & 0x02), "blank": bool(flags & 0x04),
                 "rhythm": (flags & 0x38) >> 3, "fixed_note": bool(flags & 0x40),
@@ -704,6 +723,30 @@ def load_wopl_bank(path=None):
     return None
 
 
+# Carrier Total Level compression.
+#
+# DMXOPL spreads 24 dB across its patches: a church organ sits at TL=0 (absolute
+# maximum) while SynthStrings 1 sits at TL=32. That is deliberate voicing, and it
+# is meant to be evened out by MIDI channel volume — but a great many game MIDIs
+# have no dynamics at all. Zelda's Boss Battle is velocity 110 on every note of
+# every channel, 0 dB of spread, so nothing in the file corrects for it and one
+# instrument blares while another is inaudible.
+#
+# Compressing toward the bank's median narrows the spread while preserving the
+# ORDER (an organ still reads louder than strings). Only the CARRIER is touched:
+# the modulator's TL sets FM index, so changing that would alter timbre rather
+# than level — the classic mistake when adding level control to FM.
+TL_MEDIAN = 5           # measured median carrier TL across DMXOPL's 128 patches
+TL_SQUEEZE = 0.5        # 1.0 = bank as-is, 0.0 = every patch identical
+
+
+def _balance_tl(tl):
+    out = TL_MEDIAN + (tl - TL_MEDIAN) * TL_SQUEEZE
+    # Never fully open: TL=0 is the chip's absolute maximum and stacking 15 voices
+    # there is what clips the mix.
+    return max(3, min(63, int(round(out))))
+
+
 def program_wopl(chip, ch, ins):
     """Apply a WOPL instrument to a 2-operator channel.
 
@@ -715,7 +758,10 @@ def program_wopl(chip, ch, ins):
     car, mod = ins["ops"][0], ins["ops"][1]      # op1=CARRIER, op2=MODULATOR
     for off, o in ((m, mod), (c, car)):
         chip.write(0x20 + off, o[0])
-        chip.write(0x40 + off, o[1])
+        lvl = o[1]
+        if off == c:
+            lvl = (lvl & 0xC0) | _balance_tl(lvl & 0x3F)
+        chip.write(0x40 + off, lvl)
         chip.write(0x60 + off, o[2])
         chip.write(0x80 + off, o[3])
         chip.write(0xE0 + off, o[4])
@@ -757,7 +803,10 @@ def program_wopl_4op(chip, ch1, ch2, ins):
     for off, o in ((m1, ins["ops"][1]), (c1, ins["ops"][0]),
                    (m2, ins["ops"][3]), (c2, ins["ops"][2])):
         chip.write(0x20 + off, o[0])
-        chip.write(0x40 + off, o[1])
+        lvl = o[1]
+        if off in (c1, c2):
+            lvl = (lvl & 0xC0) | _balance_tl(lvl & 0x3F)
+        chip.write(0x40 + off, lvl)
         chip.write(0x60 + off, o[2])
         chip.write(0x80 + off, o[3])
         chip.write(0xE0 + off, o[4])
@@ -765,72 +814,145 @@ def program_wopl_4op(chip, ch1, ch2, ins):
     chip.write(_ch_reg(ch2, 0xC0), 0x30 | (ins["fbc2"] & 0x0F))
 
 
-class Allocator:
-    """Assigns notes to OPL channels, preferring 4-op voices for melody.
+def _carrier_regs(chans, ins):
+    """Register addresses of the operators that reach the output.
 
-    Voice stealing takes the OLDEST sounding note when everything is busy. That
-    is the right choice for music: the newest note is the one the listener is
-    waiting for, and the oldest is usually already decaying.
+    Only the CARRIERS should be attenuated for velocity. Turning down a modulator
+    changes the timbre — less FM index, so a duller sound — rather than the
+    volume, which is the classic mistake when adding dynamics to FM.
+    """
+    if len(chans) == 2 and ins and (ins.get("four_op") or ins.get("pseudo4")):
+        # 4-op: ops[0] and ops[2] are Carrier1 and Carrier2.
+        return [_op_pair(chans[0])[1], _op_pair(chans[1])[1]]
+    return [_op_pair(chans[0])[1]]
+
+
+def _apply_velocity(chip, chans, ins, base_tl, vel, trim=0):
+    """Attenuate the carriers for MIDI velocity.
+
+    Total Level is 6 bits where 0 is loudest and each step is 0.75 dB, so
+    velocity maps to an ADDITIVE offset on the patch's own TL — preserving the
+    instrument's designed balance instead of overwriting it.
+    """
+    # Cap the attenuation. A patch already 24 dB down in the bank, hit by a low
+    # velocity on a channel with low CC7, would otherwise disappear entirely —
+    # which is worse than being slightly too loud, because a missing inner voice
+    # reads as a broken arrangement rather than a quiet one.
+    add = min(24, int(round((127 - max(1, min(127, vel or 127))) * 0.28)))
+    add += trim                              # per-patch level calibration
+    for i, reg in enumerate(_carrier_regs(chans, ins)):
+        tl = base_tl[i] if i < len(base_tl) else 0
+        ksl = tl & 0xC0
+        chip.write(0x40 + reg, ksl | min(63, (tl & 0x3F) + add))
+
+
+def program_wopl_voice2(chip, ch, ins):
+    """Program the SECOND voice of a pseudo-4-operator patch.
+
+    Pseudo-4-op is not a fused 4-operator voice — it is two independent 2-op
+    voices played together, slightly detuned, and the beating between them is the
+    effect. ops[2]/ops[3] are Carrier2/Modulator2, and fbc2 is their
+    feedback/connection.
+    """
+    m, c = _op_pair(ch)
+    car, mod = ins["ops"][2], ins["ops"][3]
+    for off, o in ((m, mod), (c, car)):
+        chip.write(0x20 + off, o[0])
+        lvl = o[1]
+        if off == c:
+            lvl = (lvl & 0xC0) | _balance_tl(lvl & 0x3F)
+        chip.write(0x40 + off, lvl)
+        chip.write(0x60 + off, o[2])
+        chip.write(0x80 + off, o[3])
+        chip.write(0xE0 + off, o[4])
+    chip.write(_ch_reg(ch, 0xC0), 0x30 | (ins["fbc2"] & 0x0F))
+
+
+class Allocator:
+    """Assigns notes to OPL channels. All 18 channels, all in 2-operator mode.
+
+    WHY NO 4-OPERATOR FUSION. Measured against DMXOPL: it contains ZERO real
+    4-operator patches. All 102 of its "4-op" instruments are pseudo-4-op — two
+    independent detuned 2-op voices — and 26 are plain 2-op.
+
+    Fusing channel pairs was therefore wrong twice over: it broke the 26 plain
+    2-op patches outright (a 2-op patch on a fused channel is silent or nearly
+    so — Tenor Sax measured -93 dB), and it mangled the 102 pseudo-4-op ones by
+    routing two separate voices through one fused algorithm (-52 dB against
+    -28 dB done properly). That is the whole reason one instrument blared while
+    another was inaudible.
+
+    Unfused, all 18 channels are usable, which is also more polyphony than
+    6 fused + 6 spare.
+
+    Voice stealing takes the OLDEST sounding note: the newest is the one the
+    listener is waiting for, the oldest is usually already decaying.
     """
 
-    def __init__(self, chip, wopl, use_four_op=True, reserve_drums=True):
+    def __init__(self, chip, wopl, use_four_op=False, reserve_drums=False):
         self.chip = chip
         self.wopl = wopl
-        # Enable all six 4-op pairs, leaving 6,7,8,15,16,17 as 2-op. Channels
-        # 6/7/8 are also the rhythm-mode drum channels, so when drums are wanted
-        # they are reserved and the 2-op pool shrinks to 15,16,17.
-        self.four = list(FOUR_OP_PAIRS) if use_four_op else []
-        self.chip.set_four_op(0x3F if use_four_op else 0x00)
-        two = [c for c in TWO_OP_ONLY if not (reserve_drums and c in (6, 7, 8))]
-        self.two = two
-        self.busy = {}                  # channel-key -> (age, note)
-        self.progs = {}                 # channel-key -> program currently loaded
+        self.chip.set_four_op(0x00)          # never fuse; see the class docstring
+        pool = list(range(18))
+        if reserve_drums:                     # rhythm mode owns 6,7,8
+            pool = [c for c in pool if c not in (6, 7, 8)]
+        self.free = pool
+        self.busy = {}                        # key -> (age, pitch, channels)
+        self.progs = {}
         self.age = 0
 
-    def _slots(self, want_four):
-        return ([("4", p) for p in self.four] + [("2", (c,)) for c in self.two]
-                if want_four else
-                [("2", (c,)) for c in self.two] + [("4", p) for p in self.four])
+    def _take(self, n):
+        """Grab n channels, stealing the oldest notes if necessary."""
+        got = []
+        while len(got) < n:
+            if self.free:
+                got.append(self.free.pop(0))
+                continue
+            if not self.busy:
+                return None
+            key = min(self.busy, key=lambda k: self.busy[k][0])
+            _age, _p, chans = self.busy.pop(key)
+            for ch in chans:
+                self.chip.key_off(ch)
+                self.free.append(ch)
+        return got
 
-    def note_on(self, pitch, prog, hz):
+    def note_on(self, pitch, prog, hz, vel=None):
         ins = None
-        want_four = False
         if self.wopl and 0 <= prog < len(self.wopl["melodic"]):
             ins = self.wopl["melodic"][prog]
-            want_four = bool(ins["four_op"] or ins["pseudo4"])
-        slots = self._slots(want_four)
-        free = [s for s in slots if s[1] not in self.busy]
-        if free:
-            kind, chans = free[0]
+        two_voice = bool(ins and ins.get("pseudo4"))
+        chans = self._take(2 if two_voice else 1)
+        if not chans:
+            return None
+
+        trim = calibration_trim(prog)
+        if ins:
+            program_wopl(self.chip, chans[0], ins)
+            _apply_velocity(self.chip, (chans[0],), ins,
+                            [ins["ops"][0][1]], vel, trim)
+            self.chip.key_on(chans[0], hz * (2.0 ** (ins["key_off"] / 12.0)))
+            if two_voice:
+                program_wopl_voice2(self.chip, chans[1], ins)
+                _apply_velocity(self.chip, (chans[1],), ins,
+                                [ins["ops"][2][1]], vel, trim)
+                # Detune the second voice slightly: the beating between the pair
+                # IS the pseudo-4-op effect. `detune` is a fine offset, key_off2
+                # a coarse one in semitones.
+                cents = (ins.get("detune") or 0) / 64.0
+                hz2 = hz * (2.0 ** ((ins.get("key_off2", 0) + cents / 100.0) / 12.0))
+                self.chip.key_on(chans[1], hz2)
         else:
-            oldest = min(self.busy.items(), key=lambda kv: kv[1][0])
-            chans = oldest[0]
-            kind = "4" if len(chans) == 2 else "2"
-            self.chip.key_off(chans[0])
-            del self.busy[chans]
-        # Only reprogram when the instrument actually changed — register writes
-        # are not free and a busy passage can retrigger dozens of times a second.
-        if self.progs.get(chans) != prog:
-            if ins and kind == "4" and want_four:
-                program_wopl_4op(self.chip, chans[0], chans[1], ins)
-            elif ins:
-                program_wopl(self.chip, chans[0], ins)
-            else:
-                _apply_program(self.chip, chans[0], prog)
-            self.progs[chans] = prog
+            _apply_program(self.chip, chans[0], prog)
+            self.chip.key_on(chans[0], hz)
+
         self.age += 1
-        self.busy[chans] = (self.age, pitch)
-        self.chip.key_on(chans[0], hz)
+        self.busy[(pitch, self.age)] = (self.age, pitch, chans)
         return chans
 
     def perc_on(self, gm_note):
-        """Strike a GM percussion instrument from the bank's percussion set.
-
-        Percussion is one-shot: it is keyed on and left to decay rather than
-        tracked for a note-off, because a drum's envelope IS its length. It is
-        allocated from the same pool, so a busy drum pattern steals from itself
-        before it steals the melody — which is the right priority.
-        """
+        """Strike a GM percussion instrument. One-shot: keyed on and left to
+        decay, because a drum's envelope IS its length."""
         if not (self.wopl and self.wopl.get("percussion")):
             return
         if not (0 <= gm_note < len(self.wopl["percussion"])):
@@ -838,34 +960,29 @@ class Allocator:
         ins = self.wopl["percussion"][gm_note]
         if ins.get("blank"):
             return
-        slots = [("2", (c,)) for c in self.two] + [("4", p) for p in self.four]
-        free = [sl for sl in slots if sl[1] not in self.busy]
-        if free:
-            chans = free[0][1]
-        else:
-            oldest = min(self.busy.items(), key=lambda kv: kv[1][0])
-            chans = oldest[0]
-            self.chip.key_off(chans[0])
-            del self.busy[chans]
+        chans = self._take(1)
+        if not chans:
+            return
         program_wopl(self.chip, chans[0], ins)
-        self.progs[chans] = ("perc", gm_note)
-        # Percussion instruments carry their own key. fixed_note means play THAT
-        # pitch regardless of the note number, which is how a kick stays a kick.
         key = ins["perc_key"] if ins["perc_key"] else gm_note
         self.age += 1
-        self.busy[chans] = (self.age, -gm_note)     # negative: never note_off'd
+        self.busy[(-gm_note, self.age)] = (self.age, -gm_note, chans)
         self.chip.key_on(chans[0], 440.0 * (2.0 ** ((key - 69) / 12.0)))
 
     def note_off(self, pitch):
-        for chans, (age, p) in list(self.busy.items()):
+        for key in list(self.busy):
+            age, p, chans = self.busy[key]
             if p == pitch:
-                self.chip.key_off(chans[0])
-                del self.busy[chans]
+                for ch in chans:
+                    self.chip.key_off(ch)
+                    self.free.append(ch)
+                del self.busy[key]
                 return
 
     def all_off(self):
-        for chans in list(self.busy):
-            self.chip.key_off(chans[0])
+        for key in list(self.busy):
+            for ch in self.busy[key][2]:
+                self.chip.key_off(ch)
         self.busy.clear()
 
 
@@ -899,11 +1016,13 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
             chip.write(0x60 + op, 0xF8); chip.write(0x80 + op, 0xF8)
 
     ons, offs = {}, {}
-    for bar, st, dur, pitch, prog in poly:
+    for item in poly:
+        bar, st, dur, pitch, prog = item[:5]
+        vel = item[5] if len(item) > 5 else None
         s = bar * steps + st
         if s >= total:
             continue
-        ons.setdefault(s, []).append((pitch, prog))
+        ons.setdefault(s, []).append((pitch, prog, vel))
         offs.setdefault(min(total, s + max(1, dur)), []).append(pitch)
     dmap = {}
     for bar, st, kind in (drums or []):
@@ -919,8 +1038,8 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
     for s in range(total):
         for p in offs.get(s, ()):
             alloc.note_off(p)
-        for pitch, prog in ons.get(s, ()):
-            alloc.note_on(pitch, prog, hz(pitch))
+        for pitch, prog, vel in ons.get(s, ()):
+            alloc.note_on(pitch, prog, hz(pitch), vel)
         if use_kit and s in kmap:
             for note in kmap[s][:3]:            # cap: a crash + a kick, not 9 toms
                 alloc.perc_on(note)
@@ -939,3 +1058,87 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
     if peak > 1e-9:
         audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)
     return audio
+
+
+# =============================================================================
+# PATCH LEVEL CALIBRATION
+#
+# The complaint that drove this: in a rendered MIDI one instrument blared while
+# another was nearly inaudible.
+#
+# Three candidate causes were measured before fixing anything:
+#   patch TL spread   the bank spans 24 dB, but real MELODIC patches sit within
+#                     ~5 dB of each other — not the cause
+#   4-op vs 2-op      mean difference +0.1 dB — not the cause in general, BUT
+#                     individual patches differ wildly (Trumpet is 11.3 dB
+#                     quieter in a 4-op slot than a 2-op one)
+#   voice stealing    this file needed 6 voices of 12 — not the cause here
+#
+# So the spread is per-patch and irregular, which no single formula fixes. The
+# reliable answer is to MEASURE it: render every patch through the actual chip,
+# note its output level, and apply a compensating attenuation so they all land at
+# a common reference. Empirical, cached, and verifiable without listening.
+#
+# Only attenuation is applied, never boost: TL 0 is the chip's maximum and there
+# is no headroom above it.
+# =============================================================================
+CAL_REF_DB = -30.0          # target level; near the bank's own median
+CAL_MAX_TRIM = 18           # TL steps, ~13 dB. Beyond this a patch is broken,
+                            # not quiet, and dragging it up only adds noise.
+_CAL = None
+
+
+def calibrate_bank(np, force=False, path=None):
+    """Measure each melodic patch's output level; return a list of TL offsets."""
+    global _CAL
+    if _CAL is not None and not force:
+        return _CAL
+    import json
+    here = os.path.dirname(os.path.abspath(__file__))
+    cache = path or os.path.join(here, "vendor", "opl-calibration.json")
+    w = load_wopl_bank()
+    if not w:
+        _CAL = []
+        return _CAL
+    if os.path.exists(cache) and not force:
+        try:
+            with open(cache) as fh:
+                data = json.load(fh)
+            if len(data.get("trim", [])) == len(w["melodic"]):
+                _CAL = data["trim"]
+                return _CAL
+        except Exception:
+            pass
+
+    trim = []
+    for ins in w["melodic"]:
+        chip = OPL3()
+        # Measure exactly what the Allocator will actually play, including the
+        # second voice of a pseudo-4-op patch. Calibrating a rendering path that
+        # differs from the playback path is worse than not calibrating: it
+        # confidently applies the wrong correction. That is what happened first
+        # time round — it measured fused 4-op and reported Tenor Sax at -93 dB.
+        chip.set_four_op(0x00)
+        program_wopl(chip, 0, ins)
+        chip.key_on(0, 261.6)                       # middle C, a fair reference
+        if ins.get("pseudo4"):
+            program_wopl_voice2(chip, 1, ins)
+            chip.key_on(1, 261.6)
+        a = chip.render(int(0.4 * SAMPLE_RATE), np)
+        rms = float(np.sqrt(np.mean(a ** 2))) if len(a) else 0.0
+        db = 20.0 * (np.log10(rms) if rms > 1e-9 else -9)
+        # Positive trim = attenuate. Louder than reference -> pull down.
+        steps = int(round((db - CAL_REF_DB) / 0.75)) if rms > 1e-9 else 0
+        trim.append(max(0, min(CAL_MAX_TRIM, steps)))
+    _CAL = trim
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w") as fh:
+            json.dump({"ref_db": CAL_REF_DB, "trim": trim}, fh)
+    except Exception:
+        pass
+    return _CAL
+
+
+def calibration_trim(prog):
+    return _CAL[prog] if (_CAL and 0 <= prog < len(_CAL)) else 0
