@@ -556,14 +556,20 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             if not mname or mname == "auto":
                 mname = infer_mood(getattr(a, "prompt", "") or "")
             mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
-            got = midimod.to_events(mfile, np, seconds=a.seconds,
-                                    transpose=getattr(a, "transpose", 0),
-                                    start_frac=getattr(a, "midi_start", 0.15))
-            if not got:
+            # EXACT timing. MIDI carries its own; quantizing it only destroys
+            # information that was already correct.
+            timed = midimod.to_timed_events(
+                mfile, seconds=a.seconds,
+                transpose=getattr(a, "transpose", 0),
+                start_frac=getattr(a, "midi_start", 0.15))
+            if not timed:
                 sys.exit(f"--from-midi: no playable notes in {mfile}")
-            ev, bars, spb, info, scale_name = got
-            steps = info["steps"]; meter_s = info["timesig"]
-            print(f"   \u266a {info['title'][:40]}: {midimod.describe(info)}")
+            tnotes, tdrums, info = timed
+            ev, bars, spb, scale_name = None, 0, info["spb"], "minor"
+            steps = STEPS; meter_s = info["timesig"]
+            print(f"   \u266a {info['title'][:38]}: {info['timesig']} "
+                  f"{info['bpm']:.0f}bpm  {info['duration']:.1f}s  "
+                  f"{info['notes']} notes  {info['drum_hits']} hits")
         else:
             src = getattr(a, "from_audio", None)
         if mfile:
@@ -590,7 +596,10 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         else:
             ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
             steps = plan["_steps"]; meter_s = plan["meter"]
-        audio = render(a, ev, bars, spb, np, mood, steps)
+        if mfile:
+            audio = render_timed(a, tnotes, tdrums, info["duration"], np, mood)
+        else:
+            audio = render(a, ev, bars, spb, np, mood, steps)
 
         # The seed goes in EVERY filename, as it does for every other engine.
         # That is the documented way to re-run a take you liked, and the pack
@@ -605,7 +614,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             loudness_normalize(path, a.lufs_target, a.true_peak)
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
-        if getattr(a, "write_midi", False):
+        if getattr(a, "write_midi", False) and ev is not None:
             # Additional output, not a substitute: the chip render is the point.
             import midi as _midiw
             mp = os.path.splitext(path)[0] + ".mid"
@@ -623,3 +632,90 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
     print(f"   all done  |  {len(made)} file(s) in {dest}")
     print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")
     return made
+
+
+def render_timed(a, notes, drums, duration, np, mood=None):
+    """Render exact-time MIDI notes on the 2A03 voices. No grid.
+
+    The OPL path moved to event timing but this one was left on a 16th grid, so
+    91% of notes still had their onsets and lengths rounded. Same fix here: each
+    note is placed at its real sample offset for its real duration.
+
+    Voice assignment is by REGISTER, which is how a 4-channel arrangement works
+    anyway: low notes take the triangle (the 2A03's bass voice), everything else
+    takes a pulse, with a thinner duty for the upper register so the melody sits
+    above the harmony instead of blending into it.
+    """
+    sr = SAMPLE_RATE
+    total = int(round((duration + 0.4) * sr))       # tail for the last release
+    buf = np.zeros(total)
+    depth = (mood or {}).get("vib", 0.006)
+
+    for n in notes:
+        start = int(round(n["t"] * sr))
+        ln = max(int(round(n["dur"] * sr)), int(0.02 * sr))
+        if start >= total:
+            continue
+        ln = min(ln, total - start)
+        pitch = n["pitch"]
+        vel = (n.get("vel") or 100) / 127.0
+        hz = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
+
+        if pitch < 48:                              # triangle bass
+            w = _tri_sweep_note(hz, ln, sr, np)
+            env = _env(ln, sr, 3.0, 3.0, 0.75, np)
+            gain = 0.34
+        else:
+            duty = 0.125 if pitch >= 72 else (0.25 if pitch >= 60 else 0.5)
+            vib = _vibrato(ln, sr, depth if n["dur"] > 0.35 else 0.0, 6.0, np)
+            t = np.arange(ln, dtype=np.float64) / sr
+            ph = 2 * np.pi * hz * np.cumsum(vib) / sr
+            w = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
+            env = _env(ln, sr, 2.0, 4.0, 0.55, np)
+            gain = 0.20
+        buf[start:start + ln] += w * env * gain * vel
+
+    for t, gm in (drums or []):
+        start = int(round(t * sr))
+        if start >= total:
+            continue
+        kind = GM_DRUM_KIND.get(gm, "h")
+        period, dec, g, dur_s = {"k": (900.0, 46.0, 0.42, 0.11),
+                                 "s": (7000.0, 30.0, 0.24, 0.13),
+                                 "h": (17000.0, 90.0, 0.10, 0.035)}[kind]
+        ln = min(int(dur_s * sr), total - start)
+        if ln <= 4:
+            continue
+        w = _lfsr_note(ln, sr, period, np) * _env(ln, sr, 1.0, dec, 0.0, np)
+        buf[start:start + ln] += w * g
+
+    peak = float(np.abs(buf).max())
+    if peak > 1e-9:
+        buf = buf * (10.0 ** (a.normalize_db / 20.0) / peak)
+    return buf
+
+
+# GM percussion note -> the 2A03's single noise channel. Three categories is all
+# one noise generator can express, unlike a WOPL percussion bank.
+GM_DRUM_KIND = {35: "k", 36: "k", 41: "k", 43: "k", 45: "k", 47: "k",
+                38: "s", 40: "s", 37: "s", 39: "s", 48: "s", 50: "s"}
+
+
+def _tri_sweep_note(hz, n, sr, np):
+    t = np.arange(n, dtype=np.float64) / sr
+    saw = (hz * t) % 1.0
+    return np.round((2.0 * np.abs(2.0 * saw - 1.0) - 1.0) * 7.5) / 7.5
+
+
+def _lfsr_note(n, sr, period, np, seed=1):
+    out = np.empty(n)
+    reg = (int(seed) & 0x7FFF) or 1
+    step = max(1, int(sr / max(period, 1.0)))
+    val = 1.0
+    for i in range(n):
+        if i % step == 0:
+            fb = (reg ^ (reg >> 1)) & 1
+            reg = (reg >> 1) | (fb << 14)
+            val = 1.0 if (reg & 1) else -1.0
+        out[i] = val
+    return out
