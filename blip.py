@@ -192,7 +192,13 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
                  subtype=f"PCM_{a.bits}" if a.bits != 8 else "PCM_U8")
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
-        if getattr(a, "ogg", False) and to_ogg:
+        # FLAC before OGG: lossless, and for a square-wave text-box voice a lossy
+        # codec smears exactly the hard edges. This branch was MISSING -- to_flac
+        # was accepted as a parameter and never called, so --flac was silently
+        # dropped for narration.
+        if getattr(a, "flac", False) and to_flac:
+            path = to_flac(path, a.keep_wav)
+        elif getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
         print(f"   ✅ [{i}/{len(items)}] {key:<28} {len(audio)/SAMPLE_RATE:5.2f}s  "

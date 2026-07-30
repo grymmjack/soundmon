@@ -734,6 +734,37 @@ def to_ogg(path, quality=5, keep=False):
     return out
 
 
+def encode(path, a):
+    """Encode one finished WAV to the requested delivery format. Returns the path.
+
+    ONE place, because this decision was previously made in seven, and --flac was
+    wired into only three of them. --chip, --opl and --chipfx honoured it; the
+    diffusion path, --blip, --narrate and --record each had their own
+    `if a.ogg: to_ogg(...)` and no flac branch at all. Worse than a missing
+    feature: blip.py and narrate.py both ACCEPT a `to_flac` callable and never
+    call it, so the flag was accepted, plumbed, and silently dropped.
+
+    That is the same failure mode as "two renderers drifting apart because a fix
+    landed in only one", which is why selfcheck.py exists. So: one function, and
+    an assertion per engine that it is reached.
+
+    FLAC wins when both are asked for. It is lossless, and for the bit-crushed
+    output these engines produce a lossy codec destroys the very thing that makes
+    it sound like hardware.
+    """
+    if getattr(a, "flac", False):
+        return to_flac(path, getattr(a, "keep_wav", False))
+    if getattr(a, "ogg", False):
+        return to_ogg(path, getattr(a, "ogg_quality", 5),
+                      getattr(a, "keep_wav", False))
+    return path
+
+
+def encode_all(paths, a):
+    """encode() over a list, for the diffusion path's batches."""
+    return [encode(p, a) for p in paths]
+
+
 def audio_outs(outs):
     """Flatten ComfyUI's outputs dict to the list of saved audio files.
     Save nodes report under 'audio' (SaveAudio, SaveAudioMP3/Opus, and our SaveSFX)."""
@@ -822,8 +853,7 @@ def run_farm(a, work):
                     loop_wrap(f, a.loop_crossfade)
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
-            if a.ogg:
-                files = [to_ogg(f, a.ogg_quality, a.keep_wav) for f in files]
+            files = encode_all(files, a)
             done += 1
             sj = f"{subj}  " if a.batch else ""
             print(f"   ✅ [{done}/{total}] {_short(srv):<20} {sj}seed={seed}  ->  "
@@ -1493,8 +1523,7 @@ def main():
                               f"({sec:.1f}s, {a.loop_crossfade:g}s crossfade)")
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
-            if a.ogg:
-                files = [to_ogg(f, a.ogg_quality, a.keep_wav) for f in files]
+            files = encode_all(files, a)
             clip = files[0] if files else None
             first_open = first_open or clip
             tag = f"[{i}/{total}] " if total > 1 else ""

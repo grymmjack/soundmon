@@ -650,7 +650,7 @@ def _record_take(kb, path, device, rate):
     return True, ""
 
 
-def run(a, slug, to_ogg, loudness_normalize):
+def run(a, slug, to_ogg, loudness_normalize, to_flac=None):
     """Record narration for a manifest. Called from soundmon.py.
 
     `to_ogg` and `loudness_normalize` are injected for the same reason
@@ -742,11 +742,17 @@ def run(a, slug, to_ogg, loudness_normalize):
                     loudness_normalize(out, a.lufs_target, a.true_peak)
                 # A previous pass may have left a .ogg here; masters must not
                 # coexist with a stale compressed twin the game would load first.
-                stale = os.path.join(dest, f"{key}.ogg")
-                if getattr(a, "ogg", False):
+                # Any compressed twin, not just .ogg: switching the pack to FLAC
+                # would otherwise leave the old .ogg beside it, and the game
+                # resolves whichever it finds first.
+                if getattr(a, "flac", False) and to_flac:
+                    out = to_flac(out, a.keep_wav)
+                elif getattr(a, "ogg", False):
                     out = to_ogg(out, a.ogg_quality, a.keep_wav)
-                elif os.path.exists(stale):
-                    os.remove(stale)
+                for ext in ("ogg", "flac"):
+                    stale = os.path.join(dest, f"{key}.{ext}")
+                    if not out.endswith(f".{ext}") and os.path.exists(stale):
+                        os.remove(stale)
                 done = sum(1 for kk, _ in items if _finished(dest, kk))
                 status = f"{c['grn']}✓ {os.path.basename(out)}{c['rst']}"
                 if idx + 1 >= len(items):

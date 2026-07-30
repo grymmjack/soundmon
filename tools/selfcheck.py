@@ -249,6 +249,24 @@ def main():
             check("--format quantizes amplitude", lv <= 70,
                   f"{lv} distinct levels (6-bit allows 64)")
 
+        # EVERY engine must honour --flac. It was wired into three of seven, and
+        # blip.py/narrate.py accepted a to_flac callable and never called it — so
+        # the flag was accepted, plumbed, and silently dropped. Only the engines
+        # that need no model or GPU are checked here; that is enough to catch a
+        # new engine copying the old if-ogg-only shape.
+        for eng, extra in (("--chip", []), ("--opl", []),
+                           ("--chipfx", []), ("--blip", [])):
+            before = set(os.listdir(tmp))
+            r = subprocess.run([PY, SM, "beep", "--output-to", tmp, "--no-open",
+                                "--seconds", "2", eng, "--flac", *extra],
+                               capture_output=True, text=True)
+            made = [f for f in os.listdir(tmp) if f not in before]
+            got = [f for f in made if f.endswith(".flac")]
+            check(f"{eng} honours --flac", bool(got),
+                  f"produced {made or r.stderr[-160:]}")
+            for f in made:
+                os.remove(os.path.join(tmp, f))
+
         # FLAC must be lossless. Test the CODEC, not two renders: since the
         # pack-identity fix, --output-to feeds the composition, so rendering into
         # two directories deliberately produces two different pieces. My first
