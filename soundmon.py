@@ -1238,6 +1238,21 @@ def main():
     # ahead of anything that would load one.
     # --opl and --chip are pure synthesis — short-circuit before anything
     # contacts ComfyUI or loads a checkpoint.
+    # MUST be set before the engine hand-offs below, which `return` — AGENTS.md
+    # gotcha 10, which I wrote and then walked straight into: the first version of
+    # this sat after them and silently never ran.
+    #
+    # The -16 LUFS ceiling is a STREAMING target and it audibly pulls chip and FM
+    # music down. Peak normalisation to --normalize-db plus the true-peak ceiling
+    # already prevent clipping, including inter-sample overs after a lossy encode,
+    # so for music the loudness ceiling is redundant and only costs level.
+    #
+    # SFX keep it: a pack where one effect is deafening is worse than a quiet one,
+    # and that consistency is exactly what the ceiling buys. Diffusion keeps it
+    # too — SA3 renders vary wildly in loudness, which is why it exists.
+    if (a.chip or a.opl) and not any(x == "--lufs" for x in sys.argv):
+        a.lufs_target = None
+
     if a.chipfx or a.oplfx:
         sys.path.insert(0, _SCRIPT_DIR)
         import chipfx
@@ -1350,18 +1365,6 @@ def main():
     if a.loop:
         a.no_trim = False
         a.fade_ms = 0
-
-    # The -16 LUFS ceiling is a STREAMING target and it audibly pulls chip and FM
-    # music down — the repo owner heard it immediately ("the flacs sound less
-    # loud... you can remove for music but we don't want it to clip"). Peak
-    # normalisation to --normalize-db plus the true-peak ceiling already prevent
-    # clipping, including inter-sample overs after a lossy encode, so the loudness
-    # ceiling is redundant here and only costs level.
-    #
-    # Diffusion output keeps it: SA3 renders vary wildly in loudness, which is the
-    # problem the ceiling was added to solve in the first place.
-    if (a.chip or a.opl) and "--lufs" not in sys.argv:
-        a.lufs_target = None
 
     # --chip and --opl compose in whole bars, so they already loop
     # sample-accurately. Crossfading would shorten the track to hide an ending
