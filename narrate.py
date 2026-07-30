@@ -125,7 +125,7 @@ def parse_lines(path):
     return out
 
 
-def run(a, slug, to_ogg=None, loudness_normalize=None):
+def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     """Generate narration for one prompt or a whole file. Called from soundmon.py.
 
     `to_ogg` is injected rather than imported: soundmon.py runs as __main__, so

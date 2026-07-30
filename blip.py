@@ -136,7 +136,7 @@ def _voice_line(text, a, np, pipeline):
     return np.interp(idx, np.arange(len(audio)), audio)
 
 
-def run(a, slug, to_ogg=None, loudness_normalize=None):
+def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     """Generate blippy narration. Same contract as narrate.run()."""
     try:
         import numpy as np

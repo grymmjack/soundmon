@@ -500,7 +500,7 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
     return out
 
 
-def run(a, slug, to_ogg=None, loudness_normalize=None):
+def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     """Generate OPL3 FM music. Same contract as chip.run()."""
     try:
         import numpy as np
@@ -615,15 +615,27 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         # Hardware format lock, if asked. Applied here rather than in the
         # ComfyUI node because these engines never touch the graph.
         out_sr = SAMPLE_RATE
+        out_bits = a.bits
         if getattr(a, "format", "none") not in (None, "none"):
             _mod = sys.modules.get("chip") or __import__("chip")
             audio, out_sr = _mod.format_lock_np(audio, SAMPLE_RATE, a.format, np)
+            # Store at the format's OWN bit depth. Writing 8-bit audio into a
+            # 16-bit container wastes half the file and is a lie about the data;
+            # it also stops FLAC from compressing what is really an 8-bit signal.
+            _spec = _mod.FORMATS.get(a.format) or {}
+            _fb = int(_spec.get("bits") or 0)
+            if _fb:
+                out_bits = 8 if _fb <= 8 else (16 if _fb <= 16 else 24)
         path = os.path.join(dest, f"{name}.wav")
         sf.write(path, audio, out_sr,
-                 subtype=f"PCM_{a.bits}" if a.bits != 8 else "PCM_U8")
+                 subtype=f"PCM_{out_bits}" if out_bits != 8 else "PCM_U8")
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
-        if getattr(a, "ogg", False) and to_ogg:
+        # FLAC before OGG: it is lossless, so for format-locked audio it is the
+        # only compression that preserves the crush. Asking for both means FLAC.
+        if getattr(a, "flac", False) and to_flac:
+            path = to_flac(path, a.keep_wav)
+        elif getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         if getattr(a, "write_midi", False) and ev is not None:
             # Additional output, not a substitute: the chip render is the point.
