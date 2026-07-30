@@ -91,6 +91,76 @@ def main():
           abs(float(chip._dc_block(x, np, 44100)[2048:].mean())) < 0.02,
           "a 12.5% duty pulse sits at a mean of -0.75")
 
+    # --- tracker output -----------------------------------------------------
+    # These four were ALL shipped broken and all were invisible to inspection:
+    # correct-looking bytes, wrong interpretation. Only a replayer or arithmetic
+    # catches them, so check the arithmetic here every time.
+    import math
+    import mod as modw
+    import rad as radw
+
+    # Tempo must come from the composition. It used to come from --bpm, so a
+    # 75 bpm MIDI was written as 120 and played 1.6x too fast.
+    worst, detail = 0.0, ""
+    for spb in (3.2, 2.0, 1.714, 4.5):
+        for rows in (16, 24, 32, 48, 96):
+            for name, fn in (("mod", modw.timing_for), ("rad", radw.timing_for)):
+                t, b = fn(spb, rows)
+                err = abs(t * 2.5 / b - spb / rows) / (spb / rows)
+                if err > worst:
+                    worst, detail = err, f"{name} spb={spb} rows={rows} -> {t}/{b}"
+    check("tracker row duration matches the source tempo", worst < 0.01,
+          f"worst {worst*100:.2f}% off ({detail})")
+
+    # The MOD period table must span real game-music range. Three octaves forced
+    # octave FOLDING, which turned melody peaks into different notes.
+    lo, hi = 41, 82
+    folded = [p for p in range(lo, hi + 1)
+              if not (modw.MIDI_BASE <= p < modw.MIDI_BASE + len(modw.PERIODS))]
+    check("MOD periods cover MIDI 41-82 without folding", not folded,
+          f"{len(folded)} of {hi-lo+1} notes outside the table")
+
+    # A looping single cycle is only in tune if the length and finetune agree.
+    # A 64-byte cycle at period 428 is 17.7 cents flat, on every note.
+    f = 3546894.6 / 428 / modw.CYCLE_LEN * 2 ** (modw.FINETUNE / 96.0)
+    cents = 1200 * math.log2(f / (440 * 2 ** ((48 - 69) / 12)))
+    check("MOD sample tuning is within 3 cents", abs(cents) < 3.0,
+          f"{cents:+.2f} cents (len {modw.CYCLE_LEN}, finetune {modw.FINETUNE})")
+
+    # RAD numbers C as 12, which is a NOTE-field quirk only. Treating it as an
+    # octave boundary put every C an octave below its neighbours.
+    worst, detail = 0.0, ""
+    for p in range(36, 84):
+        note, octv = radw._note_octave(p)
+        fnum = [0x157, 0x16B, 0x181, 0x198, 0x1B0, 0x1CA,
+                0x1E5, 0x202, 0x220, 0x241, 0x263, 0x287][note % 12]
+        got = fnum * 49716.0 / (1 << (20 - octv))
+        c = abs(1200 * math.log2(got / (440 * 2 ** ((p - 69) / 12))))
+        if c > worst:
+            worst, detail = c, f"MIDI {p} -> note {note} oct {octv} = {got:.1f} Hz"
+    check("RAD note/octave reconstructs the right pitch", worst < 25.0,
+          f"worst {worst:.1f} cents ({detail})")
+
+    # A release must never land inside the NEXT note. MOD and RAD channels are
+    # both monophonic, so a release at onset+duration silences its successor.
+    ev = {"lead": [(0, 0, 8, 60, 0.5, 100), (0, 4, 8, 64, 0.5, 100),
+                   (0, 12, 2, 67, 0.5, 100)],
+          "arp": [], "bass": [], "drum": []}
+    with tempfile.TemporaryDirectory() as td:
+        mp = os.path.join(td, "t.mod")
+        modw.write_mod(mp, ev, 1, 2.0, 16, np, rows_per_bar=16)
+        d = open(mp, "rb").read()
+        onsets, offs = set(), set()
+        for r in range(64):
+            b0, b1, b2, b3 = d[1084 + r * 16:1084 + r * 16 + 4]
+            if ((b0 & 0x0F) << 8) | b1:
+                onsets.add(r)
+            elif (b2 & 0x0F) == 0xC and b3 == 0:
+                offs.add(r)
+        check("MOD release never lands on a following onset",
+              not (offs & onsets) and offs,
+              f"onsets {sorted(onsets)} releases {sorted(offs)}")
+
     # --- end-to-end invariants ----------------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
         # THE ONE THAT KEEPS BREAKING: the loudness ceiling must not apply to

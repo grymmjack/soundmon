@@ -37,22 +37,54 @@ MAGIC = b"RAD by REALiTY!!"
 VERSION = 0x21
 CHANNELS = 9                 # OPL2 melodic channels
 CH_LEAD, CH_ARP, CH_ARP2, CH_BASS = 0, 1, 2, 3
+LINES = 64                   # lines per pattern, fixed: "each pattern is made up
+                             # of 64 lines"
+MAX_PATTERNS = 100           # "RAD allows up to 100 separate patterns"
+KEYOFF = 15                  # "1..12 which indicate one of the 12 notes from
+                             # C#(1) to C(12), or 15 for a key-off"
+
+
+def timing_for(spb, lines_per_bar):
+    """Pick (speed, bpm) so one pattern line lasts exactly spb / lines_per_bar.
+
+    The spec says "RAD uses a 50Hz timer which is delayed by the speed value
+    between each line", and that BPM defaults to 125. Those two facts pin the
+    relation: 50 Hz IS the tick rate at 125 BPM, so the rate is BPM / 2.5 and
+
+        line seconds = speed * 2.5 / BPM
+
+    — the same relation ProTracker uses, which is unsurprising given the shared
+    lineage. So this mirrors mod.timing_for rather than inventing a second scheme.
+    """
+    line_s = float(spb) / max(1, int(lines_per_bar))
+    for speed in (6, 5, 4, 3, 2, 1):
+        bpm = speed * 2.5 / line_s
+        if 32 <= bpm <= 255:
+            return speed, int(round(bpm))
+    speed = 6
+    return speed, max(32, min(255, int(round(speed * 2.5 / line_s))))
 
 
 def _note_octave(pitch):
     """MIDI note -> (RAD note 1-12, octave 0-7).
 
-    RAD numbers notes 1..12 as C#..C, so C sits at the TOP of a block rather than
-    the bottom. Shifting by one semitone before dividing puts C# at index 0, which
-    makes the octave arithmetic fall out correctly instead of being off by one for
-    every C.
+    RAD numbers notes "1..12 which indicate one of the 12 notes from C#(1) to
+    C(12)", so C is numbered LAST even though it is lowest in the octave. That
+    numbering quirk is about the note field only — the octave field is still the
+    plain octave number, because a player has to combine them as an OPL block plus
+    an F-number from a twelve-entry table indexed by note % 12, and note 12 wraps
+    to index 0, i.e. C.
+
+    I originally shifted the pitch down a semitone before dividing, reasoning that
+    C sat at the "top" of a block. That is wrong, and wrong for exactly one note:
+    every C landed an octave low while its neighbours were right, so C4 sounded
+    below the D4 next to it. Chroma 0 keeps its own octave; only its NUMBER is 12.
     """
-    m = int(pitch) - 1
-    note = (m % 12) + 1
-    octv = (m // 12) - 1
-    while octv < 0:
-        octv += 1
-    return note, min(7, octv)
+    p = int(pitch)
+    chroma = p % 12
+    note = 12 if chroma == 0 else chroma
+    octv = (p // 12) - 1
+    return note, max(0, min(7, octv))
 
 
 def _op_bytes(op):
@@ -62,14 +94,19 @@ def _op_bytes(op):
     RAD keeps the same bit layout but stores VOLUME where OPL stores ATTENUATION,
     so total level and sustain level are both inverted.
     """
+    # PASS THE OPL REGISTERS THROUGH UNCHANGED.
+    #
+    # The spec annotates these fields "(inverted)", which describes their SEMANTICS
+    # — higher means quieter, i.e. inverted relative to volume — not that RAD stores
+    # them flipped from the chip. RAD is an OPL tracker; it holds raw register
+    # values.
+    #
+    # I read it the other way first and wrote `63 - TL`, which turned every
+    # loudest-possible patch (TL=0) into 63 = maximum attenuation. The file loaded
+    # and played essentially silently, which is exactly the failure this format
+    # invites: nothing errors, you just hear nothing.
     avekm, ksltl, ardr, slrr, ws = (int(x) & 0xFF for x in op)
-    ksl = ksltl & 0xC0
-    tl = ksltl & 0x3F
-    b1 = ksl | ((63 - tl) & 0x3F)               # attenuation -> volume
-    sl = (slrr >> 4) & 0x0F
-    rr = slrr & 0x0F
-    b3 = (((15 - sl) & 0x0F) << 4) | rr         # sustain attenuation -> level
-    return bytes((avekm, b1, ardr, b3, ws & 0x07))
+    return bytes((avekm, ksltl, ardr, slrr, ws & 0x07))
 
 
 def instrument_from_wopl(ins):
@@ -82,7 +119,7 @@ def instrument_from_wopl(ins):
     out.append(alg & 0x07)                      # no riff, no panning bits set
     out.append(fb & 0x0F)                       # feedback for ops 1-2
     out.append(0x00)                            # detune / riff speed
-    out.append(0x3F)                            # instrument volume, max
+    out.append(0x3F)                            # instrument volume: 6-bit, max
     # RAD op1 is the MODULATOR and op2 the CARRIER; WOPL stores carrier first.
     out += _op_bytes(ins["ops"][1])
     out += _op_bytes(ins["ops"][0])
@@ -135,17 +172,24 @@ def _pack_line(line_no, is_last, chans):
     return bytes(out)
 
 
-def write_rad(path, ev, bars, spb, steps, np, title="soundmon", bpm=125,
-              wopl=None, progs=None, rows=64):
+def write_rad(path, ev, bars, spb, steps, np, title="soundmon", bpm=None,
+              wopl=None, progs=None, rows=None, lines_per_bar=None):
     """Write composed events as a RAD file. Returns the path.
 
     `ev` is chip.compose()'s grid event dict; `progs` optionally maps voice name
     to a GM program so instruments come from the DMXOPL bank.
+
+    Tempo is DERIVED from `spb`, exactly as in mod.py and for the same reason: it
+    used to come from --bpm, which for --from-midi is an unrelated CLI default, so
+    a 75 bpm source was written as 120 and played 1.6x too fast.
     """
-    rows = max(1, min(int(rows), 64))
-    rows_per_bar = max(1, min(steps, rows))
-    bars_per_pattern = max(1, rows // rows_per_bar)
-    n_patterns = max(1, min(100, -(-bars // bars_per_pattern)))
+    # A bar may straddle a pattern boundary — patterns are storage, the order list
+    # plays them back to back — so the line grid is not capped at 64.
+    lines_per_bar = max(1, int(lines_per_bar or rows or steps))
+    speed, rad_bpm = timing_for(spb, lines_per_bar)
+    n_patterns = max(1, min(MAX_PATTERNS,
+                            -(-(bars * lines_per_bar) // LINES)))
+    rows = LINES
 
     # --- instruments --------------------------------------------------------
     # One per voice, taken from the bank when we have it. RAD instrument numbers
@@ -171,24 +215,48 @@ def write_rad(path, ev, bars, spb, steps, np, title="soundmon", bpm=125,
             names[num] = vname
 
     # --- patterns ----------------------------------------------------------
-    # grid[pattern][row] -> {channel: (note, octave, inst)}
+    # grid[pattern][line] -> {channel: (note, octave, inst)}
     grid = [[{} for _ in range(rows)] for _ in range(n_patterns)]
 
     def place(bar, step, ch, inst, pitch):
-        if step >= rows_per_bar:
-            return
-        abs_row = bar * rows_per_bar + step
+        abs_row = bar * lines_per_bar + step
         pat, row = divmod(abs_row, rows)
         if 0 <= pat < n_patterns:
             n, o = _note_octave(pitch)
             grid[pat][row][ch] = (n, o, inst)
 
-    for it in ev.get("lead", []):
-        place(it[0], it[1], CH_LEAD, 1, it[3])
-    for it in ev.get("arp", []):
-        place(it[0], it[1], CH_ARP, 2, it[3])
-    for it in ev.get("bass", []):
-        place(it[0], it[1], CH_BASS, 3, it[3])
+    def place_off(bar, step, ch):
+        """Emit a key-off. RAD DOES have one — the spec lists note value 15
+        alongside the twelve pitches — and without it an OPL voice is never
+        released, so it sustains through the rest of the tune. Patches with a long
+        release turn the whole channel into a drone."""
+        abs_row = bar * lines_per_bar + step
+        pat, row = divmod(abs_row, rows)
+        if 0 <= pat < n_patterns and ch not in grid[pat][row]:
+            grid[pat][row][ch] = (KEYOFF, 0, None)
+
+    def place_voice(items, ch, inst):
+        """Notes and releases down one channel. An OPL channel is monophonic, so a
+        release is bounded by the next onset — same constraint as a MOD channel,
+        and the same bug if ignored: a release placed at onset+duration lands
+        inside the FOLLOWING note and cuts it off."""
+        seq = sorted(items, key=lambda it: it[0] * lines_per_bar + it[1])
+        for i, it in enumerate(seq):
+            bar, step, dur, pitch = it[0], it[1], it[2], it[3]
+            start = bar * lines_per_bar + step
+            nxt = (seq[i + 1][0] * lines_per_bar + seq[i + 1][1]
+                   if i + 1 < len(seq) else None)
+            place(bar, step, ch, inst, pitch)
+            end = start + max(1, int(dur))
+            if nxt is not None:
+                if end >= nxt:
+                    continue          # runs into the next note; it retriggers
+                end = min(end, nxt)
+            place_off(*divmod(end, lines_per_bar), ch)
+
+    place_voice(ev.get("lead", []), CH_LEAD, 1)
+    place_voice(ev.get("arp", []), CH_ARP, 2)
+    place_voice(ev.get("bass", []), CH_BASS, 3)
     for bar, step, kind in ev.get("drum", []):
         inst = {"k": 4, "s": 5, "h": 6}.get(kind)
         if inst:
@@ -200,9 +268,8 @@ def write_rad(path, ev, bars, spb, steps, np, title="soundmon", bpm=125,
     out = bytearray()
     out += MAGIC
     out.append(VERSION)
-    speed = 6
     out.append(0x20 | (speed & 0x1F))            # bit5: a BPM value follows
-    out += struct.pack("<H", int(max(1, min(65535, round(bpm)))))
+    out += struct.pack("<H", int(max(1, min(65535, rad_bpm))))
     desc = title.encode("ascii", "replace")[:60]
     out += desc + b"\0"
 

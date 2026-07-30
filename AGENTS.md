@@ -285,6 +285,44 @@ per OS, and each one has a different way to be told to *stop*:
     dispatcher needs a circuit-breaker: drop a box after N consecutive failures
     and requeue its in-flight work.
 
+
+17. **A tracker file's TEMPO must come from the composition, never from `--bpm`.**
+    Both `write_mod` and `write_rad` took `bpm=int(a.bpm)`, which for `--from-midi`
+    is an unrelated CLI default: a 75 bpm source shipped as 120 and played **1.6x
+    too fast**. Row duration is `ticks * 2.5 / bpm` in BOTH formats (RAD's "50 Hz
+    timer" is exactly BPM 125 at that divisor), so derive both fields from
+    seconds-per-bar and never accept a tempo argument.
+
+    Corollary: one BPM byte cannot express a fine row grid. 96 rows/bar at 75 bpm
+    needs BPM 450 at the default 6 ticks. Solve for ticks AND bpm together.
+
+
+18. **Tracker output is where "the bytes look right" fails hardest.** Every defect
+    in the MOD/RAD writers was a correct-looking file with a wrong interpretation,
+    and none was visible by decoding the pattern data back:
+
+    - the period table spanned three octaves, so `_period` **folded** 12 of 328
+      notes an octave — melody peaks became different notes
+    - a 64-byte looping cycle at period 428 is **17.7 cents flat** on every note;
+      fix with cycle length + the finetune field, not a longer cycle
+    - `3xx` tone portamento's parameter is **period units per tick**, not
+      semitones — and period distance depends on register, so it must be computed
+      from the actual endpoints or the slide never reaches its target
+    - `3xx` deliberately does **not** retrigger, so a glide after a `C00` release
+      plays at volume zero. Only slide into a note the previous one ran into
+    - a release placed at onset+duration lands **inside the next note** on a
+      monophonic channel and cuts it off; clamp it to the next onset
+    - RAD numbers C as **12**, which is a note-FIELD quirk only. Treating it as an
+      octave boundary put every C an octave below its neighbours — wrong for
+      exactly one of twelve notes, which is the hardest kind to notice
+    - RAD **has** a key-off (note value 15). Without it an OPL voice never
+      releases and sustains through the rest of the tune
+
+    `tools/render-mod.py` renders through **libxmp — the same replayer
+    pixel-viewer uses**, so it settles these. `tools/render-rad.py` drives Nuked
+    OPL3 and catches silence/octave/tempo faults, but it shares this repo's
+    reading of the RAD spec, so it cannot prove that reading is right.
+
 ## Environment gotchas
 
 - **`ls` is aliased to `eza`** in this shell — `ls -t` fails. Use

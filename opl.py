@@ -641,17 +641,29 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             import rad as _radw
             import chip as _cm
             import midi as _mm
-            gev, gbars = ((ev, bars) if ev is not None
-                          else _cm.timed_to_grid(tnotes, tdrums, spb, 16))
+            if ev is not None:
+                # The plan's own steps-per-bar, which is not always 16 \u2014 a 6/8
+                # mood uses 12, and writing those as 16 lines per bar walked every
+                # bar further out of place.
+                gev, gbars, glines = ev, bars, steps
+            else:
+                # Let the source pick the line grid. RAD allows 100 patterns of 64
+                # lines, so the cap is 6400 lines rather than the MOD's 8192.
+                glines = _cm.best_grid(tnotes, spb,
+                                       cap_rows=_radw.MAX_PATTERNS * _radw.LINES)
+                gev, gbars = _cm.timed_to_grid(tnotes, tdrums, spb, glines)
             lead_gm, arp_gm, bass_gm = _mm.MOOD_GM.get(mname,
                                                        _mm.MOOD_GM["mysterious"])
             rp = os.path.splitext(path)[0] + ".rad"
             try:
-                _radw.write_rad(rp, gev, gbars, spb, 16, np, title=base[:20],
-                                bpm=int(a.bpm), wopl=load_wopl_bank(),
+                _radw.write_rad(rp, gev, gbars, spb, glines, np,
+                                title=base[:20], wopl=load_wopl_bank(),
+                                lines_per_bar=glines,
                                 progs={"lead": lead_gm, "arp": arp_gm,
                                        "bass": bass_gm})
-                print(f"   \u266b also wrote {os.path.basename(rp)}")
+                _s, _b = _radw.timing_for(spb, glines)
+                print(f"   \u266b also wrote {os.path.basename(rp)}"
+                      f"  ({glines} lines/bar, speed {_s}, {_b} bpm)")
             except Exception as e:
                 print(f"   \u26a0 rad write failed: {e}")
         if getattr(a, "write_midi", False) and ev is not None:

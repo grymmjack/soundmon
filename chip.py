@@ -654,13 +654,23 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         if getattr(a, "write_mod", False):
             import mod as _modw
-            gev, gbars = (ev, bars) if ev is not None else timed_to_grid(
-                tnotes, tdrums, spb, STEPS)
+            if ev is not None:
+                # Procedural: the plan's own steps-per-bar, which is NOT always 16
+                # \u2014 a 6/8 mood uses 12, and writing those rows as 16 per bar
+                # shifted every bar progressively further out of place.
+                gev, gbars, grows = ev, bars, steps
+            else:
+                grows = best_grid(tnotes, spb, bars=None)
+                gev, gbars = timed_to_grid(tnotes, tdrums, spb, grows)
             mp = os.path.splitext(path)[0] + ".mod"
             try:
-                _modw.write_mod(mp, gev, gbars, spb, STEPS, np,
-                                title=base[:20], bpm=int(a.bpm))
-                print(f"   \u266b also wrote {os.path.basename(mp)}")
+                _modw.write_mod(mp, gev, gbars, spb, grows, np,
+                                title=base[:20],
+                                chippy=getattr(a, "chippy", "off"),
+                                rows_per_bar=grows)
+                _t, _b = _modw.timing_for(spb, grows)
+                print(f"   \u266b also wrote {os.path.basename(mp)}"
+                      f"  ({grows} rows/bar, speed {_t}, {_b} bpm)")
             except Exception as e:
                 print(f"   \u26a0 mod write failed: {e}")
         if getattr(a, "write_midi", False) and ev is not None:
@@ -1090,6 +1100,45 @@ def format_lock_np(audio, sr, fmt, np):
     return (a[:, 0] if a.shape[1] == 1 else a), sr
 
 
+def best_grid(notes, spb, cap_rows=8192, bars=None):
+    """Pick rows-per-bar that actually fits the source's rhythm.
+
+    HOW THIS WAS DIAGNOSED, because the obvious reading was wrong. Quantizing the
+    Zelda title theme to 16ths left a mean onset error of 0.25 steps — and 0.25 is
+    exactly what a UNIFORM distribution over half a step gives, i.e. the notes
+    looked unquantizable. Doubling the grid did not help, and neither did any phase
+    offset, which ruled out both "too coarse" and "off by a constant".
+
+    Looking at the raw ticks explained it: at PPQ 120, onsets cluster at ticks 0,
+    5, 10, 15, 20 and 25 of every 30-tick 16th. Five ticks is a 24th of a quarter
+    note, so the piece is written on a 96-per-bar grid — sextuplets. A 16th grid
+    cannot express that at ANY phase, which is why rolled figures came out as
+    blocks.
+
+    So: measure, don't assume. Candidates include both the power-of-two divisions
+    and the triple ones, since only the latter can hold triplets.
+    """
+    if not notes:
+        return 16
+    cands = (16, 24, 32, 48, 64, 96)
+    scored = []
+    for rpb in cands:
+        if bars and bars * rpb > cap_rows:
+            continue
+        step = float(spb) / rpb
+        err = sum(abs(n["t"] / step - round(n["t"] / step)) for n in notes)
+        # Error as a fraction of a 16th note, so the numbers are comparable
+        # across candidates rather than shrinking automatically with the grid.
+        scored.append((err / len(notes) * (16.0 / rpb), rpb))
+    if not scored:
+        return 16
+    # Prefer the coarsest grid that is already accurate: finer rows cost pattern
+    # count and make the file harder to edit by hand, which is half the point of
+    # emitting a module at all.
+    good = [(rpb, e) for e, rpb in scored if e <= 0.02]
+    return good[0][0] if good else min(scored)[1]
+
+
 def timed_to_grid(notes, drums, spb, steps, bars=None):
     """Exact-time notes -> a grid event dict, for tracker output.
 
@@ -1112,20 +1161,28 @@ def timed_to_grid(notes, drums, spb, steps, bars=None):
         bar, st = divmod(row, steps)
         maxbar = max(maxbar, bar)
         group.sort(key=lambda x: x["pitch"])
-        dur = max(1, int(round(max(g["dur"] for g in group) / step_s)))
+
+        def rows(n):
+            """That note's own length. Using the group's longest for all of them
+            made a short melody note inherit a held bass note's duration, so every
+            chord came out legato — the "everything is legato unless the source is"
+            complaint, in the tracker path this time."""
+            return max(1, int(round(n["dur"] / step_s)))
+
         low, high = group[0], group[-1]
         if high["pitch"] >= 48:
-            ev["lead"].append((bar, st, dur, high["pitch"], 0.5,
+            ev["lead"].append((bar, st, rows(high), high["pitch"], 0.5,
                                high.get("vel") or 96))
         if len(group) > 1:
-            ev["bass"].append((bar, st, dur, low["pitch"], low.get("vel") or 96))
+            ev["bass"].append((bar, st, rows(low), low["pitch"],
+                               low.get("vel") or 96))
         else:
-            ev["bass"].append((bar, st, dur, low["pitch"] - 12
+            ev["bass"].append((bar, st, rows(low), low["pitch"] - 12
                                if low["pitch"] >= 60 else low["pitch"],
                                low.get("vel") or 96))
         if len(group) > 2:
             mid = group[len(group) // 2]
-            ev["arp"].append((bar, st, dur, mid["pitch"], 0.25,
+            ev["arp"].append((bar, st, rows(mid), mid["pitch"], 0.25,
                               mid.get("vel") or 80))
     kind_of = {36: "k", 35: "k", 38: "s", 40: "s", 42: "h", 44: "h", 46: "h"}
     for t, gm in (drums or []):
