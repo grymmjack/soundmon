@@ -327,6 +327,31 @@ before a model question.
 Aliases live in `servers.json` (gitignored — real LAN IPs stay out of the repo);
 `servers.example.json` is the template.
 
+## Run tools/selfcheck.py after touching an engine
+
+Thirteen assertions over the defects that broke SILENTLY in this repo — every one
+of which was found by ear, not by inspection:
+
+    the -16 LUFS ceiling applying to music, and then a fix for it that sat AFTER
+    the engine hand-offs and so never executed
+    format-locked 8-bit audio promoted back to 16-bit by ffmpeg's default
+    -21 dBFS of DC from thin duty cycles
+    arpeggios reaching into the bass register
+    every pack composing the identical piece
+
+Writing a lesson down does not install it. AGENTS.md gotcha 10 (hand-offs return
+early) was written earlier in the same session that it then caught me out again —
+an assertion re-checks it at the moment it matters, and costs nothing.
+
+It is NOT a substitute for listening. It catches values that are silently wrong;
+it cannot tell you whether the music is any good. Audio quality still needs ears,
+and this session's entire quality arc came from someone listening.
+
+One trap worth knowing when writing new checks: **--output-to feeds pack
+identity**, so rendering the same seed into two directories deliberately produces
+two different compositions. My first FLAC check did that and "failed" on a
+7436-frame length difference that was the feature working correctly.
+
 ## Working on this repo
 
 - **Models are not in git** (~29 GB across all engines). `./download-models.sh
