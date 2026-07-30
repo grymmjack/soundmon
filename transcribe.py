@@ -291,3 +291,224 @@ def to_events(path, np, sf, steps_per_bar=16, beats_per_bar=4, scale=None,
 def describe(a):
     return (f"{NOTE_NAMES[a['root']]} {a['mode']}  {a['bpm']:.1f}bpm  "
             f"{a['duration']:.1f}s  key-confidence {a['key_conf']:.2f}")
+
+
+# =============================================================================
+# HIGH-RESOLUTION TRANSCRIPTION
+#
+# The first pass sampled ONE note per beat. At 100 bpm that is a 600 ms grid, so
+# every melodic and rhythmic detail finer than a quarter note was discarded and
+# the result was a slideshow of the original. This does the job properly:
+#
+#   16th-note grid          4x the resolution, so melodies actually move
+#   HPS pitch detection     finds the FUNDAMENTAL, not the loudest harmonic
+#   median smoothing        kills isolated octave jumps
+#   note segmentation       consecutive equal pitches become one held note
+#   per-beat chords         harmony can change inside a bar
+#   banded percussion       kick/snare/hat from their own frequency bands
+#   dynamics                per-note velocity from onset strength
+# =============================================================================
+
+def _hps(frame, sr, n_fft, np, lo=55.0, hi=2000.0, harmonics=5):
+    """Harmonic Product Spectrum: find f0 by multiplying downsampled copies.
+
+    A single spectral peak is often the 2nd or 3rd harmonic, which is why the
+    first version reported melodies an octave or a fifth high. Multiplying
+    decimated copies reinforces the true fundamental, where all the harmonics
+    line up, and suppresses everything else.
+    """
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    n = len(frame)
+    prod = frame.astype(np.float64).copy()
+    for h in range(2, harmonics + 1):
+        dec = frame[::h]
+        prod[:len(dec)] *= dec
+    sel = (freqs >= lo) & (freqs <= hi)
+    if not sel.any():
+        return None
+    idx = np.where(sel)[0]
+    j = idx[int(np.argmax(prod[idx]))]
+    if prod[j] <= 0:
+        return None
+    f = float(freqs[j])
+    return f if f > 0 else None
+
+
+def _median_smooth(vals, k=5):
+    """Remove isolated pitch outliers — the classic octave-jump artifact."""
+    out = list(vals)
+    half = k // 2
+    for i in range(len(vals)):
+        win = [v for v in vals[max(0, i - half):i + half + 1] if v is not None]
+        if not win:
+            out[i] = None
+            continue
+        win.sort()
+        out[i] = win[len(win) // 2]
+    return out
+
+
+def _band_energy(S, sr, n_fft, np, lo, hi):
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    sel = (freqs >= lo) & (freqs < hi)
+    return S[:, sel].sum(axis=1) if sel.any() else np.zeros(S.shape[0])
+
+
+def _segment(pitches, strengths, min_len=1):
+    """Group runs of equal pitch into (start, length, pitch, strength) notes.
+
+    Without this, a note held for a bar is re-triggered on every grid step, which
+    on a chip sounds like a stutter rather than a sustained note — and is a large
+    part of why the first transcriptions sounded mechanical.
+    """
+    out = []
+    i = 0
+    n = len(pitches)
+    while i < n:
+        p = pitches[i]
+        if p is None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and pitches[j + 1] == p:
+            j += 1
+        ln = j - i + 1
+        if ln >= min_len:
+            out.append((i, ln, int(p), float(max(strengths[i:j + 1]))))
+        i = j + 1
+    return out
+
+
+def to_events_hi(path, np, sf, seconds=None, beats_per_bar=4, div=4,
+                 scale=None, quantize=True):
+    """High-resolution transcription. Same (ev, bars, spb, analysis, scale) shape.
+
+    `div` is grid steps per beat (4 = sixteenths).
+    """
+    import theory
+    n_fft, hop = 2048, 512
+    x, sr = _load(path, np, sf)
+    if len(x) < n_fft * 4:
+        return None
+    S = _stft(x, np, n_fft, hop)
+    env = _onset_env(S, np)
+    bpm = _fold_tempo(_tempo(env, sr, hop, np))
+    off, period = _beat_phase(env, sr, hop, bpm, np)
+    chroma = _chroma(S, sr, n_fft, np)
+    root, mode, conf = _find_key(chroma, np)
+    scale_name = "minor" if mode == "minor" else "major"
+    scale = scale or theory.SCALES[scale_name]
+    pcs = [(root + t) % 12 for t in scale]
+
+    # Grid: `div` steps per beat, so a 16th grid at 4 beats/bar = 16 steps/bar.
+    step_frames = period / div
+    n_steps = int((S.shape[0] - off) / step_frames)
+    if n_steps < div * beats_per_bar:
+        return None
+    steps_per_bar = beats_per_bar * div
+
+    # Percussion bands, measured independently rather than inferred from one
+    # centroid — a kick and a hat overlap in time constantly.
+    e_low = _band_energy(S, sr, n_fft, np, 30.0, 150.0)
+    e_mid = _band_energy(S, sr, n_fft, np, 200.0, 900.0)
+    e_high = _band_energy(S, sr, n_fft, np, 4000.0, 11000.0)
+    d_low = np.concatenate([[0.0], np.maximum(np.diff(e_low), 0)])
+    d_mid = np.concatenate([[0.0], np.maximum(np.diff(e_mid), 0)])
+    d_high = np.concatenate([[0.0], np.maximum(np.diff(e_high), 0)])
+    # 70 fired on ~62% of all steps — a hit on nearly every 16th reads as noise,
+    # not a groove. 88/92 keeps only genuine accents.
+    def thr(v, pct):
+        return float(np.percentile(v[v > 0], pct)) if (v > 0).any() else 1e30
+    t_low, t_mid, t_high = thr(d_low, 88), thr(d_mid, 90), thr(d_high, 92)
+
+    mel_raw, bass_raw, strength, drums_at = [], [], [], []
+    for i in range(n_steps):
+        f0 = int(round(off + i * step_frames))
+        f1 = max(f0 + 1, int(round(off + (i + 1) * step_frames)))
+        f1 = min(f1, S.shape[0])
+        if f0 >= S.shape[0]:
+            break
+        frame = S[f0:f1].sum(axis=0)
+        fm = _hps(frame, sr, n_fft, np, 180.0, 2000.0)
+        fb = _hps(frame, sr, n_fft, np, 45.0, 260.0)
+        mel_raw.append(int(round(69 + 12 * np.log2(fm / 440.0))) if fm else None)
+        bass_raw.append(int(round(69 + 12 * np.log2(fb / 440.0))) if fb else None)
+        strength.append(float(env[f0:f1].sum()))
+        hits = []
+        if d_low[f0:f1].max(initial=0) >= t_low:
+            hits.append("k")
+        if d_mid[f0:f1].max(initial=0) >= t_mid:
+            hits.append("s")
+        if d_high[f0:f1].max(initial=0) >= t_high:
+            hits.append("h")
+        drums_at.append(hits)
+
+    # k=3 on the melody: enough to kill isolated octave jumps, not enough to
+    # flatten actual movement. Bass can take more smoothing — it moves less.
+    mel = _median_smooth(mel_raw, 3)
+    bass = _median_smooth(bass_raw, 7)
+    if quantize:
+        def snap(n):
+            if n is None:
+                return None
+            for d in (0, 1, -1, 2, -2):
+                if (n + d) % 12 in pcs:
+                    return n + d
+            return n
+        mel = [snap(n) for n in mel]
+        bass = [snap(n) for n in bass]
+
+    nbars = max(1, len(mel) // steps_per_bar)
+    if seconds:
+        spb_sec = 60.0 / bpm * beats_per_bar
+        nbars = max(1, min(nbars, max(1, int(round(seconds / spb_sec)))))
+    keep = nbars * steps_per_bar
+    mel, bass, strength = mel[:keep], bass[:keep], strength[:keep]
+    drums_at = drums_at[:keep]
+
+    # Below the source's median onset strength, do not lay down an arp at all —
+    # that is where the reference is quiet, and silence is part of the
+    # arrangement.
+    _pos = [v for v in strength if v > 0]
+    arp_gate = float(np.median(_pos)) * 0.8 if _pos else 0.0
+
+    ev = {"lead": [], "arp": [], "bass": [], "drum": []}
+    for st, ln, p, sg in _segment(mel, strength):
+        ev["lead"].append((st // steps_per_bar, st % steps_per_bar,
+                           min(ln, steps_per_bar - st % steps_per_bar), p, 0.5))
+    for st, ln, p, sg in _segment(bass, strength, min_len=2):
+        ev["bass"].append((st // steps_per_bar, st % steps_per_bar,
+                           min(ln, steps_per_bar - st % steps_per_bar), p))
+    # Chords per BEAT, from that beat's chroma — harmony now moves inside a bar.
+    for bar in range(nbars):
+        for beat in range(beats_per_bar):
+            s0 = bar * steps_per_bar + beat * div
+            f0 = int(round(off + s0 * step_frames))
+            f1 = min(S.shape[0], int(round(off + (s0 + div) * step_frames)))
+            if f0 >= f1:
+                continue
+            cv = np.roll(chroma[f0:f1].sum(axis=0), 0)
+            degree = _chord_for(cv, root, scale, np)
+            chord = [12 * 4 + root + scale[(degree + k) % len(scale)] +
+                     12 * ((degree + k) // len(scale)) for k in (0, 2, 4)]
+            # Gate the arp on the source's own activity. Filling every 16th of
+            # every bar regardless of the reference made all tracks share one
+            # dense texture — measured, it made the pack LESS diverse (0.798 ->
+            # 0.819) even though the melody got better. The arp should follow the
+            # music, not pave over it.
+            for k in range(0, div, 2):                 # 8ths, not 16ths
+                si = s0 + k
+                if si >= len(strength):
+                    break
+                if strength[si] < arp_gate:
+                    continue
+                ev["arp"].append((bar, beat * div + k, 2,
+                                  chord[(beat + k) % len(chord)], 0.25))
+    for i, hits in enumerate(drums_at):
+        for kind in hits:
+            ev["drum"].append((i // steps_per_bar, i % steps_per_bar, kind))
+
+    ana = {"bpm": bpm, "root": root, "mode": mode, "key_conf": conf,
+           "duration": len(x) / sr, "steps_per_bar": steps_per_bar,
+           "notes": len(ev["lead"]), "drum_hits": len(ev["drum"])}
+    return ev, nbars, 60.0 / bpm * beats_per_bar, ana, scale_name

@@ -348,8 +348,17 @@ def compose(a, np, rng):
                              max(4, int(round(a.seconds / est_spb))))
 
     bpm = max(40.0, min(300.0, a.bpm * plan["tempo_mul"]))
-    spb = 60.0 / bpm * 4.0
-    form, bps = plan["form"], plan["bars_per_section"]
+    # Bar length now follows the METER, not a hardcoded 4 beats. This is what
+    # stops every track sharing one meter — 3/4, 6/8, 7/8 and 12/8 all produce
+    # genuinely different bar lengths and accent patterns.
+    steps = plan["steps"]
+    spb_steps = plan["spb_steps"]
+    spb = 60.0 / bpm * plan["quarters"]
+    form = plan["form"]
+    # Re-size to the REAL bar length. plan_track had to guess with a 4/4 bar, so
+    # a 2/4 track came out half as long as asked and a 12/8 one half again over.
+    want_bars = max(len(form), int(round(a.seconds / spb)))
+    bps = max(2, -(-want_bars // len(form)))          # ceil, so we never undershoot
     bars = bps * len(form)
 
     def deg(d, octave=0):
@@ -360,17 +369,20 @@ def compose(a, np, rng):
     # transformation (inversion, sequence, retrograde, augmentation...). Wholly
     # new material per section fragments a track; verbatim repetition bores.
     first = form[0]
-    motifs = {}
+    motifs, kits, basses = {}, {}, {}
     for letter, sec in plan["sections"].items():
-        r = RHYTHMS[sec["rhythm_idx"] % len(RHYTHMS)]
         m = theory.make_motif(theory.Ident(track, "motif:%s:%s" % (letter, mname)),
-                              r, sec["contour"], mood["span"])
+                              sec["rhythm"], sec["contour"], mood["span"], spb_steps)
         if letter != first and sec["transform"]:
             m = theory.transform(m, sec["transform"],
                                  theory.Ident(track, "tr:" + letter))
         motifs[letter] = m
+        # Per-section kit and bass style, so the B section does not merely change
+        # notes — it changes groove. One bass rhythm for the whole pack was the
+        # loudest single cause of "the meter feels the same".
+        kits[letter] = theory.kit_pattern(sec["kit"], steps, spb_steps)
+        basses[letter] = theory.bass_onsets(sec["bass_style"], steps, spb_steps)
 
-    drums = DRUMS[plan["drums"] % len(DRUMS)]
     duty_lead = DUTIES[plan["duty"] % len(DUTIES)]
 
     ev = {"lead": [], "arp": [], "bass": [], "drum": []}
@@ -388,46 +400,57 @@ def compose(a, np, rng):
             if seventh:
                 chord.append(deg(degree + 6))
 
-            # --- lead: the motif over this chord, resolving at the section end
+            # --- lead: the motif over this chord, resolving at the section end.
+            # Rests are real silences, not notes — a melody that never stops has
+            # no phrase structure, which is most of why tracks felt identical.
             pos = 0
             last = len(motif) - 1
-            for j, (d, step) in enumerate(motif):
-                n = deg(degree + step, lead_oct)
-                if j == 0:
-                    n = deg(degree, lead_oct)              # anchor on the chord
-                if b == bps - 1 and j == last:
-                    n = deg(0, lead_oct)                   # cadence -> tonic
-                ev["lead"].append((bar, pos, d, n, duty_lead))
+            for j, (d, step, is_rest) in enumerate(motif):
+                if pos >= steps:
+                    break
+                if not is_rest:
+                    n = deg(degree + step, lead_oct)
+                    if j == 0:
+                        n = deg(degree, lead_oct)          # anchor on the chord
+                    if b == bps - 1 and j == last:
+                        n = deg(0, lead_oct)               # cadence -> tonic
+                    ev["lead"].append((bar, pos, min(d, steps - pos), n, duty_lead))
                 pos += d
 
-            # --- arp: the signature. Chord tones cycled every `arp_rate` 16th.
+            # --- arp: the signature. Chord tones cycled every `arp_rate` step.
             k = 0
-            for s in range(0, STEPS, arp_rate):
+            for s in range(0, steps, arp_rate):
                 ev["arp"].append((bar, s, arp_rate, chord[k % len(chord)], 0.25))
                 k += 1
 
-            # --- bass: voice-led, so it walks instead of hammering the root
+            # --- bass: the section's rhythm STYLE, voice-led for motion
             low = [c - 12 for c in chord]
-            bn = theory.voice_bass(prev_bass, low,
-                                   ident=theory.Ident(track, "bass:%d" % bar))
-            prev_bass = bn
-            for s in (0, 4, 8, 12):
-                ev["bass"].append((bar, s, 4, bn if s in (0, 8) else low[2 % len(low)]))
+            for si, (s, d) in enumerate(basses[letter]):
+                if s >= steps:
+                    break
+                if si == 0:
+                    bn = theory.voice_bass(prev_bass, low,
+                                           ident=theory.Ident(track, "bass:%d" % bar))
+                    prev_bass = bn
+                else:
+                    bn = low[si % len(low)] if si % 2 else prev_bass
+                ev["bass"].append((bar, s, min(d, steps - s), bn))
 
-            # --- drums
-            for s in range(STEPS):
-                for kind in ("k", "s", "h"):
-                    if drums[kind][s] == "1":
-                        ev["drum"].append((bar, s, kind))
+            # --- drums: kit realized for THIS meter
+            kit = kits[letter]
+            for kind in ("k", "s", "h"):
+                for s in kit[kind]:
+                    ev["drum"].append((bar, s, kind))
             bar += 1
 
+    plan["_steps"] = steps
     return ev, bars, spb, scale_name, plan["progs"][first], mname, mood, plan
 
 
-def render(a, ev, bars, spb, np, mood=None):
+def render(a, ev, bars, spb, np, mood=None, steps=STEPS):
     sr = SAMPLE_RATE
     total = int(round(bars * spb * sr))
-    step_s = spb / STEPS
+    step_s = spb / steps
     tr = Track(total, np)
 
     def at(bar, step):
@@ -519,16 +542,20 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             if not mname or mname == "auto":
                 mname = infer_mood(getattr(a, "prompt", "") or "")
             mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
-            got = transcribe.to_events(src, np, sf, steps_per_bar=STEPS,
-                                       beats_per_bar=4, seconds=a.seconds)
+            got = transcribe.to_events_hi(src, np, sf, seconds=a.seconds,
+                                          beats_per_bar=4, div=4)
             if not got:
                 sys.exit(f"--from-audio: could not analyze {src}")
             ev, bars, spb, ana, scale_name = got
-            print(f"   ♪ transcribed {os.path.basename(src)}: "
-                  f"{transcribe.describe(ana)}")
+            steps = STEPS; meter_s = '4/4'
+            print(f"   ♪ {os.path.basename(src)}: "
+                  f"{transcribe.NOTE_NAMES[ana['root']]} {ana['mode']}  "
+                  f"{ana['bpm']:.0f}bpm  {ana['notes']} notes  "
+                  f"{ana['drum_hits']} hits")
         else:
             ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
-        audio = render(a, ev, bars, spb, np, mood)
+            steps = plan["_steps"]; meter_s = plan["meter"]
+        audio = render(a, ev, bars, spb, np, mood, steps)
 
         # The seed goes in EVERY filename, as it does for every other engine.
         # That is the documented way to re-run a take you liked, and the pack
@@ -545,7 +572,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar  {mname:<11}"
+              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar {meter_s:<5}{mname:<11}"
               f"{scale_name:<11}{a.bpm*mood['bpm']:.0f}bpm  seed={seed}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}")

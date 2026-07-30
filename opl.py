@@ -309,10 +309,10 @@ CH_LEAD, CH_ARP1, CH_ARP2, CH_BASS = 0, 1, 2, 3
 RHYTHM = {"k": 0x10, "s": 0x08, "h": 0x01}      # BD, SD, HH in register 0xBD
 
 
-def render(a, ev, bars, spb, np, bank, voices):
+def render(a, ev, bars, spb, np, bank, voices, steps=16):
     sr = SAMPLE_RATE
-    step_s = spb / 16.0
-    total_steps = bars * 16
+    step_s = spb / float(steps)
+    total_steps = bars * steps
 
     chip = OPL3(getattr(a, "opl_lib", None))
     v_lead, v_arp, v_bass = voices
@@ -337,13 +337,13 @@ def render(a, ev, bars, spb, np, bank, voices):
     # Index events by absolute 16th step so the sequencer is one pass.
     lead, arp, bass, drum = {}, {}, {}, {}
     for bar, pos, dur, note, _duty in ev["lead"]:
-        lead.setdefault(bar * 16 + pos, []).append((dur, note))
+        lead.setdefault(bar * steps + pos, []).append((dur, note))
     for bar, pos, dur, note, _duty in ev["arp"]:
-        arp.setdefault(bar * 16 + pos, []).append((dur, note))
+        arp.setdefault(bar * steps + pos, []).append((dur, note))
     for bar, pos, dur, note in ev["bass"]:
-        bass.setdefault(bar * 16 + pos, []).append((dur, note))
+        bass.setdefault(bar * steps + pos, []).append((dur, note))
     for bar, pos, kind in ev["drum"]:
-        drum.setdefault(bar * 16 + pos, []).append(kind)
+        drum.setdefault(bar * steps + pos, []).append(kind)
 
     def hz(midi):
         return 440.0 * (2.0 ** ((midi - 69) / 12.0))
@@ -416,15 +416,19 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             mname = getattr(a, "mood", None)
             if not mname or mname == "auto":
                 mname = chipmod.infer_mood(getattr(a, "prompt", "") or "")
-            got = transcribe.to_events(src, np, sf, steps_per_bar=16,
-                                       beats_per_bar=4, seconds=a.seconds)
+            got = transcribe.to_events_hi(src, np, sf, seconds=a.seconds,
+                                          beats_per_bar=4, div=4)
             if not got:
                 sys.exit(f"--from-audio: could not analyze {src}")
             ev, bars, spb, ana, scale_name = got
-            print(f"   \u266a transcribed {os.path.basename(src)}: "
-                  f"{transcribe.describe(ana)}")
+            steps = 16; meter_s = '4/4'
+            print(f"   \u266a {os.path.basename(src)}: "
+                  f"{transcribe.NOTE_NAMES[ana['root']]} {ana['mode']}  "
+                  f"{ana['bpm']:.0f}bpm  {ana['notes']} notes  "
+                  f"{ana['drum_hits']} hits")
         else:
             ev, bars, spb, scale_name, _prog, mname, _mood, _plan = chipmod.compose(a, np, rng)
+            steps = _plan["_steps"]; meter_s = _plan["meter"]
         # Voices come from the MOOD unless the caller named one explicitly.
         # Without this, mood was inaudible on AdLib: every track was voiced
         # brass/organ/bass and only the pitches changed.
@@ -437,7 +441,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             if chosen and chosen != dflt and chosen in bank:
                 voices[i_v] = bank[chosen]
         v_names = "/".join(v.name for v in voices)
-        audio = render(a, ev, bars, spb, np, bank, voices)
+        audio = render(a, ev, bars, spb, np, bank, voices, steps)
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
@@ -450,7 +454,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar  {mname:<11}"
+              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar {meter_s:<5}{mname:<11}"
               f"{scale_name:<11}{v_names:<20}seed={seed}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}  ({SAMPLE_RATE} Hz, OPL3 native)")

@@ -176,24 +176,25 @@ def voice_bass(prev_note, chord, root_pref=0.6, ident=None):
     return min(cands, key=lambda c: abs(c - prev_note))
 
 
-def make_motif(ident, rhythm, contour_name, span, chord_len=3):
-    """A motif as (duration, scale-step) pairs following a contour archetype.
+def make_motif(ident, rhythm, contour_name, span, spb_steps=4):
+    """A motif as (duration, scale-step, is_rest) triples following a contour.
 
-    Strong positions get chord tones; weak ones may take a passing or neighbour
-    tone. That single rule is most of what separates a melody from a sequence of
-    in-key notes.
+    `rhythm` is the (duration, is_rest) list from gen_rhythm, so the melody
+    inherits the meter's own grouping and its rests. Strong positions get chord
+    tones; weak ones may take a passing or neighbour tone — that single rule is
+    most of what separates a melody from a sequence of in-key notes.
     """
     shape = CONTOURS.get(contour_name, CONTOURS["arch"])
     k = len(rhythm)
     out = []
     pos = 0
-    for j, dur in enumerate(rhythm):
+    for j, item in enumerate(rhythm):
+        dur, is_rest = item if isinstance(item, tuple) else (item, False)
         t = j / max(k - 1, 1)
         step = int(round(shape(t) * span))
-        strong = (pos % 4 == 0)
-        if not strong and ident.frac() < 0.5:
+        if pos % spb_steps and ident.frac() < 0.5:
             step += ident.pick((-1, 1))          # passing / neighbour tone
-        out.append((dur, step))
+        out.append((dur, step, is_rest))
         pos += dur
     return out
 
@@ -206,25 +207,25 @@ def transform(motif, kind, ident):
     fragments the track; verbatim repetition bores.
     """
     if kind == "invert":
-        top = max(s for _, s in motif)
-        return [(d, top - s) for d, s in motif]
+        top = max(s for _, s, _ in motif)
+        return [(d, top - s, r) for d, s, r in motif]
     if kind == "sequence":
         shift = ident.pick((2, 3, -2, -3))
-        return [(d, s + shift) for d, s in motif]
+        return [(d, s + shift, r) for d, s, r in motif]
     if kind == "retrograde":
         return list(reversed(motif))
     if kind == "augment":
-        return [(max(2, int(d * 1.5)), s) for d, s in motif]
+        return [(max(2, int(d * 1.5)), s, r) for d, s, r in motif]
     if kind == "diminish":
-        return [(max(2, d // 2), s) for d, s in motif]
+        return [(max(2, d // 2), s, r) for d, s, r in motif]
     if kind == "ornament":
         out = []
-        for d, s in motif:
-            if d >= 4 and ident.frac() < 0.5:
-                out.append((d // 2, s))
-                out.append((d - d // 2, s + ident.pick((1, 2))))
+        for d, s, r in motif:
+            if d >= 4 and not r and ident.frac() < 0.5:
+                out.append((d // 2, s, r))
+                out.append((d - d // 2, s + ident.pick((1, 2)), r))
             else:
-                out.append((d, s))
+                out.append((d, s, r))
         return out
     return list(motif)
 
@@ -264,14 +265,29 @@ def plan_track(name, mood, mood_name, scale_name, bars_target):
             Ident(name, f"prog:{letter}:{mood_name}"), len(scale),
             cadence=cadence, seventh_on_dominant=seventh)
 
+    # METER. The single biggest cause of "every track has the same meter" was
+    # that there was only ever one. Mood-scoped, so 7/8 lands on dread rather
+    # than on a fanfare.
+    meter = ident.pick(MOOD_METERS.get(mood_name, ("4/4",)))
+    steps, spb_steps, quarters = meter_grid(meter)
+
     contours = mood.get("contours", ("arch", "descending", "ascending"))
+    density = mood.get("density", 0.4)
+    rest_chance = mood.get("rest", 0.15)
+    syncopate = mood.get("syncopate", 0.1)
+    kits = MOOD_KITS.get(mood_name, ("backbeat",))
+
     sections = {}
     first = form[0]
     for letter in dict.fromkeys(form):
         sid = Ident(name, f"sec:{letter}:{mood_name}")
         sections[letter] = {
             "contour": sid.pick(contours),
-            "rhythm_idx": sid.pick(mood["rhythms"]),
+            # Rhythm is GENERATED for this meter, not indexed out of a 4/4 table.
+            "rhythm": gen_rhythm(sid, steps, spb_steps, density,
+                                 rest_chance, syncopate),
+            "bass_style": sid.pick(BASS_STYLES),
+            "kit": sid.pick(kits),
             "transform": None if letter == first else sid.pick(TRANSFORMS),
             "octave": mood["octave"] + (0 if letter == first else sid.pick((0, 0, 1, -1))),
             "arp": mood["arp"] if letter == first else max(1, mood["arp"] + sid.pick((0, 1, 2))),
@@ -283,7 +299,8 @@ def plan_track(name, mood, mood_name, scale_name, bars_target):
     return {"form": form, "progs": progs, "sections": sections,
             "cadence": cadence, "seventh": seventh, "tempo_mul": tempo_mul,
             "scale": scale, "scale_name": scale_name,
-            "drums": ident.rint(0, 3), "duty": mood["duty"],
+            "meter": meter, "steps": steps, "spb_steps": spb_steps,
+            "quarters": quarters, "duty": mood["duty"],
             "bars_per_section": max(2, bars_target // max(1, len(form)))}
 
 
