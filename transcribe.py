@@ -94,14 +94,25 @@ def _tempo(env, sr, hop, np, lo=60.0, hi=200.0):
     """Autocorrelate the onset envelope and pick the strongest plausible period."""
     e = env - env.mean()
     ac = np.correlate(e, e, mode="full")[len(e) - 1:]
+    n = len(e)
+    # UNBIASED autocorrelation. The raw ACF falls off with lag simply because
+    # fewer samples overlap, which biases the winner toward short lags — i.e.
+    # implausibly fast tempos. Measured symptom: 18 of 22 orchestral tracks all
+    # reported the same 96bpm, because everything locked near 192 and folded.
+    counts = np.arange(n, 0, -1)
+    ac = ac / np.maximum(counts, 1)
     fps = sr / hop
-    best, best_v = 120.0, -1e30
+    # Log-normal prior centred on ~100bpm. Tempo perception is roughly
+    # log-uniform around a preferred rate; without a prior, harmonics of the true
+    # tempo score as well as the tempo itself.
+    best, best_v = 100.0, -1e30
     for bpm in np.arange(lo, hi + 0.5, 0.5):
         lag = int(round(fps * 60.0 / bpm))
         if lag < 2 or lag >= len(ac):
             continue
-        # Sum a few harmonics of the lag so 2x/0.5x errors are less likely.
         v = ac[lag] + 0.5 * ac[min(len(ac) - 1, lag * 2)]
+        prior = np.exp(-0.5 * (np.log(bpm / 100.0) / 0.35) ** 2)
+        v *= prior
         if v > best_v:
             best, best_v = float(bpm), v
     return best

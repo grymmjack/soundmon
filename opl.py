@@ -410,8 +410,28 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        src = getattr(a, "from_audio", None)
-        if src:
+        mfile = getattr(a, "from_midi", None)
+        if mfile:
+            # MIDI: nothing is inferred. Pitches, durations, tempo and metre all
+            # come from the file, so this is strictly better than --from-audio
+            # when a MIDI exists. Mood still picks the voicing.
+            import midi as midimod
+            mname = getattr(a, "mood", None)
+            if not mname or mname == "auto":
+                mname = chipmod.infer_mood(getattr(a, "prompt", "") or "")
+            got = midimod.to_events(mfile, np, seconds=a.seconds,
+                                    transpose=getattr(a, "transpose", 0),
+                                    start_frac=getattr(a, "midi_start", 0.15))
+            if not got:
+                sys.exit(f"--from-midi: no playable notes in {mfile}")
+            ev, bars, spb, info, scale_name = got
+            steps = info["steps"]; meter_s = info["timesig"]
+            print(f"   \u266a {info['title'][:40]}: {midimod.describe(info)}")
+        else:
+            src = getattr(a, "from_audio", None)
+        if mfile:
+            pass
+        elif src:
             import transcribe
             mname = getattr(a, "mood", None)
             if not mname or mname == "auto":

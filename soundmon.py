@@ -823,6 +823,16 @@ def main():
                    choices=["minor", "harmonic", "dorian", "phrygian", "major",
                             "mixolydian", "pentatonic"],
                    help="override the scale implied by --key")
+    p.add_argument("--from-midi", dest="from_midi", default=None, metavar="FILE",
+                   help="play a MIDI FILE on the chip. The BEST input: exact "
+                        "pitches, real note durations, explicit tempo and time "
+                        "signature, drums already separated. No inference at all.")
+    p.add_argument("--midi-start", dest="midi_start", type=float, default=0.15,
+                   metavar="F",
+                   help="skip this fraction into the file before taking bars "
+                        "(game MIDIs often open with empty bars)")
+    p.add_argument("--transpose", type=int, default=0, metavar="N",
+                   help="shift --from-midi by N semitones")
     p.add_argument("--from-audio", dest="from_audio", default=None, metavar="FILE",
                    help="TRANSCRIBE a reference recording and play it on the chip. "
                         "Takes the tempo, key, chords, melody, bass and drums from "
@@ -1056,6 +1066,7 @@ def main():
                        and not a.list_styles and not a.list_keys and not a.list_voices
                        and not a.narrate_file and not a.record_file
                        and not a.blip_file and not a.chip and not a.opl
+                       and not a.from_midi
                        and not a.chipfx and not a.oplfx and not a.list_moods
                        and not a.list_devices):
         print_help()
