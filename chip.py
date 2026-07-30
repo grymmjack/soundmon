@@ -324,7 +324,23 @@ def compose(a, np, rng):
     mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
 
     home_root, key_scale = parse_key(a.key)
+
+    # Identity is PACK + TRACK, not track alone.
+    #
+    # Deriving it from the track name only meant `level9` composed identically in
+    # every pack: same mood (same manifest description), therefore same scale,
+    # form, progression, meter and motif. Two packs then differed solely in key,
+    # tempo and timbre — which is why chiptune and adlib sounded like one piece
+    # played twice rather than two soundtracks.
+    #
+    # The pack comes from the output directory, so nothing needs a new flag and
+    # every existing caller gets distinct music for free. Still fully
+    # deterministic: the same pack+track always regenerates the same plan.
     track = a.name or "untitled"
+    _pack = (os.path.basename(os.path.normpath(a.output_to))
+             if getattr(a, "output_to", None) else "")
+    if _pack:
+        track = f"{_pack}/{track}"
 
     # Scale: explicit override wins, then a mode spelled out in --key, else the
     # mood's — chosen by track identity so two `solemn` tracks can differ.
