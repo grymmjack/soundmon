@@ -615,7 +615,11 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         if mfile:
             audio = render_timed(a, tnotes, tdrums, info["duration"], np, mood)
         else:
-            audio = render(a, ev, bars, spb, np, mood, steps)
+            # Procedural through the same renderer: inherits --chippy arpeggios,
+            # slides and the register-based voicing. Grid positions, exact-time
+            # representation.
+            pnotes, pdrums = events_to_timed(ev, bars, spb, steps, mname)
+            audio = render_timed(a, pnotes, pdrums, bars * spb, np, mood)
 
         # The seed goes in EVERY filename, as it does for every other engine.
         # That is the documented way to re-run a take you liked, and the pack
@@ -927,3 +931,48 @@ def chippify(notes, level, sr_hint=44100):
     out.extend(passthru)
     out.sort(key=lambda x: x["t"])
     return out
+
+
+def events_to_timed(ev, bars, spb, steps, mood_name, drums_only=False):
+    """Convert grid-composed events into the exact-time note list.
+
+    This is what lets PROCEDURAL music share the renderer the MIDI path uses, and
+    therefore inherit everything built for it: the DMXOPL 128-instrument bank,
+    per-patch level calibration, 18-channel polyphony, the GM percussion kit and
+    --chippy arpeggios. Previously the procedural path had none of those — it ran
+    four fixed channels through a hand-authored 12-patch bank.
+
+    This is NOT un-quantizing. The notes were composed on a grid and stay on it;
+    their positions are merely expressed in seconds instead of step indices, which
+    is the form the renderer consumes. Generated material may be gridded — only
+    MIDI input must never be.
+
+    GM programs come from the mood, so a solemn track voices as church organ and
+    choir rather than defaulting to whatever patch happens to be first.
+    """
+    import midi as _m
+    lead_gm, arp_gm, bass_gm = _m.MOOD_GM.get(mood_name, _m.MOOD_GM["mysterious"])
+    step_s = spb / float(steps)
+
+    def at(bar, st):
+        return (bar * steps + st) * step_s
+
+    out = []
+    if not drums_only:
+        for role, gm, key in (("lead", lead_gm, "lead"),
+                              ("arp", arp_gm, "arp"),
+                              ("bass", bass_gm, "bass")):
+            for i, it in enumerate(ev.get(key, [])):
+                bar, st, dur, pitch = it[0], it[1], it[2], it[3]
+                vel = it[5] if (key != "bass" and len(it) > 5) else (
+                      it[4] if (key == "bass" and len(it) > 4) else 96)
+                out.append({"id": (key, i), "t": at(bar, st),
+                            "dur": max(0.02, dur * step_s),
+                            "pitch": int(pitch), "prog": gm,
+                            "vel": int(vel) if isinstance(vel, int) else 96})
+    dr = []
+    kind_gm = {"k": 36, "s": 38, "h": 42}
+    for bar, st, kind in ev.get("drum", []):
+        dr.append((at(bar, st), kind_gm.get(kind, 42)))
+    out.sort(key=lambda n: n["t"])
+    return out, dr

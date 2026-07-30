@@ -600,7 +600,15 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             audio = render_timed(a, tnotes, tdrums, info["duration"], np,
                                  load_wopl_bank(), with_drums=bool(tdrums))
         else:
-            audio = render(a, ev, bars, spb, np, bank, voices, steps, None)
+            # PROCEDURAL through the same renderer, so it inherits the DMXOPL
+            # bank, level calibration, 18-channel polyphony, the GM percussion kit
+            # and --chippy. The notes stay on their grid; only their positions are
+            # expressed in seconds.
+            import chip as _cm
+            pnotes, pdrums = _cm.events_to_timed(ev, bars, spb, steps, mname)
+            dur = bars * spb
+            audio = render_timed(a, pnotes, pdrums, dur, np, load_wopl_bank(),
+                                 with_drums=bool(pdrums))
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
