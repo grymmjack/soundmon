@@ -34,6 +34,7 @@ Each 4-byte cell packs sample number across two nibbles either side of a 12-bit
 Amiga period — a layout that only makes sense once you know the sample number grew
 from 4 bits to 5 after the format shipped.
 """
+import math
 import os
 import struct
 
@@ -248,6 +249,18 @@ def write_mod(path, ev, bars, spb, steps, np, title="soundmon", bpm=None,
 
     # Every pitch sounding at each grid position, so an arpeggio can use the real
     # chord instead of assuming a major triad.
+    def place_fx(bar, step, ch, effect, param):
+        """Write a bare effect — no note, no sample — into an empty cell.
+
+        This is how a MOD sustains an effect across rows: the effect column is
+        re-stated on every row it should act on. Only empty cells are written, so
+        a continuation can never displace a note or a release.
+        """
+        abs_row = bar * rows_per_bar + step
+        pat, row = divmod(abs_row, ROWS)
+        if 0 <= pat < n_patterns and grid[pat][row][ch] == EMPTY:
+            grid[pat][row][ch] = _cell(0, 0, effect, param)
+
     chords = {}
     for vname in ("lead", "arp", "bass"):
         for it in ev.get(vname, []):
@@ -275,12 +288,22 @@ def write_mod(path, ev, bars, spb, steps, np, title="soundmon", bpm=None,
             # synthesis. Deterministic on the row so a regenerated file is
             # byte-identical.
             frac = ((bar * 131 + step * 17 + ch * 7) % 100) / 100.0
-            e, p = chip_effects(frac, pitch, prev_pitch, int(dur),
-                                is_chord_top=(ch == CH_ARP), chippy=chippy,
-                                legato=legato, ticks_per_row=ticks,
-                                chord=chords.get((bar, step), ()))
+            e, p, span, cont = chip_effects(
+                frac, pitch, prev_pitch, int(dur),
+                is_chord_top=(ch == CH_ARP), chippy=chippy,
+                legato=legato, ticks_per_row=ticks,
+                chord=chords.get((bar, step), ()),
+                avail=(nxt - start) if nxt is not None else None)
             prev_pitch = pitch
             place(bar, step, ch, sample, pitch, e, p)
+            # Carry the effect across the rows it needs. Bounded by the next onset
+            # so a continuation never bleeds into the following note, and only
+            # written into cells that are otherwise empty.
+            stop = start + span
+            if nxt is not None:
+                stop = min(stop, nxt)
+            for row in range(start + 1, stop):
+                place_fx(*divmod(row, rows_per_bar), ch, e, cont)
             # Release one row past the last sounding row, clamped to the next
             # onset. Landing exactly ON the next onset needs no release at all:
             # retriggering a sample ends the previous note by itself — and that
@@ -458,8 +481,35 @@ def porta_rate(pitch, prev_pitch, ticks_per_row, rows=1):
     return max(1, min(0xFF, -(-d // ticks)))          # ceil, so it does arrive
 
 
+def vib_depth(pitch, cents=20.0, max_cents=40.0):
+    """Vibrato depth for a roughly constant `cents` swing. 0 means "do not".
+
+    SAME TRAP AS PORTAMENTO, and I walked into it twice. 4xy's depth is in PERIOD
+    units, and period is inversely proportional to frequency, so one fixed depth is
+    not one musical interval — it is a swing that widens without limit as the notes
+    go up. A hard-coded depth of 3 measured +/-16 cents at MIDI 41 and +/-162 cents
+    at MIDI 80: over a semitone and a half of wobble on exactly the notes the
+    melody lives on. That is not vibrato, it is the tune going out of tune.
+
+    ProTracker's vibrato adds `depth * sine / 128` period units with the sine
+    peaking at 255, so the swing is about +/- 2 * depth.
+
+    Above roughly MIDI 78 the periods get so short that even depth 1 exceeds
+    max_cents — the format simply cannot express a subtle vibrato up there, so
+    return 0 rather than emit a bad one.
+    """
+    p = _period(pitch)
+    span = 1.0 - 2.0 ** (-abs(cents) / 1200.0)
+    d = int(round(p * span / 2.0))
+    if d < 1:
+        # Would round to nothing; check whether the minimum is tolerable.
+        return 1 if 1200 * math.log2(p / max(1.0, p - 2.0)) <= max_cents else 0
+    return min(0x0F, d)
+
+
 def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
-                 chippy="off", legato=False, ticks_per_row=6, chord=()):
+                 chippy="off", legato=False, ticks_per_row=6, chord=(),
+                 avail=None):
     """Choose an effect for a note, in the era's idiom.
 
     Mirrors what --chippy does in the synthesis path, so a MOD carries the same
@@ -469,11 +519,35 @@ def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
         a sustained note gets vibrato       — cheap, and it hides a static wave
         a chord top gets arpeggio           — a chord on one channel
 
-    Returns (effect, param) or (0, 0) for none.
+    Returns (effect, param, span, cont_param):
+
+        span        how many rows the effect must OCCUPY, not just start on
+        cont_param  the parameter to write on rows 2..span
+
+    THE SPAN IS NOT OPTIONAL. A MOD effect acts only on the rows it is actually
+    written to — there is no "note-scoped" effect. Writing an effect on the onset
+    row alone gives it one row of life, and at 96 rows per bar a row is 33 ms:
+
+        arpeggio measured -56 dBFS against no effects, vibrato -30 dBFS, i.e.
+        both were inaudible, because 33 ms is not long enough to hear a cycle of
+        either
+
+        portamento was worse than inaudible. Sizing the rate to arrive over three
+        rows and then writing one row stopped every one of 83 slides a third of
+        the way, landing up to 500 cents from the written note
+
+    Portamento and vibrato both continue with a zero parameter, meaning "same rate
+    as before". Arpeggio has no continue form — parameter 0 IS "no effect" — so its
+    parameter must be repeated in full.
     """
     if chippy == "off":
-        return 0, 0
+        return 0, 0, 1, 0
     strength = {"some": 0.35, "lots": 0.6, "max": 0.9}.get(chippy, 0.0)
+    # Rows genuinely available before the next note on this channel. The glide rate
+    # has to be computed against THIS, not against the span we would prefer: ask
+    # for three rows, get truncated to one by an early next note, and the slide
+    # stops two thirds short — which is the same failure as before, just rarer.
+    avail = 10 ** 6 if avail is None else max(1, int(avail))
 
     if is_chord_top and ident_frac < strength:
         # 0xy cycles note, note+x, note+y every tick. The intervals come from the
@@ -482,7 +556,8 @@ def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
         iv = [i for i in sorted({(int(p) - int(pitch)) % 12 for p in chord})
               if 1 <= i <= 15]
         x, y = (iv + [4, 7])[:2] if iv else (4, 7)
-        return fx("arpeggio", x, y)
+        e, p = fx("arpeggio", x, y)
+        return e, p, max(1, min(int(dur), 12, avail)), p
 
     if prev_pitch is not None and legato:
         # ONLY when the previous note ran straight into this one. Tone portamento
@@ -491,9 +566,16 @@ def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
         # release that is zero, so a slide there is perfectly silent.
         step = abs(int(pitch) - int(prev_pitch))
         if 1 <= step <= 7 and ident_frac < strength:
-            return fx("tone_porta", porta_rate(pitch, prev_pitch,
-                                               ticks_per_row))
+            # Glide over a few rows so it reads as a slide rather than a soft
+            # attack, but never past the end of the note.
+            rows = max(1, min(3, max(1, int(dur) // 2), avail))
+            e, p = fx("tone_porta", porta_rate(pitch, prev_pitch,
+                                               ticks_per_row, rows))
+            return e, p, rows, 0
 
     if dur >= 4 and ident_frac < strength * 0.7:
-        return fx("vibrato", 4, 3)
-    return 0, 0
+        d = vib_depth(pitch)
+        if d:
+            e, p = fx("vibrato", 4, d)
+            return e, p, max(1, min(int(dur), 16, avail)), 0
+    return 0, 0, 1, 0

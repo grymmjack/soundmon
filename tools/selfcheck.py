@@ -161,6 +161,62 @@ def main():
               not (offs & onsets) and offs,
               f"onsets {sorted(onsets)} releases {sorted(offs)}")
 
+    # Vibrato depth is in PERIOD units, so one fixed depth is a swing that widens
+    # without limit going up. A hard-coded 3 measured +/-162 cents at MIDI 80.
+    worst, detail = 0.0, ""
+    for p in range(36, 84):
+        d = modw.vib_depth(p)
+        if not d:
+            continue
+        per = modw._period(p)
+        c = 1200 * math.log2(per / max(1.0, per - d * 2.0))
+        if c > worst:
+            worst, detail = c, f"MIDI {p} depth {d}"
+    check("MOD vibrato swing stays under 45 cents", worst < 45.0,
+          f"worst {worst:.0f} cents ({detail})")
+
+    # A slide must ARRIVE. 3xx only acts on rows it is written to, so a rate sized
+    # for N rows but written on one stops 1/N of the way: 83 of 83 slides landed
+    # short, up to 500 cents from the written note.
+    notes = [(0, i * 6, 6, 60 + (i % 5) * 2, 0.5, 100) for i in range(24)]
+    with tempfile.TemporaryDirectory() as td:
+        mp = os.path.join(td, "p.mod")
+        modw.write_mod(mp, {"lead": notes, "arp": [], "bass": [], "drum": []},
+                       3, 3.2, 96, np, chippy="max", rows_per_bar=96)
+        d = open(mp, "rb").read()
+        npat = d[950]
+        cells = [d[1084 + pat * 1024 + r * 16:1084 + pat * 1024 + r * 16 + 4]
+                 for pat in range(npat) for r in range(64)]
+        ticks, _bpm = modw.timing_for(3.2, 96)
+        cur = None
+        i = 0
+        tot = bad = 0
+        while i < len(cells):
+            b0, b1, b2, b3 = cells[i]
+            per = ((b0 & 0x0F) << 8) | b1
+            if (b2 & 0x0F) == 3 and cur and per and per != cur:
+                tot += 1
+                tgt, rate, pp, up, j = per, b3, cur, per > cur, i
+                while j < len(cells) and (cells[j][2] & 0x0F) == 3:
+                    rate = cells[j][3] or rate
+                    for _ in range(ticks):
+                        pp = pp + rate if up else pp - rate
+                        if (up and pp >= tgt) or (not up and pp <= tgt):
+                            pp = tgt
+                            break
+                    j += 1
+                    if pp == tgt:
+                        break
+                bad += pp != tgt
+                cur = tgt
+                i = j
+                continue
+            if per:
+                cur = per
+            i += 1
+        check("MOD tone portamento always reaches its target",
+              tot > 0 and bad == 0, f"{bad} of {tot} slides land short")
+
     # --- end-to-end invariants ----------------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
         # THE ONE THAT KEEPS BREAKING: the loudness ceiling must not apply to
