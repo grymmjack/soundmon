@@ -541,21 +541,23 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             mname = getattr(a, "mood", None)
             if not mname or mname == "auto":
                 mname = chipmod.infer_mood(getattr(a, "prompt", "") or "")
-            got = midimod.to_events(mfile, np, seconds=a.seconds,
-                                    transpose=getattr(a, "transpose", 0),
-                                    start_frac=getattr(a, "midi_start", 0.15))
-            if not got:
+            # EXACT timing, no grid. See midi.to_timed_events for why.
+            timed = midimod.to_timed_events(
+                mfile, seconds=a.seconds,
+                transpose=getattr(a, "transpose", 0),
+                start_frac=getattr(a, "midi_start", 0.15))
+            if not timed:
                 sys.exit(f"--from-midi: no playable notes in {mfile}")
-            ev, bars, spb, info, scale_name = got
-            steps = info["steps"]; meter_s = info["timesig"]
+            tnotes, tdrums, info = timed
+            ev, bars, spb, scale_name = None, 0, info["spb"], "minor"
+            steps = 16; meter_s = info["timesig"]
             # Flatten (bar, step) -> absolute step, which is how render indexes.
             load_gm_bank()
-            gmprog = {role: {b * steps + st: p for (b, st), p in d.items()}
-                      for role, d in info.get("progs", {}).items()}
             n_gm = len(info.get("gm_used", []))
-            print(f"   \u266a {info['title'][:38]}: {midimod.describe(info)}"
+            print(f"   \u266a {info['title'][:38]}: {info['timesig']} "
+                  f"{info['bpm']:.0f}bpm  {info['duration']:.1f}s  "
+                  f"{info['notes']} notes  {info['drum_hits']} hits"
                   f"  {n_gm} instr / {len(info.get('gm_drums_used', []))} perc"
-                  f", poly {info['poly_notes']} (max {info['max_poly']})"
                   f" via {_bank_label()}")
         else:
             src = getattr(a, "from_audio", None)
@@ -591,15 +593,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             if chosen and chosen != dflt and chosen in bank:
                 voices[i_v] = bank[chosen]
         v_names = "/".join(v.name for v in voices)
-        if mfile and info.get("poly"):
-            # Polyphonic path: every note, real 4-op voices, all 18 channels.
-            audio = render_poly(a, info["poly"], ev["drum"], bars, spb, np,
-                                steps, load_wopl_bank(),
-                                with_drums=bool(ev["drum"] or info.get("drums_gm")),
-                                drums_gm=info.get("drums_gm"))
+        if mfile:
+            # Event-driven, EXACT time. No grid: 91% of notes in a real file sit
+            # off a 16th boundary, and quantizing them is what made note lengths
+            # sound wrong.
+            audio = render_timed(a, tnotes, tdrums, info["duration"], np,
+                                 load_wopl_bank(), with_drums=bool(tdrums))
         else:
-            audio = render(a, ev, bars, spb, np, bank, voices, steps,
-                           gmprog if mfile else None)
+            audio = render(a, ev, bars, spb, np, bank, voices, steps, None)
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
@@ -610,7 +611,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             loudness_normalize(path, a.lufs_target, a.true_peak)
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
-        if getattr(a, "write_midi", False):
+        if getattr(a, "write_midi", False) and ev is not None:
             # Additional output, not a substitute: the chip render is the point.
             import midi as _midiw
             mp = os.path.splitext(path)[0] + ".mid"
@@ -1148,3 +1149,55 @@ def calibrate_bank(np, force=False, path=None):
 
 def calibration_trim(prog):
     return _CAL[prog] if (_CAL and 0 <= prog < len(_CAL)) else 0
+
+
+def render_timed(a, notes, drums, duration, np, wopl, with_drums=True):
+    """Event-driven rendering at EXACT times — no grid, no quantization.
+
+    render_poly() steps a fixed 16th grid, which forces every onset and length to
+    the nearest step. Here the schedule is built from real note times and the chip
+    is advanced only as far as the next event, so timing is sample-accurate and
+    expressive gate times survive.
+    """
+    sr = SAMPLE_RATE
+    chip = OPL3(getattr(a, "opl_lib", None))
+    use_kit = bool(with_drums and drums and wopl and wopl.get("percussion"))
+    alloc = Allocator(chip, wopl, reserve_drums=False)
+
+    ev = []
+    for n in notes:
+        ev.append((n["t"], 0, n))                       # 0 = note on
+        ev.append((n["t"] + n["dur"], 1, n))            # 1 = note off
+    if use_kit:
+        for t, gm in drums:
+            ev.append((t, 2, gm))
+    ev.sort(key=lambda e: (e[0], e[1]))
+
+    hz = lambda p: 440.0 * (2.0 ** ((p - 69) / 12.0))
+    out = []
+    now = 0.0
+    for t, kind, payload in ev:
+        if t > now:
+            nsamp = int(round((t - now) * sr)) - int(round(0.0))
+            if nsamp > 0:
+                out.append(chip.render(nsamp, np))
+                now = t
+        if kind == 0:
+            alloc.note_on(payload["pitch"], payload["prog"],
+                          hz(payload["pitch"]), payload["vel"], payload["id"])
+        elif kind == 1:
+            alloc.note_off(payload["id"])
+        else:
+            alloc.perc_on(payload)
+    tail = duration - now
+    if tail > 0:
+        out.append(chip.render(int(round(tail * sr)), np))
+    alloc.all_off()
+    # Let the final release ring out rather than truncating it.
+    out.append(chip.render(int(0.35 * sr), np))
+
+    audio = np.concatenate(out) if out else np.zeros(1)
+    peak = float(np.abs(audio).max())
+    if peak > 1e-9:
+        audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)
+    return audio

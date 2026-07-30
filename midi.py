@@ -439,3 +439,52 @@ def write_smf(path, ev, bars, spb, steps, mood="mysterious", timesig="4/4",
         for t in tracks:
             fh.write(t)
     return path
+
+
+def to_timed_events(path, seconds=None, transpose=0, start_frac=0.0):
+    """Exact-time note list — no quantization at all.
+
+    to_events() snaps everything to a 16th-note grid, which measured 91% of notes
+    off-grid in Zelda's Title01, with mean onset error 26% of a 16th and length
+    error 23%. Those non-grid lengths (0.77, 0.83, 0.93, 1.03 sixteenths...) are
+    the composer's gate times — the expressive detail — and rounding them away is
+    what made note lengths sound wrong while a soundfont playing raw ticks sounded
+    correct.
+
+    This converts ticks straight to SECONDS through the full tempo map, so tempo
+    changes are honoured too (to_events used only the first tempo event).
+
+    Returns (notes, drums, info) where notes are dicts with real start/duration in
+    seconds, and drums are (time, gm_note).
+    """
+    notes, drums, tpb, tempo_map, timesig = parse(path)
+    if not notes and not drums:
+        return None
+    t_of = _tick_seconds(tempo_map, tpb)
+    beats, unit = timesig
+    spb = 60.0 / (60_000_000.0 / tempo_map[0][1]) * beats * (4.0 / unit)
+
+    end = max([n[1] for n in notes] + [d[0] for d in drums] + [1])
+    total = t_of(end)
+    t0 = total * max(0.0, min(0.9, start_frac))
+    t1 = t0 + seconds if seconds else total
+
+    out = []
+    for nid, (st, en, pitch, vel, chan, prog) in enumerate(notes):
+        a, b = t_of(st), t_of(en)
+        if b <= t0 or a >= t1:
+            continue
+        out.append({"id": nid, "t": max(0.0, a - t0),
+                    "dur": max(0.005, min(b, t1) - max(a, t0)),
+                    "pitch": pitch + transpose, "prog": prog, "vel": vel})
+    dr = [(t_of(tk) - t0, note) for tk, note in drums
+          if t0 <= t_of(tk) < t1]
+
+    info = {"bpm": 60_000_000.0 / tempo_map[0][1],
+            "timesig": f"{beats}/{unit}", "spb": spb,
+            "duration": min(t1, total) - t0, "notes": len(out),
+            "drum_hits": len(dr), "tempo_changes": len(tempo_map),
+            "gm_used": sorted({n["prog"] for n in out}),
+            "gm_drums_used": sorted({d[1] for d in dr}),
+            "title": os.path.basename(path), "exact": True}
+    return out, dr, info
