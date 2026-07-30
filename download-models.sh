@@ -132,6 +132,21 @@ if [ "${1:-}" = "--opl" ] || [ "${OPL_CORE:-0}" = 1 ]; then
     esac
     echo "⚙ compiling $LIB ..."
     ( cd "$VEND" && "$CC_BIN" -O2 -fPIC -shared opl3.c -o "$LIB" -lm )
+    # The real General MIDI patch bank for OPL: 128 instruments, the Creative
+    # Labs PLAY.EXE assignments, as carried by Schism Tracker. Fetched and NOT
+    # vendored for the same reason as the core — Schism Tracker is GPL-2+ and
+    # this repo is MIT. Without it, --from-midi plays every program on a
+    # hand-authored 12-patch bank and a piano sounds like a brass stab.
+    get "https://raw.githubusercontent.com/schismtracker/schismtracker/master/player/fmpatches.c" \
+        "$VEND/fmpatches.c"
+    # DMXOPL — the Doom OPL3 bank, voiced for a YMF262 rather than adapted from
+    # OPL2, and MIT licensed like this repo. Strictly better than the Creative
+    # PLAY.EXE set above, which stays as a fallback.
+    get "https://raw.githubusercontent.com/sneakernets/DMXOPL/DMXOPL3/GENMIDI.wopl" \
+        "$VEND/GENMIDI.wopl"
+    get "https://raw.githubusercontent.com/Wohlstand/libADLMIDI/master/fm_banks/LICENSE-DMXOPL.txt" \
+        "$VEND/LICENSE-DMXOPL.txt" 2>/dev/null || true
+    echo "✅ GM OPL bank ready -> $VEND/fmpatches.c   (GPL-2+, Schism Tracker)"
     echo "✅ Nuked OPL3 ready -> $VEND/$LIB   (LGPL-2.1, see LICENSE.Nuked-OPL3)"
     echo "   try:  soundmon \"dungeon theme\" --opl --key \"D minor\" --bpm 110"
 fi

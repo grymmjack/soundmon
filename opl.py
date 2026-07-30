@@ -267,6 +267,59 @@ def find_lib():
              "   it is LGPL-2.1, so it is built locally rather than shipped here)")
 
 
+# --- General MIDI bank (Schism Tracker / Creative PLAY.EXE) ------------------
+# 128 melodic patches, 11 bytes each, in Impulse Tracker's `adlib_bytes` order:
+#
+#   0,1  modulator / carrier   AM|VIB|EG|KSR|MULT   -> reg 0x20, 0x23
+#   2,3  modulator / carrier   KSL|TL               -> reg 0x40, 0x43
+#   4,5  modulator / carrier   AR|DR                -> reg 0x60, 0x63
+#   6,7  modulator / carrier   SL|RR                -> reg 0x80, 0x83
+#   8,9  modulator / carrier   waveform             -> reg 0xE0, 0xE3
+#   10   feedback | connection                      -> reg 0xC0
+#
+# Writing raw register bytes rather than converting to Instrument() keeps this
+# bit-exact: these values were tuned against real hardware, and re-deriving them
+# through our own field packing would only introduce rounding.
+GM_BANK = None
+
+
+def load_gm_bank(path=None):
+    """Parse fmpatches.c into 128 x 11 raw register bytes. Cached."""
+    global GM_BANK
+    if GM_BANK is not None:
+        return GM_BANK
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = path or os.path.join(here, "vendor", "fmpatches.c")
+    if not os.path.exists(src):
+        GM_BANK = []
+        return GM_BANK
+    rows = []
+    with open(src, "r", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line.startswith("{0x") and not line.startswith("{ 0x"):
+                continue
+            body = line[line.index("{") + 1:line.index("}")]
+            vals = [int(v.strip(), 16) for v in body.split(",") if v.strip()]
+            if len(vals) == 11:
+                rows.append(tuple(vals))
+    GM_BANK = rows
+    return GM_BANK
+
+
+def program_gm(chip, ch, raw):
+    """Apply an 11-byte GM patch to a channel, register for register."""
+    m, c = _op_pair(ch)
+    chip.write(0x20 + m, raw[0]);  chip.write(0x20 + c, raw[1])
+    chip.write(0x40 + m, raw[2]);  chip.write(0x40 + c, raw[3])
+    chip.write(0x60 + m, raw[4]);  chip.write(0x60 + c, raw[5])
+    chip.write(0x80 + m, raw[6]);  chip.write(0x80 + c, raw[7])
+    chip.write(0xE0 + m, raw[8]);  chip.write(0xE0 + c, raw[9])
+    # Force both speakers on; a patch byte with neither set is silent, which is a
+    # very confusing way to hear nothing.
+    chip.write(0xC0 + ch, 0x30 | (raw[10] & 0x0F))
+
+
 # --- external bank loading ---------------------------------------------------
 def load_sbi(path):
     """A single-instrument .sbi dump (Sound Blaster Instrument)."""
@@ -303,13 +356,29 @@ def load_bank(path):
     sys.exit(f"unknown bank format {ext!r} (expected .sbi)")
 
 
+def _apply_program(chip, ch, prog):
+    """Select GM program `prog` on channel `ch`, best bank available.
+
+    DMXOPL (WOPL) is preferred over the Creative PLAY.EXE set because it was
+    voiced for the OPL3 rather than carried over from OPL2. Falling back rather
+    than failing matters: a user who has not run `download-models.sh --opl` still
+    gets music, just on the hand-authored bank.
+    """
+    w = load_wopl_bank()
+    if w and 0 <= prog < len(w["melodic"]):
+        program_wopl(chip, ch, w["melodic"][prog])
+        return
+    if load_gm_bank() and 0 <= prog < len(GM_BANK):
+        program_gm(chip, ch, GM_BANK[prog])
+
+
 # --- rendering ---------------------------------------------------------------
 # Channel assignment. Melodic voices sit low so rhythm mode can own 6/7/8.
 CH_LEAD, CH_ARP1, CH_ARP2, CH_BASS = 0, 1, 2, 3
 RHYTHM = {"k": 0x10, "s": 0x08, "h": 0x01}      # BD, SD, HH in register 0xBD
 
 
-def render(a, ev, bars, spb, np, bank, voices, steps=16):
+def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
     sr = SAMPLE_RATE
     step_s = spb / float(steps)
     total_steps = bars * steps
@@ -351,8 +420,15 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16):
     chunks = []
     arp_flip = 0
     for s in range(total_steps):
-        for st, ch in ((lead, CH_LEAD), (bass, CH_BASS)):
+        for st, ch, role in ((lead, CH_LEAD, "lead"), (bass, CH_BASS, "bass")):
             if s in st:
+                # Real GM patch for this note, when a MIDI supplied one. Real OPL
+                # drivers reprogrammed the channel per note exactly like this —
+                # without it every instrument in the file plays as one timbre.
+                if gmprog:
+                    p = gmprog.get(role, {}).get(s)
+                    if p is not None:
+                        _apply_program(chip, ch, p)
                 chip.key_off(ch)
                 chip.key_on(ch, hz(st[s][0][1]))
         if s in arp:
@@ -361,6 +437,10 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16):
             # instead of a stuttering single voice.
             ch = CH_ARP1 if arp_flip else CH_ARP2
             arp_flip ^= 1
+            if gmprog:
+                p = gmprog.get("arp", {}).get(s)
+                if p is not None:
+                    _apply_program(chip, ch, p)
             chip.key_off(ch)
             chip.key_on(ch, hz(arp[s][0][1]))
         if s in drum:
@@ -410,6 +490,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
+        gmprog = None
         mfile = getattr(a, "from_midi", None)
         if mfile:
             # MIDI: nothing is inferred. Pitches, durations, tempo and metre all
@@ -426,7 +507,13 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
                 sys.exit(f"--from-midi: no playable notes in {mfile}")
             ev, bars, spb, info, scale_name = got
             steps = info["steps"]; meter_s = info["timesig"]
-            print(f"   \u266a {info['title'][:40]}: {midimod.describe(info)}")
+            # Flatten (bar, step) -> absolute step, which is how render indexes.
+            load_gm_bank()
+            gmprog = {role: {b * steps + st: p for (b, st), p in d.items()}
+                      for role, d in info.get("progs", {}).items()}
+            n_gm = len(info.get("gm_used", []))
+            print(f"   \u266a {info['title'][:38]}: {midimod.describe(info)}"
+                  f"  {n_gm} GM instr via {_bank_label()}")
         else:
             src = getattr(a, "from_audio", None)
         if mfile:
@@ -461,7 +548,8 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             if chosen and chosen != dflt and chosen in bank:
                 voices[i_v] = bank[chosen]
         v_names = "/".join(v.name for v in voices)
-        audio = render(a, ev, bars, spb, np, bank, voices, steps)
+        audio = render(a, ev, bars, spb, np, bank, voices, steps,
+                       gmprog if mfile else None)
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
@@ -480,3 +568,111 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
     print(f"   all done  |  {len(made)} file(s) in {dest}  ({SAMPLE_RATE} Hz, OPL3 native)")
     print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")
     return made
+
+
+# --- WOPL banks (DMXOPL, libADLMIDI format) ----------------------------------
+# A far better bank than the Creative PLAY.EXE set: DMXOPL is the Doom OPL3 bank,
+# voiced specifically for a YMF262 rather than adapted from OPL2. MIT licensed,
+# same as this repo.
+#
+# Format per Wohlstand's WOPL-and-OPLI specification. The one non-obvious detail,
+# and the one that will silently produce wrong timbres if you get it backwards:
+#
+#     Operator 1 in the file is the CARRIER, operator 2 is the MODULATOR
+#
+# i.e. the reverse of the register order, where the modulator sits at the base
+# offset and the carrier at +3. Swapping these does not error — it just makes
+# every instrument sound wrong, which is exactly the kind of bug that survives.
+WOPL_MAGIC = b"WOPL3-BANK\0"
+
+
+def load_wopl(path):
+    """Parse a .wopl bank -> {"melodic": [...], "percussion": [...]}.
+
+    Each entry is a dict with the raw operator bytes plus the metadata soundmon
+    can use (key offset, 4-op flag, rhythm type).
+    """
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:11] != WOPL_MAGIC:
+        raise ValueError("not a WOPL bank")
+    version = int.from_bytes(data[11:13], "little")
+    mbanks = int.from_bytes(data[13:15], "big")
+    pbanks = int.from_bytes(data[15:17], "big")
+    pos = 19                                    # header is 19 bytes
+    if version >= 2:                            # bank meta-data arrays
+        pos += 34 * (mbanks + pbanks)
+    ins_size = 66 if version >= 3 else 62
+
+    def one(off):
+        name = data[off:off + 32].split(b"\0")[0].decode("utf-8", "replace")
+        key_off = int.from_bytes(data[off + 32:off + 34], "big", signed=True)
+        vel_off = int.from_bytes(data[off + 36:off + 37], "big", signed=True)
+        perc_key = data[off + 38]
+        flags = data[off + 39]
+        fbc1, fbc2 = data[off + 40], data[off + 41]
+        ops = []
+        for k in range(4):
+            b = off + 42 + k * 5
+            ops.append(tuple(data[b:b + 5]))    # AVEKM, KSL|TL, AR|DR, SR|RR, WS
+        return {"name": name, "key_off": key_off, "vel_off": vel_off,
+                "perc_key": perc_key, "four_op": bool(flags & 0x01),
+                "pseudo4": bool(flags & 0x02), "blank": bool(flags & 0x04),
+                "rhythm": (flags & 0x38) >> 3, "fixed_note": bool(flags & 0x40),
+                "fbc1": fbc1, "fbc2": fbc2, "ops": ops}
+
+    out = {"melodic": [], "percussion": [], "version": version,
+           "name": os.path.basename(path)}
+    for _ in range(mbanks):
+        for i in range(128):
+            out["melodic"].append(one(pos)); pos += ins_size
+    for _ in range(pbanks):
+        for i in range(128):
+            out["percussion"].append(one(pos)); pos += ins_size
+    return out
+
+
+WOPL_BANK = None
+
+
+def _bank_label():
+    w = load_wopl_bank()
+    if w:
+        return f"DMXOPL ({len(w['melodic'])} instr)"
+    return "Creative PLAY.EXE" if load_gm_bank() else "built-in (no GM bank)"
+
+
+def load_wopl_bank(path=None):
+    """Load the WOPL bank if present, else None. Cached."""
+    global WOPL_BANK
+    if WOPL_BANK is not None:
+        return WOPL_BANK or None
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in ([path] if path else []) + [
+            os.path.join(here, "vendor", "GENMIDI.wopl")]:
+        if cand and os.path.exists(cand):
+            try:
+                WOPL_BANK = load_wopl(cand)
+                return WOPL_BANK
+            except Exception:
+                pass
+    WOPL_BANK = {}
+    return None
+
+
+def program_wopl(chip, ch, ins):
+    """Apply a WOPL instrument to a 2-operator channel.
+
+    Only the first voice is used: a 4-op or pseudo-4-op instrument needs two
+    channels, and with four voices total we cannot spend two on one note. Taking
+    voice 1 is the documented degradation path and is what 2-op hardware did.
+    """
+    m, c = _op_pair(ch)
+    car, mod = ins["ops"][0], ins["ops"][1]      # op1=CARRIER, op2=MODULATOR
+    for off, o in ((m, mod), (c, car)):
+        chip.write(0x20 + off, o[0])
+        chip.write(0x40 + off, o[1])
+        chip.write(0x60 + off, o[2])
+        chip.write(0x80 + off, o[3])
+        chip.write(0xE0 + off, o[4])
+    chip.write(0xC0 + ch, 0x30 | (ins["fbc1"] & 0x0F))

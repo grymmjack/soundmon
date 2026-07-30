@@ -97,6 +97,7 @@ def parse(path):
         tick = 0
         status = 0
         sounding = {}                       # (chan, pitch) -> (start_tick, vel)
+        program = [0] * 16                  # current GM program per channel
         while i < tend:
             delta, i = _vlq(data, i)
             tick += delta
@@ -142,15 +143,20 @@ def parse(path):
                 elif hi in (0x80, 0x90):                     # note off
                     st = sounding.pop((chan, d1), None)
                     if st and chan != 9:
-                        notes.append((st[0], tick, d1, st[1], chan))
-            elif hi in (0xC0, 0xD0):
+                        notes.append((st[0], tick, d1, st[1], chan, program[chan]))
+            elif hi == 0xC0:                             # program change
+                # This is what makes the GM bank usable: without recording it,
+                # every instrument in the file plays on one patch.
+                program[chan] = data[i] if i < tend else 0
+                i += 1
+            elif hi == 0xD0:
                 i += 1
             else:
                 i += 1
         # Anything still held at end-of-track ends there.
         for (chan, pitch), (st, vel) in sounding.items():
             if chan != 9:
-                notes.append((st, tick, pitch, vel, chan))
+                notes.append((st, tick, pitch, vel, chan, program[chan]))
 
     if not tempo_map:
         tempo_map = [(0, 500000)]                  # 120 bpm default
@@ -217,15 +223,18 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
 
     # Bucket melodic notes by step so registers can be compared at each moment.
     buckets = {}
-    for st, en, pitch, vel, chan in notes:
+    for st, en, pitch, vel, chan, prog in notes:
         b, s = bar_step(st)
         if b < 0 or b >= want_bars:
             continue
         dur = max(1, int(round((en - st) / step_ticks)))
         buckets.setdefault((b, s), []).append((pitch + transpose, vel,
-                                               min(dur, steps - s)))
+                                               min(dur, steps - s), prog))
 
     ev = {"lead": [], "arp": [], "bass": [], "drum": []}
+    # GM program per voice per step, so a renderer with a real bank can select the
+    # instrument the composer actually asked for.
+    progs = {"lead": {}, "arp": {}, "bass": {}}
     for (b, s), group in sorted(buckets.items()):
         group.sort()                                    # by pitch, ascending
         lowest = group[0]
@@ -233,12 +242,15 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
         # Highest = melody, lowest = bass. With one note only, it is the melody:
         # a single line is a tune, not a bass part.
         ev["lead"].append((b, s, highest[2], highest[0], 0.5))
+        progs["lead"][(b, s)] = highest[3]
         if len(group) > 1:
             ev["bass"].append((b, s, lowest[2], lowest[0] - 12
                                if lowest[0] > 60 else lowest[0]))
+            progs["bass"][(b, s)] = lowest[3]
         if len(group) > 2:
             mid = group[len(group) // 2]
             ev["arp"].append((b, s, max(1, mid[2]), mid[0], 0.25))
+            progs["arp"][(b, s)] = mid[3]
     for tick, kind in drums:
         b, s = bar_step(tick)
         if 0 <= b < want_bars:
@@ -248,7 +260,8 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
             "bars": want_bars, "total_bars": total_bars,
             "notes": len(ev["lead"]), "drum_hits": len(ev["drum"]),
             "tempo_changes": len(tempo_map),
-            "title": os.path.basename(path)}
+            "title": os.path.basename(path), "progs": progs,
+            "gm_used": sorted({p for d in progs.values() for p in d.values()})}
     return ev, want_bars, spb, info, "minor"
 
 
