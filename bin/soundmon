@@ -19,7 +19,7 @@ case " $* " in
     |*" --list-formats "*|*" --list-styles "*|*" --list-keys "* \
     |*" --list-voices "*|*" --list-devices "*|*" --list-moods "* \
     |*" --narrate "*|*" --narrate-file "* \
-    |*" --blip "*|*" --blip-file "*|*" --chip "*|*" --opl "*|*" --from-audio "*|*" --from-midi "*|*" --write-midi "*|*" --chippy "*|*" --chipfx "*|*" --oplfx "* \
+    |*" --blip "*|*" --blip-file "*|*" --chip "*|*" --opl "*|*" --from-audio "*|*" --from-midi "*|*" --write-midi "*|*" --write-mod "*|*" --write-rad "*|*" --chippy "*|*" --chipfx "*|*" --oplfx "* \
     |*" --record "*|*" --record-file "*) needs_server=0 ;;
 esac
 [ "$#" -eq 0 ] && needs_server=0

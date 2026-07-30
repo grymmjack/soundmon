@@ -871,6 +871,14 @@ def main():
                    choices=["minor", "harmonic", "dorian", "phrygian", "major",
                             "mixolydian", "pentatonic"],
                    help="override the scale implied by --key")
+    p.add_argument("--write-mod", dest="write_mod", action="store_true",
+                   help="ALSO write a ProTracker .MOD (--chip). Real samples from "
+                        "the PSG synth plus pattern data — editable in OpenMPT or "
+                        "Schism, and tiny.")
+    p.add_argument("--write-rad", dest="write_rad", action="store_true",
+                   help="ALSO write a Reality AdLib Tracker .RAD (--opl). OPL "
+                        "instruments from the bank plus patterns — QB64 plays it "
+                        "natively.")
     p.add_argument("--write-midi", dest="write_midi", action="store_true",
                    help="ALSO write a .mid beside the audio (--chip/--opl). A few "
                         "KB, plays natively in QB64, and can be paired with any "

@@ -637,6 +637,23 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             path = to_flac(path, a.keep_wav)
         elif getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
+        if getattr(a, "write_rad", False):
+            import rad as _radw
+            import chip as _cm
+            import midi as _mm
+            gev, gbars = ((ev, bars) if ev is not None
+                          else _cm.timed_to_grid(tnotes, tdrums, spb, 16))
+            lead_gm, arp_gm, bass_gm = _mm.MOOD_GM.get(mname,
+                                                       _mm.MOOD_GM["mysterious"])
+            rp = os.path.splitext(path)[0] + ".rad"
+            try:
+                _radw.write_rad(rp, gev, gbars, spb, 16, np, title=base[:20],
+                                bpm=int(a.bpm), wopl=load_wopl_bank(),
+                                progs={"lead": lead_gm, "arp": arp_gm,
+                                       "bass": bass_gm})
+                print(f"   \u266b also wrote {os.path.basename(rp)}")
+            except Exception as e:
+                print(f"   \u26a0 rad write failed: {e}")
         if getattr(a, "write_midi", False) and ev is not None:
             # Additional output, not a substitute: the chip render is the point.
             import midi as _midiw

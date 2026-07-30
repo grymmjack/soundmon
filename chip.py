@@ -652,6 +652,17 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             path = to_flac(path, a.keep_wav)
         elif getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
+        if getattr(a, "write_mod", False):
+            import mod as _modw
+            gev, gbars = (ev, bars) if ev is not None else timed_to_grid(
+                tnotes, tdrums, spb, STEPS)
+            mp = os.path.splitext(path)[0] + ".mod"
+            try:
+                _modw.write_mod(mp, gev, gbars, spb, STEPS, np,
+                                title=base[:20], bpm=int(a.bpm))
+                print(f"   \u266b also wrote {os.path.basename(mp)}")
+            except Exception as e:
+                print(f"   \u26a0 mod write failed: {e}")
         if getattr(a, "write_midi", False) and ev is not None:
             # Additional output, not a substitute: the chip render is the point.
             import midi as _midiw
@@ -1077,3 +1088,49 @@ def format_lock_np(audio, sr, fmt, np):
         peak = float(2 ** bits) / 2.0 - 1.0
         a = np.round(np.clip(a, -1.0, 1.0) * peak) / peak
     return (a[:, 0] if a.shape[1] == 1 else a), sr
+
+
+def timed_to_grid(notes, drums, spb, steps, bars=None):
+    """Exact-time notes -> a grid event dict, for tracker output.
+
+    Quantizing here is not the mistake the MIDI rule warns about. That rule exists
+    because a rendered WAVEFORM must honour the source's real timing. A tracker
+    pattern IS a grid — rows are its only representation of time — so snapping to
+    rows is the format's native form, not a loss imposed on it.
+
+    Voices are assigned by register, matching every other renderer here: low notes
+    to bass, the highest sounding note to lead, a middle voice to arp.
+    """
+    step_s = spb / float(steps)
+    ev = {"lead": [], "arp": [], "bass": [], "drum": []}
+    buckets = {}
+    for n in notes:
+        row = int(round(n["t"] / step_s))
+        buckets.setdefault(row, []).append(n)
+    maxbar = 0
+    for row, group in sorted(buckets.items()):
+        bar, st = divmod(row, steps)
+        maxbar = max(maxbar, bar)
+        group.sort(key=lambda x: x["pitch"])
+        dur = max(1, int(round(max(g["dur"] for g in group) / step_s)))
+        low, high = group[0], group[-1]
+        if high["pitch"] >= 48:
+            ev["lead"].append((bar, st, dur, high["pitch"], 0.5,
+                               high.get("vel") or 96))
+        if len(group) > 1:
+            ev["bass"].append((bar, st, dur, low["pitch"], low.get("vel") or 96))
+        else:
+            ev["bass"].append((bar, st, dur, low["pitch"] - 12
+                               if low["pitch"] >= 60 else low["pitch"],
+                               low.get("vel") or 96))
+        if len(group) > 2:
+            mid = group[len(group) // 2]
+            ev["arp"].append((bar, st, dur, mid["pitch"], 0.25,
+                              mid.get("vel") or 80))
+    kind_of = {36: "k", 35: "k", 38: "s", 40: "s", 42: "h", 44: "h", 46: "h"}
+    for t, gm in (drums or []):
+        row = int(round(t / step_s))
+        bar, st = divmod(row, steps)
+        maxbar = max(maxbar, bar)
+        ev["drum"].append((bar, st, kind_of.get(gm, "h")))
+    return ev, (bars or maxbar + 1)
