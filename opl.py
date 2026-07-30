@@ -65,8 +65,29 @@ _OP = [0, 1, 2, 8, 9, 10, 16, 17, 18]
 # 0xBD     rhythm-mode enable + BD/SD/TT/CY/HH triggers
 
 def _op_pair(ch):
+    """(modulator, carrier) REGISTER ADDRESSES for a 2-op channel.
+
+    OPL3 has 18 channels in two banks of 9. Bank 1 (channels 9-17) lives at the
+    SAME register offsets plus 0x100 — which is why the array-of-9 table below
+    still works, and why every write needs the bank bit added. Only using bank 0
+    is what limited this to 9 channels (and in practice 4), and is most of why
+    the result sounded thin.
+    """
+    add = 0x000 if ch < 9 else 0x100
     o = _OP[ch % 9]
-    return o, o + 3
+    return add + o, add + o + 3
+
+
+def _ch_reg(ch, base):
+    """Address of a per-channel register (0xA0/0xB0/0xC0) for any channel."""
+    return (0x000 if ch < 9 else 0x100) + base + (ch % 9)
+
+
+# 4-operator channel pairs. Setting a bit in 0x104 fuses a pair into one 4-op
+# voice: the primary keeps the note, the secondary contributes operators 3 and 4.
+# Six pairs exist, giving at most 6 four-op voices plus 6 remaining 2-op channels.
+FOUR_OP_PAIRS = ((0, 3), (1, 4), (2, 5), (9, 12), (10, 13), (11, 14))
+TWO_OP_ONLY = (6, 7, 8, 15, 16, 17)
 
 
 class Instrument:
@@ -216,15 +237,19 @@ class OPL3:
             self.write(0xE0 + off, wv & 0x07)
         # 0x30 = both speakers on. Mono-summing later, but a channel with neither
         # bit set is silent, which is a very confusing way to hear nothing.
-        self.write(0xC0 + ch, 0x30 | ((ins.fb & 7) << 1) | (ins.con & 1))
+        self.write(_ch_reg(ch, 0xC0), 0x30 | ((ins.fb & 7) << 1) | (ins.con & 1))
 
     def key_on(self, ch, freq):
         fnum, block = fnum_block(freq)
-        self.write(0xA0 + ch, fnum & 0xFF)
-        self.write(0xB0 + ch, 0x20 | ((block & 7) << 2) | ((fnum >> 8) & 3))
+        self.write(_ch_reg(ch, 0xA0), fnum & 0xFF)
+        self.write(_ch_reg(ch, 0xB0), 0x20 | ((block & 7) << 2) | ((fnum >> 8) & 3))
 
     def key_off(self, ch):
-        self.write(0xB0 + ch, 0x00)
+        self.write(_ch_reg(ch, 0xB0), 0x00)
+
+    def set_four_op(self, mask):
+        """Enable 4-operator mode per pair. mask bit i -> FOUR_OP_PAIRS[i]."""
+        self.write(0x104, mask & 0x3F)
 
 
 def fnum_block(freq):
@@ -317,7 +342,7 @@ def program_gm(chip, ch, raw):
     chip.write(0xE0 + m, raw[8]);  chip.write(0xE0 + c, raw[9])
     # Force both speakers on; a patch byte with neither set is silent, which is a
     # very confusing way to hear nothing.
-    chip.write(0xC0 + ch, 0x30 | (raw[10] & 0x0F))
+    chip.write(_ch_reg(ch, 0xC0), 0x30 | (raw[10] & 0x0F))
 
 
 # --- external bank loading ---------------------------------------------------
@@ -513,7 +538,8 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
                       for role, d in info.get("progs", {}).items()}
             n_gm = len(info.get("gm_used", []))
             print(f"   \u266a {info['title'][:38]}: {midimod.describe(info)}"
-                  f"  {n_gm} GM instr via {_bank_label()}")
+                  f"  {n_gm} GM instr, poly {info['poly_notes']}"
+                  f" (max {info['max_poly']}) via {_bank_label()}")
         else:
             src = getattr(a, "from_audio", None)
         if mfile:
@@ -548,8 +574,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             if chosen and chosen != dflt and chosen in bank:
                 voices[i_v] = bank[chosen]
         v_names = "/".join(v.name for v in voices)
-        audio = render(a, ev, bars, spb, np, bank, voices, steps,
-                       gmprog if mfile else None)
+        if mfile and info.get("poly"):
+            # Polyphonic path: every note, real 4-op voices, all 18 channels.
+            audio = render_poly(a, info["poly"], ev["drum"], bars, spb, np,
+                                steps, load_wopl_bank(),
+                                with_drums=bool(ev["drum"]))
+        else:
+            audio = render(a, ev, bars, spb, np, bank, voices, steps,
+                           gmprog if mfile else None)
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
@@ -675,4 +707,172 @@ def program_wopl(chip, ch, ins):
         chip.write(0x60 + off, o[2])
         chip.write(0x80 + off, o[3])
         chip.write(0xE0 + off, o[4])
-    chip.write(0xC0 + ch, 0x30 | (ins["fbc1"] & 0x0F))
+    chip.write(_ch_reg(ch, 0xC0), 0x30 | (ins["fbc1"] & 0x0F))
+
+
+# =============================================================================
+# POLYPHONIC MIDI RENDERING — "make it sing"
+#
+# The 4-voice renderer above throws away most of both the chip and the music:
+#
+#   the chip   OPL3 has 18 two-op channels, or 6 four-op plus 6 two-op. Four were
+#              being used, all in bank 0.
+#   the bank   102 of DMXOPL's 128 instruments are 4-operator, and only voice 1
+#              was applied — literally half of each patch.
+#   the music  a MIDI file's polyphony was collapsed to highest/lowest/middle,
+#              so chords became three notes and inner parts vanished.
+#
+# All three compound into "thin". This path fixes all three: real 4-op voices for
+# melodic instruments, every available channel, and a voice allocator so the
+# arrangement plays as written.
+# =============================================================================
+
+def program_wopl_4op(chip, ch1, ch2, ins):
+    """Program a fused 4-operator voice across a channel pair.
+
+    Operator roles per the WOPL spec, in FILE order:
+        ops[0] = Carrier1   -> in 4-op terms, operator 2
+        ops[1] = Modulator1 -> operator 1
+        ops[2] = Carrier2   -> operator 4
+        ops[3] = Modulator2 -> operator 3
+    So the primary channel carries (Modulator1, Carrier1) and the secondary
+    carries (Modulator2, Carrier2) — the same mod/car pairing as 2-op, applied
+    twice. fbc1 goes to the primary and fbc2 to the secondary, and the pair's
+    connection bits decide which of the four FM algorithms results.
+    """
+    m1, c1 = _op_pair(ch1)
+    m2, c2 = _op_pair(ch2)
+    for off, o in ((m1, ins["ops"][1]), (c1, ins["ops"][0]),
+                   (m2, ins["ops"][3]), (c2, ins["ops"][2])):
+        chip.write(0x20 + off, o[0])
+        chip.write(0x40 + off, o[1])
+        chip.write(0x60 + off, o[2])
+        chip.write(0x80 + off, o[3])
+        chip.write(0xE0 + off, o[4])
+    chip.write(_ch_reg(ch1, 0xC0), 0x30 | (ins["fbc1"] & 0x0F))
+    chip.write(_ch_reg(ch2, 0xC0), 0x30 | (ins["fbc2"] & 0x0F))
+
+
+class Allocator:
+    """Assigns notes to OPL channels, preferring 4-op voices for melody.
+
+    Voice stealing takes the OLDEST sounding note when everything is busy. That
+    is the right choice for music: the newest note is the one the listener is
+    waiting for, and the oldest is usually already decaying.
+    """
+
+    def __init__(self, chip, wopl, use_four_op=True, reserve_drums=True):
+        self.chip = chip
+        self.wopl = wopl
+        # Enable all six 4-op pairs, leaving 6,7,8,15,16,17 as 2-op. Channels
+        # 6/7/8 are also the rhythm-mode drum channels, so when drums are wanted
+        # they are reserved and the 2-op pool shrinks to 15,16,17.
+        self.four = list(FOUR_OP_PAIRS) if use_four_op else []
+        self.chip.set_four_op(0x3F if use_four_op else 0x00)
+        two = [c for c in TWO_OP_ONLY if not (reserve_drums and c in (6, 7, 8))]
+        self.two = two
+        self.busy = {}                  # channel-key -> (age, note)
+        self.progs = {}                 # channel-key -> program currently loaded
+        self.age = 0
+
+    def _slots(self, want_four):
+        return ([("4", p) for p in self.four] + [("2", (c,)) for c in self.two]
+                if want_four else
+                [("2", (c,)) for c in self.two] + [("4", p) for p in self.four])
+
+    def note_on(self, pitch, prog, hz):
+        ins = None
+        want_four = False
+        if self.wopl and 0 <= prog < len(self.wopl["melodic"]):
+            ins = self.wopl["melodic"][prog]
+            want_four = bool(ins["four_op"] or ins["pseudo4"])
+        slots = self._slots(want_four)
+        free = [s for s in slots if s[1] not in self.busy]
+        if free:
+            kind, chans = free[0]
+        else:
+            oldest = min(self.busy.items(), key=lambda kv: kv[1][0])
+            chans = oldest[0]
+            kind = "4" if len(chans) == 2 else "2"
+            self.chip.key_off(chans[0])
+            del self.busy[chans]
+        # Only reprogram when the instrument actually changed — register writes
+        # are not free and a busy passage can retrigger dozens of times a second.
+        if self.progs.get(chans) != prog:
+            if ins and kind == "4" and want_four:
+                program_wopl_4op(self.chip, chans[0], chans[1], ins)
+            elif ins:
+                program_wopl(self.chip, chans[0], ins)
+            else:
+                _apply_program(self.chip, chans[0], prog)
+            self.progs[chans] = prog
+        self.age += 1
+        self.busy[chans] = (self.age, pitch)
+        self.chip.key_on(chans[0], hz)
+        return chans
+
+    def note_off(self, pitch):
+        for chans, (age, p) in list(self.busy.items()):
+            if p == pitch:
+                self.chip.key_off(chans[0])
+                del self.busy[chans]
+                return
+
+    def all_off(self):
+        for chans in list(self.busy):
+            self.chip.key_off(chans[0])
+        self.busy.clear()
+
+
+def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True):
+    """Render a polyphonic note list. `poly` is (bar, step, dur, pitch, prog)."""
+    sr = SAMPLE_RATE
+    step_s = spb / float(steps)
+    total = bars * steps
+    chip = OPL3(getattr(a, "opl_lib", None))
+    alloc = Allocator(chip, wopl, use_four_op=True, reserve_drums=with_drums)
+
+    if with_drums:
+        chip.write(0xBD, 0x20)
+        for ch, fq in ((6, 90.0), (7, 240.0), (8, 640.0)):
+            fn, bl = fnum_block(fq)
+            chip.write(_ch_reg(ch, 0xA0), fn & 0xFF)
+            chip.write(_ch_reg(ch, 0xB0), ((bl & 7) << 2) | ((fn >> 8) & 3))
+        for op in (12, 15, 16, 13, 14, 17):
+            chip.write(0x20 + op, 0x01); chip.write(0x40 + op, 0x00)
+            chip.write(0x60 + op, 0xF8); chip.write(0x80 + op, 0xF8)
+
+    ons, offs = {}, {}
+    for bar, st, dur, pitch, prog in poly:
+        s = bar * steps + st
+        if s >= total:
+            continue
+        ons.setdefault(s, []).append((pitch, prog))
+        offs.setdefault(min(total, s + max(1, dur)), []).append(pitch)
+    dmap = {}
+    for bar, st, kind in (drums or []):
+        dmap.setdefault(bar * steps + st, set()).add(kind)
+
+    hz = lambda n: 440.0 * (2.0 ** ((n - 69) / 12.0))
+    RHY = {"k": 0x10, "s": 0x08, "h": 0x01}
+    out = []
+    for s in range(total):
+        for p in offs.get(s, ()):
+            alloc.note_off(p)
+        for pitch, prog in ons.get(s, ()):
+            alloc.note_on(pitch, prog, hz(pitch))
+        if with_drums and s in dmap:
+            bits = 0
+            for k in dmap[s]:
+                bits |= RHY.get(k, 0)
+            chip.write(0xBD, 0x20)
+            chip.write(0xBD, 0x20 | bits)
+        n = int(round((s + 1) * step_s * sr)) - int(round(s * step_s * sr))
+        if n > 0:
+            out.append(chip.render(n, np))
+    alloc.all_off()
+    audio = np.concatenate(out) if out else np.zeros(1)
+    peak = float(np.abs(audio).max())
+    if peak > 1e-9:
+        audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)
+    return audio

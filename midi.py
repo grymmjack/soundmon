@@ -256,7 +256,18 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
         if 0 <= b < want_bars:
             ev["drum"].append((b, s, kind))
 
+    # FULL polyphony, alongside the 4-voice reduction above. A chip renderer with
+    # a voice allocator can play the arrangement as written; collapsing to
+    # highest/lowest/middle turned every chord into three notes and deleted the
+    # inner parts, which is a large part of why the result sounded thin.
+    poly = []
+    for (b, st), group in sorted(buckets.items()):
+        for pitch, vel, dur, prog in group:
+            poly.append((b, st, dur, pitch, prog))
+
     info = {"bpm": bpm, "timesig": f"{beats_per_bar}/{unit}", "steps": steps,
+            "poly": poly, "poly_notes": len(poly),
+            "max_poly": max([len(g) for g in buckets.values()] or [0]),
             "bars": want_bars, "total_bars": total_bars,
             "notes": len(ev["lead"]), "drum_hits": len(ev["drum"]),
             "tempo_changes": len(tempo_map),
