@@ -106,28 +106,49 @@ def analyse(path):
         degrees.append(best)
     trans = collections.Counter(zip(degrees, degrees[1:]))
 
-    # --- melodic intervals, from the highest line ---------------------------
-    top = {}
-    for st, en, pitch, vel, chan, prog in notes:
-        k = int(st / (ticks_per_bar / 16))
-        if pitch > top.get(k, (-1,))[0]:
-            top[k] = (pitch, en - st)
-    seq = [top[k][0] for k in sorted(top)]
-    intervals = collections.Counter(
-        max(-12, min(12, b - a)) for a, b in zip(seq, seq[1:]))
+    # --- pick the MELODY channel, then read its real note list -------------
+    # The first version sampled "the highest note in every 16th slot", which
+    # measures note DENSITY, not rhythm: it emitted a note for every occupied
+    # slot, so 52% of all bars came out as eight straight 16ths. That is an
+    # artifact of the extractor, not a property of game music.
+    by_chan = collections.defaultdict(list)
+    for n in notes:
+        by_chan[n[4]].append(n)
+    # Melody = the channel with the highest mean pitch among reasonably busy ones.
+    cands = [(c, sum(x[2] for x in v) / len(v))
+             for c, v in by_chan.items() if len(v) >= 12]
+    if not cands:
+        return None
+    mel_chan = max(cands, key=lambda t: t[1])[0]
+    mel = sorted(by_chan[mel_chan], key=lambda n: n[0])
 
-    # --- rhythm: duration sequences within a bar, in 16ths -----------------
+    # Monophonic reduction: at each distinct onset keep the highest note, so a
+    # chord in the melody channel counts once.
+    mono = []
+    for st, en, pitch, vel, chan, prog in mel:
+        if mono and abs(mono[-1][0] - st) < ticks_per_bar / 64:
+            if pitch > mono[-1][1]:
+                mono[-1] = (st, pitch, en)
+        else:
+            mono.append((st, pitch, en))
+
+    intervals = collections.Counter(
+        max(-12, min(12, b[1] - a[1])) for a, b in zip(mono, mono[1:]))
+
+    # --- rhythm: INTER-ONSET intervals of the melody, per bar ---------------
     step = ticks_per_bar / 16.0
     bars = collections.defaultdict(list)
-    for k in sorted(top):
-        bars[k // 16].append((k % 16, max(1, int(round(top[k][1] / step)))))
+    for i, (st, pitch, en) in enumerate(mono):
+        nxt = mono[i + 1][0] if i + 1 < len(mono) else en
+        ioi = max(1, int(round((nxt - st) / step)))       # onset-to-onset
+        bars[int(st / ticks_per_bar)].append(min(16, ioi))
     rhythms = collections.Counter()
-    for b, items in bars.items():
-        if len(items) < 2:
-            continue
-        durs = tuple(min(16, d) for _, d in sorted(items))[:8]
-        if 2 <= len(durs) <= 8 and sum(durs) <= 32:
-            rhythms[durs] += 1
+    for b, durs in bars.items():
+        t = tuple(durs)
+        # A bar of melody has a handful of notes. Rejecting the extremes drops
+        # both sustained pads (1 note) and the density artifact above (>10).
+        if 2 <= len(t) <= 10 and 8 <= sum(t) <= 24:
+            rhythms[t] += 1
 
     programs = sorted({n[5] for n in notes})
     return {"timesig": f"{beats}/{unit}", "mode": mode,
@@ -174,7 +195,10 @@ def main():
             continue
         used += 1
         ts[r["timesig"]] += 1
-        tempo[r["timesig"]].append(round(r["bpm"]))
+        # Clamp: a handful of files declare 10 or 400 bpm, which is either a
+        # broken header or a tempo meant to be read with a different note value.
+        if 40 <= r["bpm"] <= 240:
+            tempo[r["timesig"]].append(round(r["bpm"]))
         trans[r["mode"]].update(r["trans"])
         intervals[r["mode"]].update(r["intervals"])
         rhythms[r["timesig"]].update(r["rhythms"])
