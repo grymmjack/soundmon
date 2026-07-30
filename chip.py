@@ -877,3 +877,62 @@ def _slide_pulse(hz0, hz1, n, sr, duty, slide_ms, np, vib_depth=0.0):
         f = f * (1.0 + vib_depth * np.sin(2 * np.pi * 6.0 * t))
     ph = 2 * np.pi * np.cumsum(f) / sr
     return np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
+
+
+def chippify(notes, level, sr_hint=44100):
+    """Rewrite an exact-time note list into chip idiom. Engine-agnostic.
+
+    Chord clusters become ONE fast-alternating line, which is how a 1-note-per-
+    channel machine plays a chord and is more characteristic of the format than
+    the waveform is. Returned notes are still plain exact-time dicts, so any
+    renderer plays them — that is why OPL gets this for free even though an OPL3
+    *can* hold a chord: AdLib-era DOS music arpeggiated constantly anyway.
+
+    Leaps are marked with "slide_from" so a renderer that can ramp pitch does so;
+    one that cannot simply ignores the key.
+    """
+    cfg = CHIPPY.get(level or "off", CHIPPY["off"])
+    if cfg["arp_hz"] <= 0:
+        return notes
+
+    bass = [n for n in notes if n["pitch"] < 48]
+    lead = [n for n in notes if n["pitch"] >= 48]
+    step = 1.0 / cfg["arp_hz"]
+    out = list(bass)
+
+    handled = set()
+    for group in _cluster_chords(lead):
+        pitches = sorted({g["pitch"] for g in group})
+        if len(group) < cfg["min_notes"] or len(pitches) < 2:
+            continue
+        t0 = min(g["t"] for g in group)
+        t1 = max(g["t"] + g["dur"] for g in group)
+        vel = max((g.get("vel") or 100) for g in group)
+        prog = group[0].get("prog", 0)
+        k = 0
+        t = t0
+        while t < t1 - 1e-6:
+            out.append({"id": ("arp", t0, k), "t": t,
+                        "dur": min(step, t1 - t),
+                        "pitch": pitches[k % len(pitches)],
+                        "prog": prog, "vel": vel})
+            t += step
+            k += 1
+        handled.update(id(g) for g in group)
+
+    # Notes not swallowed by a chord keep their own timing, plus a slide marker.
+    rest = [n for n in lead if id(n) not in handled]
+    rest.sort(key=lambda x: x["t"])
+    prev = None
+    for n in rest:
+        m = dict(n)
+        if prev is not None and cfg["slide"] > 0:
+            leap = abs(m["pitch"] - prev["pitch"])
+            gap = m["t"] - (prev["t"] + prev["dur"])
+            if 3 <= leap <= 19 and gap < 0.12:
+                m["slide_from"] = prev["pitch"]
+                m["slide_ms"] = cfg["slide_ms"]
+        out.append(m)
+        prev = m
+    out.sort(key=lambda x: x["t"])
+    return out

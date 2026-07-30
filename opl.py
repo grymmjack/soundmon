@@ -1164,6 +1164,15 @@ def render_timed(a, notes, drums, duration, np, wopl, with_drums=True):
     use_kit = bool(with_drums and drums and wopl and wopl.get("percussion"))
     alloc = Allocator(chip, wopl, reserve_drums=False)
 
+    # Chip idiom, if asked: chords become fast arpeggios and leaps get slides.
+    # Period-correct for AdLib too — DOS drivers arpeggiated constantly even
+    # though an OPL3 can hold a chord.
+    level = getattr(a, "chippy", "off") or "off"
+    if level != "off":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import chip as _chipmod
+        notes = _chipmod.chippify(notes, level)
+
     ev = []
     for n in notes:
         ev.append((n["t"], 0, n))                       # 0 = note on
@@ -1197,7 +1206,27 @@ def render_timed(a, notes, drums, duration, np, wopl, with_drums=True):
     out.append(chip.render(int(0.35 * sr), np))
 
     audio = np.concatenate(out) if out else np.zeros(1)
+    if level != "off":
+        import chip as _chipmod
+        cfg = _chipmod.CHIPPY.get(level, _chipmod.CHIPPY["off"])
+        audio = _chipmod._chip_verb(audio, sr, cfg["verb"], np)
     peak = float(np.abs(audio).max())
     if peak > 1e-9:
         audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)
     return audio
+
+
+def opl_slide(chip, ch, hz0, hz1, ms, np, sr, render_cb, steps=8):
+    """Glide a channel's pitch by rewriting its F-number in small steps.
+
+    An OPL has no portamento; the era's drivers faked it exactly this way, by
+    rewriting the frequency registers a few dozen times a second. Eight steps is
+    enough to read as a glide rather than a chromatic run.
+    """
+    per = max(1, int(sr * (ms / 1000.0) / steps))
+    for i in range(steps):
+        f = hz0 + (hz1 - hz0) * ((i + 1) / steps)
+        fn, bl = fnum_block(f)
+        chip.write(_ch_reg(ch, 0xA0), fn & 0xFF)
+        chip.write(_ch_reg(ch, 0xB0), 0x20 | ((bl & 7) << 2) | ((fn >> 8) & 3))
+        render_cb(per)
