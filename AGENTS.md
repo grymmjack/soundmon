@@ -323,6 +323,50 @@ per OS, and each one has a different way to be told to *stop*:
     OPL3 and catches silence/octave/tempo faults, but it shares this repo's
     reading of the RAD spec, so it cannot prove that reading is right.
 
+
+19. **Tick 0 of a MOD row does not slide.** It reads the cell and sets the
+    target; only ticks 1..speed-1 advance the pitch. A row therefore contributes
+    **speed-1** sliding ticks, so at speed 3 a two-row slide has a budget of 4
+    ticks, not 6. Dividing by the wrong budget makes every rate too slow — and
+    because tone portamento CLAMPS at its target, a slide that runs out of rows
+    does not overshoot or retry, it stops and stays there. Every affected note is
+    left permanently out of tune. At speed 1 there are no sliding ticks at all,
+    so do not emit a portamento.
+
+    Corollary for the whole file: **an effect that needs N rows must be written to
+    N rows.** Portamento and vibrato continue with a zero parameter; arpeggio has
+    no continue form, because parameter 0 IS no-effect, so its parameter must be
+    repeated in full.
+
+
+20. **A verifier that shares an assumption with the writer is not a verifier.**
+    This one cost three failed fixes. `mod.py` computed portamento rates with the
+    wrong tick model, and the check that was supposed to catch it SIMULATED
+    ProTracker with the same wrong tick model — so it reported "83 slides, 0 land
+    short" while the rendered audio sat 2.7 semitones below target and held. The
+    belief was stated twice and confirmed zero times.
+
+    What settled it was tracking pitch in libxmp's actual output and working
+    backwards from the frequency: 47 period units had moved, not 71, and 47 is
+    4 ticks at that rate, not 6. **Measure the artefact, not your model of it.**
+
+    Two traps in doing that, both of which pointed the wrong way first:
+
+    - **libxmp applies Amiga hard panning** — channels 0/3 left, 1/2 right. A
+      single-channel comparison made the arp and bass look 50 dB down and the
+      arpeggio look inaudible. Use the mono sum for level comparisons.
+    - **The right channel carries arp AND bass mixed**, so a pitch tracker there
+      locks onto whichever voice is louder and reports errors of tens of
+      semitones. Only a voice alone on a channel is cleanly measurable; render
+      one voice at a time when it matters.
+
+    And when a musical judgement already exists in one renderer, do not
+    reimplement it in another. `chip.py` had working slide rules — leap 3..19,
+    notes within 120 ms, fixed 45/60/80 ms, melodic line only — and `mod.py`
+    invented its own (leap 1..7, strict legato, "up to 3 rows"), getting every
+    parameter wrong including the spurious-glide case `chip.py` explicitly guards
+    against.
+
 ## Environment gotchas
 
 - **`ls` is aliased to `eza`** in this shell — `ls -t` fails. Use
