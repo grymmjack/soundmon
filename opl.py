@@ -538,8 +538,9 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
                       for role, d in info.get("progs", {}).items()}
             n_gm = len(info.get("gm_used", []))
             print(f"   \u266a {info['title'][:38]}: {midimod.describe(info)}"
-                  f"  {n_gm} GM instr, poly {info['poly_notes']}"
-                  f" (max {info['max_poly']}) via {_bank_label()}")
+                  f"  {n_gm} instr / {len(info.get('gm_drums_used', []))} perc"
+                  f", poly {info['poly_notes']} (max {info['max_poly']})"
+                  f" via {_bank_label()}")
         else:
             src = getattr(a, "from_audio", None)
         if mfile:
@@ -578,7 +579,8 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             # Polyphonic path: every note, real 4-op voices, all 18 channels.
             audio = render_poly(a, info["poly"], ev["drum"], bars, spb, np,
                                 steps, load_wopl_bank(),
-                                with_drums=bool(ev["drum"]))
+                                with_drums=bool(ev["drum"] or info.get("drums_gm")),
+                                drums_gm=info.get("drums_gm"))
         else:
             audio = render(a, ev, bars, spb, np, bank, voices, steps,
                            gmprog if mfile else None)
@@ -592,6 +594,16 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             loudness_normalize(path, a.lufs_target, a.true_peak)
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
+        if getattr(a, "write_midi", False):
+            # Additional output, not a substitute: the chip render is the point.
+            import midi as _midiw
+            mp = os.path.splitext(path)[0] + ".mid"
+            try:
+                _midiw.write_smf(mp, ev, bars, spb, steps, mood=mname,
+                                 timesig=meter_s, title=base)
+                print(f"   \u266b also wrote {os.path.basename(mp)}")
+            except Exception as e:
+                print(f"   \u26a0 midi write failed: {e}")
         made.append(path)
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
               f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar {meter_s:<5}{mname:<11}"
@@ -811,6 +823,39 @@ class Allocator:
         self.chip.key_on(chans[0], hz)
         return chans
 
+    def perc_on(self, gm_note):
+        """Strike a GM percussion instrument from the bank's percussion set.
+
+        Percussion is one-shot: it is keyed on and left to decay rather than
+        tracked for a note-off, because a drum's envelope IS its length. It is
+        allocated from the same pool, so a busy drum pattern steals from itself
+        before it steals the melody — which is the right priority.
+        """
+        if not (self.wopl and self.wopl.get("percussion")):
+            return
+        if not (0 <= gm_note < len(self.wopl["percussion"])):
+            return
+        ins = self.wopl["percussion"][gm_note]
+        if ins.get("blank"):
+            return
+        slots = [("2", (c,)) for c in self.two] + [("4", p) for p in self.four]
+        free = [sl for sl in slots if sl[1] not in self.busy]
+        if free:
+            chans = free[0][1]
+        else:
+            oldest = min(self.busy.items(), key=lambda kv: kv[1][0])
+            chans = oldest[0]
+            self.chip.key_off(chans[0])
+            del self.busy[chans]
+        program_wopl(self.chip, chans[0], ins)
+        self.progs[chans] = ("perc", gm_note)
+        # Percussion instruments carry their own key. fixed_note means play THAT
+        # pitch regardless of the note number, which is how a kick stays a kick.
+        key = ins["perc_key"] if ins["perc_key"] else gm_note
+        self.age += 1
+        self.busy[chans] = (self.age, -gm_note)     # negative: never note_off'd
+        self.chip.key_on(chans[0], 440.0 * (2.0 ** ((key - 69) / 12.0)))
+
     def note_off(self, pitch):
         for chans, (age, p) in list(self.busy.items()):
             if p == pitch:
@@ -824,15 +869,26 @@ class Allocator:
         self.busy.clear()
 
 
-def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True):
-    """Render a polyphonic note list. `poly` is (bar, step, dur, pitch, prog)."""
+def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
+                drums_gm=None):
+    """Render a polyphonic note list. `poly` is (bar, step, dur, pitch, prog).
+
+    When the bank has a percussion set and `drums_gm` is supplied, drums are
+    played as REAL GM kit instruments on ordinary channels rather than through
+    OPL3 rhythm mode. Rhythm mode gives five fixed sounds; the bank has 128
+    indexed by GM note, so toms, congas, rides and crashes survive instead of
+    collapsing into kick/snare/hat. It also frees channels 6/7/8 back into the
+    melodic pool, since rhythm mode is no longer occupying them.
+    """
     sr = SAMPLE_RATE
     step_s = spb / float(steps)
     total = bars * steps
     chip = OPL3(getattr(a, "opl_lib", None))
-    alloc = Allocator(chip, wopl, use_four_op=True, reserve_drums=with_drums)
+    use_kit = bool(with_drums and drums_gm and wopl and wopl.get("percussion"))
+    alloc = Allocator(chip, wopl, use_four_op=True,
+                      reserve_drums=bool(with_drums and not use_kit))
 
-    if with_drums:
+    if with_drums and not use_kit:
         chip.write(0xBD, 0x20)
         for ch, fq in ((6, 90.0), (7, 240.0), (8, 640.0)):
             fn, bl = fnum_block(fq)
@@ -852,6 +908,10 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True):
     dmap = {}
     for bar, st, kind in (drums or []):
         dmap.setdefault(bar * steps + st, set()).add(kind)
+    kmap = {}
+    if use_kit:
+        for bar, st, note in drums_gm:
+            kmap.setdefault(bar * steps + st, []).append(note)
 
     hz = lambda n: 440.0 * (2.0 ** ((n - 69) / 12.0))
     RHY = {"k": 0x10, "s": 0x08, "h": 0x01}
@@ -861,7 +921,10 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True):
             alloc.note_off(p)
         for pitch, prog in ons.get(s, ()):
             alloc.note_on(pitch, prog, hz(pitch))
-        if with_drums and s in dmap:
+        if use_kit and s in kmap:
+            for note in kmap[s][:3]:            # cap: a crash + a kick, not 9 toms
+                alloc.perc_on(note)
+        elif with_drums and s in dmap:
             bits = 0
             for k in dmap[s]:
                 bits |= RHY.get(k, 0)

@@ -135,9 +135,11 @@ def parse(path):
                 i += 2
                 if hi == 0x90 and d2 > 0:                    # note on
                     if chan == 9:
-                        k = GM_DRUM.get(d1)
-                        if k:
-                            drums.append((tick, k))
+                        # Keep the RAW GM note. The 3-way k/s/h reduction is
+                        # right for a PSG with one noise channel, but throws away
+                        # toms, congas, rides and crashes — which a WOPL bank has
+                        # actual instruments for.
+                        drums.append((tick, d1))
                     else:
                         sounding[(chan, d1)] = (tick, d2)
                 elif hi in (0x80, 0x90):                     # note off
@@ -251,10 +253,14 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
             mid = group[len(group) // 2]
             ev["arp"].append((b, s, max(1, mid[2]), mid[0], 0.25))
             progs["arp"][(b, s)] = mid[3]
-    for tick, kind in drums:
+    drums_gm = []
+    for tick, note in drums:
         b, s = bar_step(tick)
         if 0 <= b < want_bars:
-            ev["drum"].append((b, s, kind))
+            kind = GM_DRUM.get(note)
+            if kind:
+                ev["drum"].append((b, s, kind))      # 3-way, for the PSG path
+            drums_gm.append((b, s, note))            # full kit, for a WOPL bank
 
     # FULL polyphony, alongside the 4-voice reduction above. A chip renderer with
     # a voice allocator can play the arrangement as written; collapsing to
@@ -266,7 +272,8 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
             poly.append((b, st, dur, pitch, prog))
 
     info = {"bpm": bpm, "timesig": f"{beats_per_bar}/{unit}", "steps": steps,
-            "poly": poly, "poly_notes": len(poly),
+            "poly": poly, "poly_notes": len(poly), "drums_gm": drums_gm,
+            "gm_drums_used": sorted({n for _, _, n in drums_gm}),
             "max_poly": max([len(g) for g in buckets.values()] or [0]),
             "bars": want_bars, "total_bars": total_bars,
             "notes": len(ev["lead"]), "drum_hits": len(ev["drum"]),
@@ -280,3 +287,127 @@ def describe(info):
     return (f"{info['timesig']}  {info['bpm']:.0f}bpm  "
             f"{info['bars']}/{info['total_bars']}bars  "
             f"{info['notes']} notes  {info['drum_hits']} hits")
+
+
+# =============================================================================
+# WRITING MIDI
+#
+# The inverse of everything above: take composed note events and emit a Standard
+# MIDI File. This is an ADDITIONAL output, never a replacement for the audio —
+# the OPL render is the point, and a .mid is a second deliverable from the same
+# composition.
+#
+# Why it is worth having: a .mid is a few KB instead of a few hundred, QB64 plays
+# it natively, and it can be paired with any soundfont — so the same track can be
+# OPL-nostalgic in one build and orchestral in another, from one source.
+# =============================================================================
+
+TPB_OUT = 480                      # ticks per quarter note; 480 divides cleanly
+
+# Voice -> (GM program, MIDI channel). Channel 9 is percussion by GM convention.
+# Programs are chosen per mood so the .mid is musically sensible on a soundfont
+# rather than defaulting everything to piano.
+MOOD_GM = {
+    "heroic":     (61, 48, 43),    # brass, strings, contrabass
+    "triumphant": (56, 48, 43),    # trumpet
+    "ominous":    (19, 48, 43),    # church organ
+    "eerie":      (73, 52, 43),    # flute, choir aahs
+    "melancholy": (68, 49, 43),    # oboe, slow strings
+    "solemn":     (19, 52, 43),    # church organ, choir
+    "mysterious": (46, 49, 43),    # pizzicato, strings
+    "tense":      (71, 48, 43),    # clarinet
+    "frantic":    (81, 38, 39),    # saw lead, synth bass
+    "driving":    (81, 62, 39),    # saw lead, brass section
+    "playful":    (11, 24, 33),    # vibraphone, nylon guitar
+    "serene":     (74, 89, 43),    # recorder, warm pad
+    "grand":      (61, 52, 43),    # brass, choir
+    "wondrous":   (9, 46, 43),     # glockenspiel, harp
+}
+DRUM_GM = {"k": 36, "s": 38, "h": 42}
+
+
+def _vlq_out(v):
+    """Encode an integer as a variable-length quantity."""
+    out = bytearray([v & 0x7F])
+    v >>= 7
+    while v:
+        out.insert(0, 0x80 | (v & 0x7F))
+        v >>= 7
+    return bytes(out)
+
+
+def _track(events):
+    """events: list of (tick, bytes). Returns a complete MTrk chunk."""
+    events.sort(key=lambda e: e[0])
+    body = bytearray()
+    last = 0
+    for tick, payload in events:
+        body += _vlq_out(max(0, tick - last))
+        body += payload
+        last = tick
+    body += _vlq_out(0) + b"\xFF\x2F\x00"          # end of track
+    return b"MTrk" + struct.pack(">I", len(body)) + bytes(body)
+
+
+def write_smf(path, ev, bars, spb, steps, mood="mysterious", timesig="4/4",
+              title=None):
+    """Write composed events as a Standard MIDI File. Returns the path."""
+    try:
+        beats, unit = (int(x) for x in timesig.split("/"))
+    except Exception:
+        beats, unit = 4, 4
+    quarters = beats * (4.0 / unit)
+    bpm = 60.0 * quarters / max(spb, 1e-6)
+    # Ticks per grid step, from the real bar length rather than assuming 4/4.
+    ticks_per_bar = TPB_OUT * quarters
+    step_ticks = ticks_per_bar / steps
+
+    lead_gm, arp_gm, bass_gm = MOOD_GM.get(mood, MOOD_GM["mysterious"])
+
+    meta = [(0, b"\xFF\x51\x03" + struct.pack(">I", int(60_000_000 / bpm))[1:]),
+            (0, b"\xFF\x58\x04" + bytes([beats, max(0, (unit).bit_length() - 1),
+                                         24, 8]))]
+    if title:
+        t = title.encode("utf-8", "replace")[:120]
+        meta.append((0, b"\xFF\x03" + _vlq_out(len(t)) + t))
+
+    def note_events(items, chan, gm, get):
+        out = [(0, bytes([0xC0 | chan, gm & 0x7F]))]
+        for it in items:
+            bar, step, dur, pitch, vel = get(it)
+            if not (0 <= pitch < 128):
+                continue
+            on = int(round((bar * ticks_per_bar) + step * step_ticks))
+            off = on + max(1, int(round(dur * step_ticks))) - 2
+            out.append((on, bytes([0x90 | chan, pitch, vel])))
+            out.append((max(on + 1, off), bytes([0x80 | chan, pitch, 0])))
+        return out
+
+    tracks = [_track(meta)]
+    tracks.append(_track(note_events(
+        ev.get("lead", []), 0, lead_gm,
+        lambda e: (e[0], e[1], e[2], e[3], 100))))
+    tracks.append(_track(note_events(
+        ev.get("arp", []), 1, arp_gm,
+        lambda e: (e[0], e[1], e[2], e[3], 72))))
+    tracks.append(_track(note_events(
+        ev.get("bass", []), 2, bass_gm,
+        lambda e: (e[0], e[1], e[2], e[3], 90))))
+
+    drum = []
+    for bar, step, kind in ev.get("drum", []):
+        n = DRUM_GM.get(kind)
+        if n is None:
+            continue
+        on = int(round((bar * ticks_per_bar) + step * step_ticks))
+        drum.append((on, bytes([0x99, n, 100])))
+        drum.append((on + 30, bytes([0x89, n, 0])))
+    if drum:
+        tracks.append(_track(drum))
+
+    header = b"MThd" + struct.pack(">IHHH", 6, 1, len(tracks), TPB_OUT)
+    with open(path, "wb") as fh:
+        fh.write(header)
+        for t in tracks:
+            fh.write(t)
+    return path

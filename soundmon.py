@@ -823,6 +823,10 @@ def main():
                    choices=["minor", "harmonic", "dorian", "phrygian", "major",
                             "mixolydian", "pentatonic"],
                    help="override the scale implied by --key")
+    p.add_argument("--write-midi", dest="write_midi", action="store_true",
+                   help="ALSO write a .mid beside the audio (--chip/--opl). A few "
+                        "KB, plays natively in QB64, and can be paired with any "
+                        "soundfont — the audio render is unaffected.")
     p.add_argument("--from-midi", dest="from_midi", default=None, metavar="FILE",
                    help="play a MIDI FILE on the chip. The BEST input: exact "
                         "pitches, real note durations, explicit tempo and time "

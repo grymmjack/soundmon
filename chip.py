@@ -591,6 +591,16 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             loudness_normalize(path, a.lufs_target, a.true_peak)
         if getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
+        if getattr(a, "write_midi", False):
+            # Additional output, not a substitute: the chip render is the point.
+            import midi as _midiw
+            mp = os.path.splitext(path)[0] + ".mid"
+            try:
+                _midiw.write_smf(mp, ev, bars, spb, steps, mood=mname,
+                                 timesig=meter_s, title=base)
+                print(f"   \u266b also wrote {os.path.basename(mp)}")
+            except Exception as e:
+                print(f"   \u26a0 midi write failed: {e}")
         made.append(path)
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
               f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar {meter_s:<5}{mname:<11}"
