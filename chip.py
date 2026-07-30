@@ -41,6 +41,8 @@ import math
 import os
 import sys
 
+import theory
+
 SAMPLE_RATE = 44100
 STEPS = 16                        # sixteenth-note grid per 4/4 bar
 
@@ -107,49 +109,63 @@ DUTIES = (0.125, 0.25, 0.5, 0.75)
 MOODS = {
     "heroic":      dict(scales=("major", "mixolydian"), progs=([0, 4, 5, 3], [0, 3, 4, 4]),
                         bpm=1.00, rhythms=(0, 1, 2, 5), arp=1, duty=2, drums=1,
-                        octave=1, contour=+1, vib=0.006, span=4),
+                        octave=1, contour=+1, vib=0.006, span=4, cadences=("authentic","half"),
+                        contours=("ascending","arch","terraced"), seventh=0.25),
     "triumphant":  dict(scales=("major",), progs=([0, 3, 4, 0], [0, 5, 3, 4]),
                         bpm=1.05, rhythms=(1, 2, 5, 10), arp=1, duty=2, drums=1,
-                        octave=1, contour=+1, vib=0.008, span=5),
+                        octave=1, contour=+1, vib=0.008, span=5, cadences=("authentic",),
+                        contours=("ascending","arch"), seventh=0.2),
     "ominous":     dict(scales=("phrygian", "harmonic"), progs=([0, 1, 0, 6], [0, 6, 5, 6]),
                         bpm=0.80, rhythms=(8, 9, 3), arp=2, duty=0, drums=3,
-                        octave=0, contour=-1, vib=0.004, span=3),
+                        octave=0, contour=-1, vib=0.004, span=3, cadences=("phrygian","plagal"),
+                        contours=("descending","static","valley"), seventh=0.45),
     "eerie":       dict(scales=("harmonic", "phrygian"), progs=([0, 1, 5, 0], [0, 6, 4, 0]),
                         bpm=0.75, rhythms=(8, 9, 10), arp=3, duty=0, drums=3,
-                        octave=1, contour=0, vib=0.012, span=6),
+                        octave=1, contour=0, vib=0.012, span=6, cadences=("phrygian","deceptive"),
+                        contours=("valley","static","arch"), seventh=0.55),
     "melancholy":  dict(scales=("minor", "dorian"), progs=([0, 5, 2, 6], [0, 3, 0, 6]),
                         bpm=0.78, rhythms=(8, 9, 2, 10), arp=4, duty=1, drums=3,
-                        octave=0, contour=-1, vib=0.007, span=3),
+                        octave=0, contour=-1, vib=0.007, span=3, cadences=("plagal","deceptive"),
+                        contours=("descending","arch"), seventh=0.4),
     "solemn":      dict(scales=("minor", "harmonic"), progs=([0, 3, 4, 0], [0, 5, 4, 0]),
                         bpm=0.72, rhythms=(8, 9), arp=4, duty=1, drums=3,
-                        octave=0, contour=0, vib=0.005, span=2),
+                        octave=0, contour=0, vib=0.005, span=2, cadences=("plagal","authentic"),
+                        contours=("descending","static"), seventh=0.3),
     "mysterious":  dict(scales=("dorian", "minor"), progs=([0, 6, 3, 0], [0, 3, 0, 6]),
                         bpm=0.88, rhythms=(3, 4, 7, 10), arp=2, duty=1, drums=0,
-                        octave=1, contour=0, vib=0.009, span=5),
+                        octave=1, contour=0, vib=0.009, span=5, cadences=("deceptive","plagal"),
+                        contours=("valley","terraced","arch"), seventh=0.45),
     "tense":       dict(scales=("phrygian", "minor"), progs=([0, 0, 5, 6], [0, 1, 0, 6]),
                         bpm=1.02, rhythms=(7, 3, 4), arp=1, duty=0, drums=1,
-                        octave=0, contour=0, vib=0.003, span=2),
+                        octave=0, contour=0, vib=0.003, span=2, cadences=("half","phrygian"),
+                        contours=("static","terraced"), seventh=0.5),
     "frantic":     dict(scales=("phrygian", "harmonic", "minor"),
                         progs=([0, 6, 5, 6], [0, 1, 0, 6]),
                         bpm=1.22, rhythms=(3, 7, 4), arp=1, duty=0, drums=1,
-                        octave=1, contour=+1, vib=0.004, span=4),
+                        octave=1, contour=+1, vib=0.004, span=4, cadences=("authentic","phrygian"),
+                        contours=("ascending","valley"), seventh=0.35),
     "driving":     dict(scales=("minor", "dorian"), progs=([0, 6, 5, 6], [0, 3, 4, 0]),
                         bpm=1.12, rhythms=(0, 3, 5, 7), arp=1, duty=2, drums=1,
-                        octave=0, contour=+1, vib=0.005, span=3),
+                        octave=0, contour=+1, vib=0.005, span=3, cadences=("authentic","plagal"),
+                        contours=("ascending","terraced"), seventh=0.3),
     "playful":     dict(scales=("pentatonic", "major", "mixolydian"),
                         progs=([0, 3, 4, 0], [0, 4, 0, 3]),
                         bpm=1.08, rhythms=(3, 4, 6, 7), arp=2, duty=2, drums=0,
-                        octave=1, contour=+1, vib=0.006, span=4),
+                        octave=1, contour=+1, vib=0.006, span=4, cadences=("authentic","plagal"),
+                        contours=("arch","ascending","terraced"), seventh=0.15),
     "serene":      dict(scales=("major", "dorian", "pentatonic"),
                         progs=([0, 5, 3, 4], [0, 3, 0, 4]),
                         bpm=0.82, rhythms=(8, 9, 2), arp=4, duty=1, drums=0,
-                        octave=1, contour=0, vib=0.010, span=3),
+                        octave=1, contour=0, vib=0.010, span=3, cadences=("plagal",),
+                        contours=("arch","static"), seventh=0.2),
     "grand":       dict(scales=("harmonic", "minor"), progs=([0, 3, 4, 0], [0, 5, 4, 0]),
                         bpm=0.90, rhythms=(1, 2, 9), arp=2, duty=2, drums=2,
-                        octave=0, contour=+1, vib=0.008, span=4),
+                        octave=0, contour=+1, vib=0.008, span=4, cadences=("authentic","plagal"),
+                        contours=("ascending","arch"), seventh=0.35),
     "wondrous":    dict(scales=("major", "dorian"), progs=([0, 3, 5, 4], [0, 4, 5, 3]),
                         bpm=0.95, rhythms=(2, 4, 6, 10), arp=2, duty=1, drums=0,
-                        octave=2, contour=+1, vib=0.011, span=6),
+                        octave=2, contour=+1, vib=0.011, span=6, cadences=("plagal","deceptive"),
+                        contours=("arch","ascending","valley"), seventh=0.3),
 }
 DEFAULT_MOOD = "mysterious"
 
@@ -291,105 +307,121 @@ class Track:
 
 
 def compose(a, np, rng):
-    """Build the note plan. Returns (events, bars, spb) — pure data, no audio.
+    """Build the note plan. Pure data — no audio.
 
-    Kept separate from rendering so the musical decisions are inspectable and
-    the synthesis stays dumb.
+    Structure comes from theory.plan_track(), which is deterministic on the TRACK
+    NAME rather than on the seed. That split is the whole diversity fix: 24 names
+    in a pack produce 24 different plans — key, form, progressions, contours,
+    tempo — while `-n 8` on one name gives eight takes of the SAME piece instead
+    of eight different pieces.
+
+    Everything remains bounded by the mood, so a crypt never comes out cheerful;
+    it just stops sounding like the armoury.
     """
-    root, key_scale = parse_key(a.key)
-
-    # Resolve the mood, then let it choose almost everything. Explicit --mood
-    # wins; otherwise read it out of the description, which for a manifest-driven
-    # run is already a sentence about how the track should feel.
     mname = getattr(a, "mood", None)
     if not mname or mname == "auto":
         mname = infer_mood(getattr(a, "prompt", "") or "")
     mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
 
-    # --chip-scale is an explicit override; otherwise prefer the mood's scale,
-    # but honour a scale the user actually spelled out in --key ("D dorian").
-    explicit_scale = getattr(a, "chip_scale", None)
-    if explicit_scale:
-        scale_name = explicit_scale
+    home_root, key_scale = parse_key(a.key)
+    track = a.name or "untitled"
+
+    # Scale: explicit override wins, then a mode spelled out in --key, else the
+    # mood's — chosen by track identity so two `solemn` tracks can differ.
+    explicit = getattr(a, "chip_scale", None)
+    if explicit:
+        scale_name = explicit
     elif any(w in (a.key or "").lower() for w in
-             ("dorian", "phrygian", "harmonic", "mixolydian", "pentatonic")):
+             ("dorian", "phrygian", "harmonic", "mixolydian", "pentatonic", "lydian")):
         scale_name = key_scale
     else:
-        scale_name = mood["scales"][int(rng.integers(len(mood["scales"])))]
-    scale = SCALES.get(scale_name, SCALES["minor"])
-    prog = list(mood["progs"][int(rng.integers(len(mood["progs"])))])
+        scale_name = theory.Ident(track, "scale:" + mname).pick(mood["scales"])
+    scale = theory.SCALES.get(scale_name, theory.SCALES["minor"])
 
-    bpm = max(40, min(300, a.bpm * mood["bpm"]))
-    spb = 60.0 / bpm * 4.0                       # seconds per bar (4/4)
-    bars = max(2, int(round(a.seconds / spb)))
-    # Even bar count keeps the progression whole, which is what makes the loop
-    # land musically rather than merely sample-accurately.
-    if bars % len(prog):
-        bars += len(prog) - (bars % len(prog))
+    # The key ROTATES through closely related keys across a pack (i/iv/v/bIII/
+    # bVII/bVI), weighted toward home. That is what stops 24 tracks sharing one
+    # key without scattering them into 12 unrelated ones.
+    root = theory.key_for_track(track, home_root, mname)
+
+    est_spb = 60.0 / max(40.0, min(300.0, a.bpm * mood["bpm"])) * 4.0
+    plan = theory.plan_track(track, mood, mname, scale_name,
+                             max(4, int(round(a.seconds / est_spb))))
+
+    bpm = max(40.0, min(300.0, a.bpm * plan["tempo_mul"]))
+    spb = 60.0 / bpm * 4.0
+    form, bps = plan["form"], plan["bars_per_section"]
+    bars = bps * len(form)
 
     def deg(d, octave=0):
-        """Scale degree -> midi, wrapping octaves."""
         o, i = divmod(d, len(scale))
         return 12 * (4 + octave + o) + root + scale[i]
 
-    # One motif, reused with variation. Repetition is what makes a chiptune read
-    # as a tune rather than as noodling — the format has no room for through-
-    # composition and the era's music leans hard on the hook.
-    pool = mood["rhythms"]
-    motif_r = RHYTHMS[pool[int(rng.integers(len(pool)))] % len(RHYTHMS)]
-    # Contour: bias each motif step up or down so the phrase leans the way the
-    # mood does. A rising line reads as hope or force, a falling one as loss.
-    span, contour = mood["span"], mood["contour"]
-    motif_d = []
-    for j in range(len(motif_r)):
-        base = int(rng.integers(0, max(2, span)))
-        if contour > 0:
-            base += j // 2                       # climbs through the phrase
-        elif contour < 0:
-            base -= j // 2                       # sags through the phrase
-        motif_d.append(base)
-    drums = DRUMS[mood["drums"] % len(DRUMS)]
-    duty_lead = DUTIES[mood["duty"] % len(DUTIES)]
-    lead_oct = 1 + mood["octave"]
-    arp_rate = int(getattr(a, "chip_arp", 0) or mood["arp"])
+    # One motif for the first section; every other section DEVELOPS it via a
+    # transformation (inversion, sequence, retrograde, augmentation...). Wholly
+    # new material per section fragments a track; verbatim repetition bores.
+    first = form[0]
+    motifs = {}
+    for letter, sec in plan["sections"].items():
+        r = RHYTHMS[sec["rhythm_idx"] % len(RHYTHMS)]
+        m = theory.make_motif(theory.Ident(track, "motif:%s:%s" % (letter, mname)),
+                              r, sec["contour"], mood["span"])
+        if letter != first and sec["transform"]:
+            m = theory.transform(m, sec["transform"],
+                                 theory.Ident(track, "tr:" + letter))
+        motifs[letter] = m
+
+    drums = DRUMS[plan["drums"] % len(DRUMS)]
+    duty_lead = DUTIES[plan["duty"] % len(DUTIES)]
 
     ev = {"lead": [], "arp": [], "bass": [], "drum": []}
-    for bar in range(bars):
-        ch = prog[bar % len(prog)]
-        chord = [deg(ch), deg(ch + 2), deg(ch + 4)]      # triad on that degree
+    prev_bass = None
+    bar = 0
+    for letter in form:
+        sec = plan["sections"][letter]
+        prog = plan["progs"][letter]
+        motif = motifs[letter]
+        lead_oct = 1 + sec["octave"]
+        arp_rate = max(1, int(getattr(a, "chip_arp", 0) or sec["arp"]))
+        for b in range(bps):
+            degree, seventh = prog[b % len(prog)]
+            chord = [deg(degree), deg(degree + 2), deg(degree + 4)]
+            if seventh:
+                chord.append(deg(degree + 6))
 
-        # --- lead: the motif, transposed onto the chord, varied every 4th bar
-        pos = 0
-        vary = (bar % 4 == 3)
-        for j, d in enumerate(motif_r):
-            step = motif_d[j]
-            if vary and rng.random() < 0.5:
-                step += int(rng.integers(-1, 3))
-            n = deg(ch + step, lead_oct)
-            if j == 0:
-                n = chord[0] + 12 * lead_oct             # land on the root
-            ev["lead"].append((bar, pos, d, n, duty_lead))
-            pos += d
+            # --- lead: the motif over this chord, resolving at the section end
+            pos = 0
+            last = len(motif) - 1
+            for j, (d, step) in enumerate(motif):
+                n = deg(degree + step, lead_oct)
+                if j == 0:
+                    n = deg(degree, lead_oct)              # anchor on the chord
+                if b == bps - 1 and j == last:
+                    n = deg(0, lead_oct)                   # cadence -> tonic
+                ev["lead"].append((bar, pos, d, n, duty_lead))
+                pos += d
 
-        # --- arp: the signature. Chord tones cycled every `arp` sixteenth.
-        rate = max(1, arp_rate)
-        k = 0
-        for s in range(0, STEPS, rate):
-            ev["arp"].append((bar, s, rate, chord[k % 3], 0.25))
-            k += 1
+            # --- arp: the signature. Chord tones cycled every `arp_rate` 16th.
+            k = 0
+            for s in range(0, STEPS, arp_rate):
+                ev["arp"].append((bar, s, arp_rate, chord[k % len(chord)], 0.25))
+                k += 1
 
-        # --- bass: triangle, root with a fifth on the off-beat
-        for s in (0, 4, 8, 12):
-            n = chord[0] - 12 if s in (0, 8) else chord[2] - 12
-            ev["bass"].append((bar, s, 4, n))
+            # --- bass: voice-led, so it walks instead of hammering the root
+            low = [c - 12 for c in chord]
+            bn = theory.voice_bass(prev_bass, low,
+                                   ident=theory.Ident(track, "bass:%d" % bar))
+            prev_bass = bn
+            for s in (0, 4, 8, 12):
+                ev["bass"].append((bar, s, 4, bn if s in (0, 8) else low[2 % len(low)]))
 
-        # --- drums
-        for s in range(STEPS):
-            for kind in ("k", "s", "h"):
-                if drums[kind][s] == "1":
-                    ev["drum"].append((bar, s, kind))
+            # --- drums
+            for s in range(STEPS):
+                for kind in ("k", "s", "h"):
+                    if drums[kind][s] == "1":
+                        ev["drum"].append((bar, s, kind))
+            bar += 1
 
-    return ev, bars, spb, scale_name, prog, mname, mood
+    return ev, bars, spb, scale_name, plan["progs"][first], mname, mood, plan
 
 
 def render(a, ev, bars, spb, np, mood=None):
@@ -477,7 +509,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        ev, bars, spb, scale_name, prog, mname, mood = compose(a, np, rng)
+        ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
         audio = render(a, ev, bars, spb, np, mood)
 
         # The seed goes in EVERY filename, as it does for every other engine.

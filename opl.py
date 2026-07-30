@@ -109,7 +109,66 @@ INSTRUMENTS = {
     "string": Instrument("string",
                          (1, 1, 16, 8, 4, 6, 5, 0, 1, 1, 0, 0),
                          (1, 0, 10, 9, 3, 8, 5, 0, 1, 1, 0, 0), fb=2, con=1),
+    # Short plucked attack, long-ish tail — harp/lute territory.
+    "pluck":  Instrument("pluck",
+                         (2, 0, 16, 15, 8, 1, 6, 0, 0, 0, 1, 0),
+                         (1, 0,  6, 15, 6, 2, 7, 0, 0, 0, 1, 0), fb=3),
+    # Nasal double-reed. mult 1:2 with heavy feedback is the classic OPL "oboe".
+    "reed":   Instrument("reed",
+                         (2, 0, 14, 13, 3, 8, 5, 0, 0, 1, 0, 0),
+                         (1, 0,  9, 13, 2, 9, 5, 0, 0, 1, 0, 0), fb=6),
+    # Soft, breathy, almost pure sine — the quiet end of the bank.
+    "flute":  Instrument("flute",
+                         (1, 0, 26, 11, 2, 10, 4, 0, 0, 1, 0, 0),
+                         (1, 0, 11, 12, 1, 12, 4, 0, 0, 1, 0, 0), fb=0, con=1),
+    # Wide, slow, sustained pad for solemn/eerie material.
+    "choir":  Instrument("choir",
+                         (1, 1, 20, 6, 2, 12, 4, 0, 1, 1, 0, 0),
+                         (1, 0, 12, 7, 1, 13, 4, 0, 1, 1, 0, 0), fb=1, con=1),
+    # Inharmonic and unpleasant on purpose — dread, not melody.
+    "growl":  Instrument("growl",
+                         (7, 0, 12, 12, 5, 6, 5, 0, 0, 1, 0, 0),
+                         (1, 0,  8, 13, 4, 7, 6, 0, 0, 1, 0, 0), fb=7),
+    # Bright metallic mallet — treasure, magic, discovery.
+    "mallet": Instrument("mallet",
+                         (4, 0, 18, 15, 10, 0, 9, 1, 0, 0, 1, 0),
+                         (1, 0,  7, 15, 8, 0, 8, 0, 0, 0, 1, 0), fb=5),
 }
+
+# --- mood -> voices ----------------------------------------------------------
+# THIS is why mood did not land on AdLib before: every track was voiced
+# brass/organ/bass regardless of mood, so 24 tracks shared one timbre and the
+# only variation was pitch. chip.py at least varied its duty cycle, which IS
+# timbre on a 2A03 — the OPL equivalent is choosing different operator patches.
+#
+# Each entry offers SEVERAL options per role; track identity picks one, so two
+# `solemn` tracks in the same pack get different instrumentation while staying
+# recognisably solemn.
+MOOD_VOICES = {
+    "heroic":     (("brass", "reed"),        ("organ", "string"),  ("bass",)),
+    "triumphant": (("brass",),               ("organ", "mallet"),  ("bass",)),
+    "ominous":    (("growl", "reed"),        ("choir", "organ"),   ("bass",)),
+    "eerie":      (("flute", "bell"),        ("choir", "string"),  ("bass", "growl")),
+    "melancholy": (("reed", "flute"),        ("string", "choir"),  ("bass",)),
+    "solemn":     (("choir", "organ"),       ("organ", "string"),  ("bass",)),
+    "mysterious": (("pluck", "flute", "bell"), ("string", "choir"), ("bass",)),
+    "tense":      (("reed", "growl"),        ("string", "organ"),  ("bass",)),
+    "frantic":    (("lead", "brass"),        ("organ", "lead"),    ("bass",)),
+    "driving":    (("brass", "lead"),        ("organ", "string"),  ("bass",)),
+    "playful":    (("pluck", "mallet"),      ("mallet", "organ"),  ("bass",)),
+    "serene":     (("flute", "pluck"),       ("choir", "string"),  ("bass",)),
+    "grand":      (("brass", "choir"),       ("organ", "choir"),   ("bass",)),
+    "wondrous":   (("mallet", "bell"),       ("string", "choir"),  ("bass", "pluck")),
+}
+
+
+def voices_for(mood_name, track, bank):
+    """Pick (lead, arp, bass) instruments for this mood + track."""
+    import theory
+    lead_o, arp_o, bass_o = MOOD_VOICES.get(mood_name, MOOD_VOICES["mysterious"])
+    ident = theory.Ident(track, "voice:" + mood_name)
+    pick = lambda opts, dflt: bank.get(ident.pick(opts), bank[dflt])
+    return pick(lead_o, "brass"), pick(arp_o, "organ"), pick(bass_o, "bass")
 
 
 class OPL3:
@@ -250,16 +309,17 @@ CH_LEAD, CH_ARP1, CH_ARP2, CH_BASS = 0, 1, 2, 3
 RHYTHM = {"k": 0x10, "s": 0x08, "h": 0x01}      # BD, SD, HH in register 0xBD
 
 
-def render(a, ev, bars, spb, np, bank):
+def render(a, ev, bars, spb, np, bank, voices):
     sr = SAMPLE_RATE
     step_s = spb / 16.0
     total_steps = bars * 16
 
     chip = OPL3(getattr(a, "opl_lib", None))
-    chip.program(CH_LEAD, bank.get(a.opl_lead, bank["brass"]))
-    chip.program(CH_ARP1, bank.get(a.opl_arp, bank["organ"]))
-    chip.program(CH_ARP2, bank.get(a.opl_arp, bank["organ"]))
-    chip.program(CH_BASS, bank.get(a.opl_bass, bank["bass"]))
+    v_lead, v_arp, v_bass = voices
+    chip.program(CH_LEAD, v_lead)
+    chip.program(CH_ARP1, v_arp)
+    chip.program(CH_ARP2, v_arp)
+    chip.program(CH_BASS, v_bass)
 
     # Rhythm mode: the chip's own BD/SD/HH, which is what AdLib games actually
     # used for drums. Channels 6-8 become percussion and stop being melodic.
@@ -350,8 +410,20 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        ev, bars, spb, scale_name, _prog, mname, _mood = chipmod.compose(a, np, rng)
-        audio = render(a, ev, bars, spb, np, bank)
+        ev, bars, spb, scale_name, _prog, mname, _mood, _plan = chipmod.compose(a, np, rng)
+        # Voices come from the MOOD unless the caller named one explicitly.
+        # Without this, mood was inaudible on AdLib: every track was voiced
+        # brass/organ/bass and only the pitches changed.
+        track = getattr(a, "name", None) or base
+        voices = list(voices_for(mname, track, bank))
+        for i_v, (flag, dflt) in enumerate((("opl_lead", "brass"),
+                                            ("opl_arp", "organ"),
+                                            ("opl_bass", "bass"))):
+            chosen = getattr(a, flag, None)
+            if chosen and chosen != dflt and chosen in bank:
+                voices[i_v] = bank[chosen]
+        v_names = "/".join(v.name for v in voices)
+        audio = render(a, ev, bars, spb, np, bank, voices)
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
@@ -365,7 +437,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         made.append(path)
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
               f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar  {mname:<11}"
-              f"{scale_name:<11}seed={seed}")
+              f"{scale_name:<11}{v_names:<20}seed={seed}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}  ({SAMPLE_RATE} Hz, OPL3 native)")
     print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")
