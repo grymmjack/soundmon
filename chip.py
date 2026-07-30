@@ -627,8 +627,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
         # manifest key — writing a bare `<name>.wav` made it report "nothing
         # produced" for files that were sitting right there.
         name = f"{base}_s{seed}"
+        # Hardware format lock, if asked. Applied here rather than in the
+        # ComfyUI node because these engines never touch the graph.
+        out_sr = SAMPLE_RATE
+        if getattr(a, "format", "none") not in (None, "none"):
+            _mod = sys.modules.get("chip") or __import__("chip")
+            audio, out_sr = _mod.format_lock_np(audio, SAMPLE_RATE, a.format, np)
         path = os.path.join(dest, f"{name}.wav")
-        sf.write(path, audio, SAMPLE_RATE,
+        sf.write(path, audio, out_sr,
                  subtype=f"PCM_{a.bits}" if a.bits != 8 else "PCM_U8")
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
@@ -976,3 +982,58 @@ def events_to_timed(ev, bars, spb, steps, mood_name, drums_only=False):
         dr.append((at(bar, st), kind_gm.get(kind, 42)))
     out.sort(key=lambda n: n["t"])
     return out, dr
+
+
+# --- format lock for the SYNTHESIS engines -----------------------------------
+# The RetroSFX node's _format_lock only runs in the ComfyUI graph, i.e. the
+# diffusion path. --chip/--opl/--chipfx/--blip write their audio directly, so
+# --format would have silently done nothing for exactly the engines most likely
+# to want it. Same two decisions as the node version, for the same reasons:
+#
+#   NAIVE stride decimation, no anti-aliasing filter — the aliasing IS the sound.
+#   PLAIN quantization, no dither — dither smooths the grit a ceiling exists to
+#   create.
+#
+# Tracker musicians turn interpolation OFF for this reason; a filtered downsample
+# gives you a dull quiet recording that happens to be 8 kHz.
+FORMATS = {
+    "none":    None,
+    "amiga":   dict(rate=8363,  bits=8,  mono=True),
+    "sb":      dict(rate=11025, bits=8,  mono=True),
+    "sb22":    dict(rate=22050, bits=8,  mono=True),
+    "gameboy": dict(rate=8192,  bits=4,  mono=True),
+    "nes":     dict(rate=4096,  bits=7,  mono=True),
+    "snes":    dict(rate=32000, bits=16, mono=False),
+    "psx":     dict(rate=22050, bits=16, mono=False),
+    "cd":      dict(rate=44100, bits=16, mono=False),
+    "mod8":    dict(rate=11025, bits=8,  mono=True),
+    "mod8s":   dict(rate=22050, bits=8,  mono=False),
+    "mod6":    dict(rate=11025, bits=6,  mono=True),
+    "mod6s":   dict(rate=22050, bits=6,  mono=False),
+    "crush":   dict(rate=8000,  bits=6,  mono=True),
+}
+
+
+def format_lock_np(audio, sr, fmt, np):
+    """Crush a mono/stereo numpy array to a hardware format. Returns (audio, sr)."""
+    spec = FORMATS.get(fmt or "none")
+    if not spec:
+        return audio, sr
+    a = np.asarray(audio, dtype=np.float64)
+    if a.ndim == 1:
+        a = a[:, None]
+    if spec.get("mono") and a.shape[1] > 1:
+        a = a.mean(axis=1, keepdims=True)
+    target = int(spec.get("rate") or sr)
+    if 0 < target < sr:
+        stepf = sr / float(target)
+        n = int(a.shape[0] / stepf)
+        if n > 1:
+            idx = np.minimum((np.arange(n) * stepf).astype(np.int64), a.shape[0] - 1)
+            a = a[idx]
+            sr = target
+    bits = int(spec.get("bits") or 0)
+    if 0 < bits < 24:
+        peak = float(2 ** bits) / 2.0 - 1.0
+        a = np.round(np.clip(a, -1.0, 1.0) * peak) / peak
+    return (a[:, 0] if a.shape[1] == 1 else a), sr

@@ -465,8 +465,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None):
             audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)
 
         name = f"{base}_s{seed}"
+        # Hardware format lock, if asked. Applied here rather than in the
+        # ComfyUI node because these engines never touch the graph.
+        out_sr = SAMPLE_RATE
+        if getattr(a, "format", "none") not in (None, "none"):
+            _mod = sys.modules.get("chip") or __import__("chip")
+            audio, out_sr = _mod.format_lock_np(audio, SAMPLE_RATE, a.format, np)
         path = os.path.join(dest, f"{name}.wav")
-        sf.write(path, audio, SAMPLE_RATE,
+        sf.write(path, audio, out_sr,
                  subtype=f"PCM_{a.bits}" if a.bits != 8 else "PCM_U8")
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)

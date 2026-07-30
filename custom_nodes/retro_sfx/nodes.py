@@ -37,6 +37,12 @@ FORMATS = {
     "snes":    dict(rate=32000, bits=16, mono=False),         # SPC700 / BRR
     "psx":     dict(rate=22050, bits=16, mono=False),         # PS1 ADPCM-ish
     "cd":      dict(rate=44100, bits=16, mono=False),         # full quality
+    # --- MOD / tracker era ---------------------------------------------------
+    "mod8":    dict(rate=11025, bits=8,  mono=True),          # 8-bit 11k mono
+    "mod8s":   dict(rate=22050, bits=8,  mono=False),         # 8-bit 22k stereo
+    "mod6":    dict(rate=11025, bits=6,  mono=True),          # 6-bit crunch
+    "mod6s":   dict(rate=22050, bits=6,  mono=False),
+    "crush":   dict(rate=8000,  bits=6,  mono=True),          # maximum grit
 }
 
 
@@ -105,8 +111,54 @@ def _format_lock(wave: torch.Tensor, sr: int, spec: dict) -> tuple:
 
     Returns:
         (wave, sample_rate) — the crushed waveform and the rate it's now at.
+
+    Two decisions define the character, and both go the "authentic" way:
+
+    NO ANTI-ALIASING on the decimation. Aliasing is the Amiga sound; filtering it
+    out leaves a dull quiet recording that happens to be 8 kHz.
+    NO DITHER on the quantization. Dither smooths the noise floor, which is
+    exactly what a hardware ceiling exists not to do.
+
+    Swap either if you want the polite version — they are one line each.
     """
-    raise NotImplementedError("see TODO above")
+    if not spec:
+        return wave, sr
+
+    # --- channels ------------------------------------------------------------
+    # Averaging, not dropping a channel: a hard-panned MOD would otherwise lose
+    # half its arrangement rather than fold down.
+    if spec.get("mono") and wave.shape[1] > 1:
+        wave = wave.mean(dim=1, keepdim=True)
+
+    # --- sample rate: NAIVE stride decimation --------------------------------
+    # Deliberately no anti-aliasing filter. The aliasing IS the sound: Paula had
+    # no reconstruction filter worth the name, so everything above Nyquist folded
+    # back as that characteristic gritty shimmer. A clean resample gives you a
+    # quiet, dull 8 kHz recording — technically better and completely wrong.
+    target = int(spec.get("rate") or sr)
+    if 0 < target < sr:
+        step = sr / float(target)
+        n_out = int(wave.shape[-1] / step)
+        if n_out > 1:
+            idx = (torch.arange(n_out, device=wave.device) * step).long()
+            idx = idx.clamp(max=wave.shape[-1] - 1)
+            wave = wave.index_select(-1, idx)
+            sr = target
+
+    # --- bit depth: plain quantize, no dither --------------------------------
+    # Dithering trades the grit for a smoother noise floor, which is the opposite
+    # of what a hardware ceiling is for. Quantizing to `levels` steps mirrors what
+    # an 8-bit DAC actually does to the signal.
+    #
+    # Note this is amplitude quantization only — SaveSFX still decides the stored
+    # PCM width, and 8-bit WAV's unsigned offset is handled there.
+    bits = int(spec.get("bits") or 0)
+    if 0 < bits < 24:
+        levels = float(2 ** bits)
+        peak = levels / 2.0 - 1.0
+        wave = torch.round(wave.clamp(-1.0, 1.0) * peak) / peak
+
+    return wave, sr
 
 
 class RetroSFX:
