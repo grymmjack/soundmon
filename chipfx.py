@@ -460,6 +460,8 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         audio = (render_opl(arch, n, SAMPLE_RATE, rng, np, oplmod) if use_opl
                  else render_psg(arch, n, SAMPLE_RATE, rng, np))
         audio = np.asarray(audio, dtype=np.float64)[:n]
+        import chip as _dcm
+        audio = _dcm._dc_block(audio, np, SAMPLE_RATE)
         peak = float(np.abs(audio).max())
         if peak > 1e-9:
             audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)

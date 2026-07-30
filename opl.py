@@ -1232,6 +1232,8 @@ def render_timed(a, notes, drums, duration, np, wopl, with_drums=True):
     out.append(chip.render(int(0.35 * sr), np))
 
     audio = np.concatenate(out) if out else np.zeros(1)
+    import chip as _dcm
+    audio = _dcm._dc_block(audio, np, sr)
     if level != "off":
         import chip as _chipmod
         cfg = _chipmod.CHIPPY.get(level, _chipmod.CHIPPY["off"])

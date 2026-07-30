@@ -525,7 +525,7 @@ def render(a, ev, bars, spb, np, mood=None, steps=STEPS):
         w, g = hits[kind]
         tr.add(at(bar, step), w, g)
 
-    out = tr.buf
+    out = _dc_block(tr.buf, np, sr)
     # A real 2A03 sums its channels into one mono DAC. Keep it mono; fake stereo
     # would be the first thing that gives the game away.
     peak = float(np.abs(out).max())
@@ -742,6 +742,7 @@ def render_timed(a, notes, drums, duration, np, mood=None):
         buf[start:start + ln] += w * g
 
     buf = _chip_verb(buf, sr, cfg["verb"], np)
+    buf = _dc_block(buf, np, sr)          # before normalising: DC steals headroom
     peak = float(np.abs(buf).max())
     if peak > 1e-9:
         buf = buf * (10.0 ** (a.normalize_db / 20.0) / peak)
@@ -803,6 +804,33 @@ CHIPPY = {
     "max":  dict(arp_hz=60.0, min_notes=2,  slide=0.90, slide_ms=80,
                  vib=0.018, duty_mod=2, verb=0.22),
 }
+
+
+def _dc_block(buf, np, sr, hz=12.0):
+    """Remove DC and sub-audible drift with a one-pole high-pass.
+
+    A pulse wave with duty != 50% has an inherent DC offset — a 12.5% duty square
+    sits at a mean of -0.75 — so thin, characteristically chippy voices carry a
+    lot of it. Measured on a real render: -0.088, about -21 dBFS of pure DC.
+
+    It has to go for two reasons. It wastes headroom, because peak normalisation
+    then scales a DC-shifted waveform and the audio itself ends up quieter than
+    the peak suggests. And it is inaudible but not harmless: a DC step at the start
+    or end of a file clicks, and it makes speakers work for nothing.
+
+    Real hardware blocks DC at the output coupling capacitor, so removing it is
+    what the chip's own analogue stage did — not a departure from authenticity.
+
+    12 Hz corner: below anything musical, above the DC we are removing.
+    """
+    x = np.asarray(buf, dtype=np.float64)
+    a = float(np.exp(-2.0 * np.pi * hz / sr))
+    # y[n] = x[n] - x[n-1] + a*y[n-1], vectorised via lfilter when available.
+    try:
+        from scipy.signal import lfilter
+        return lfilter([1.0, -1.0], [1.0, -a], x, axis=0)
+    except Exception:
+        return x - x.mean(axis=0, keepdims=True) if x.ndim > 1 else x - x.mean()
 
 
 def _chip_verb(buf, sr, amount, np):
