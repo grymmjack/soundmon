@@ -849,6 +849,11 @@ def main():
                         "description. --list-moods")
     p.add_argument("--list-moods", dest="list_moods", action="store_true",
                    help="show every mood and what it changes")
+    p.add_argument("--chippy", default="off",
+                   choices=["off", "some", "lots", "max"],
+                   help="how CHIP the chip sounds (--chip --from-midi). Chords "
+                        "become fast arpeggios, leaps get pitch slides, and at "
+                        "'max' a subtle tracker-style echo. off = exact polyphony.")
     p.add_argument("--arp", "--chip-arp", dest="chip_arp", type=int, default=0, metavar="N",
                    help="arpeggio speed in 16ths — 1 is the classic buzzy chord (default: 1)")
     # --- opl mode: real AdLib / Sound Blaster FM via the Nuked OPL3 core ---

@@ -651,7 +651,44 @@ def render_timed(a, notes, drums, duration, np, mood=None):
     buf = np.zeros(total)
     depth = (mood or {}).get("vib", 0.006)
 
-    for n in notes:
+    cfg = CHIPPY.get(getattr(a, "chippy", "off") or "off", CHIPPY["off"])
+    depth = max(depth, cfg["vib"])
+
+    bass = [n for n in notes if n["pitch"] < 48]
+    lead = [n for n in notes if n["pitch"] >= 48]
+
+    # --- chords -> ARPEGGIOS ------------------------------------------------
+    # A 2A03 cannot sound a chord, so the era cycled the tones instead. Playing
+    # them simultaneously is technically accurate and audibly wrong.
+    rendered = set()
+    if cfg["arp_hz"] > 0:
+        for group in _cluster_chords(lead):
+            if len(group) < cfg["min_notes"]:
+                continue
+            pitches = sorted({g["pitch"] for g in group})
+            if len(pitches) < 2:
+                continue
+            t0 = min(g["t"] for g in group)
+            t1 = max(g["t"] + g["dur"] for g in group)
+            start = int(round(t0 * sr))
+            ln = min(int(round((t1 - t0) * sr)), total - start)
+            if start >= total or ln < 64:
+                continue
+            top = max(pitches)
+            duty = 0.125 if top >= 72 else (0.25 if top >= 60 else 0.5)
+            if cfg["duty_mod"]:
+                duty = 0.125 if cfg["duty_mod"] > 1 else 0.25
+            vel = max((g.get("vel") or 100) for g in group) / 127.0
+            w = _arp_voice(pitches, ln, sr, cfg["arp_hz"], duty, np, depth)
+            buf[start:start + ln] += w * _env(ln, sr, 2.0, 1.6, 0.8, np) * 0.22 * vel
+            rendered.update(id(g) for g in group)
+
+    # --- remaining melodic notes, with optional pitch SLIDES ----------------
+    prev = None
+    for n in sorted(lead, key=lambda x: x["t"]):
+        if id(n) in rendered:
+            prev = n
+            continue
         start = int(round(n["t"] * sr))
         ln = max(int(round(n["dur"] * sr)), int(0.02 * sr))
         if start >= total:
@@ -660,20 +697,37 @@ def render_timed(a, notes, drums, duration, np, mood=None):
         pitch = n["pitch"]
         vel = (n.get("vel") or 100) / 127.0
         hz = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
+        duty = 0.125 if pitch >= 72 else (0.25 if pitch >= 60 else 0.5)
+        if cfg["duty_mod"] > 1:
+            duty = 0.125
 
-        if pitch < 48:                              # triangle bass
-            w = _tri_sweep_note(hz, ln, sr, np)
-            env = _env(ln, sr, 3.0, 3.0, 0.75, np)
-            gain = 0.34
+        leap = abs(pitch - prev["pitch"]) if prev else 0
+        gap = (n["t"] - (prev["t"] + prev["dur"])) if prev else 9.0
+        # Slide when the previous note is close in time and the interval is a real
+        # leap — which is how the era used portamento: to connect, not decorate.
+        if (cfg["slide"] > 0 and prev and 3 <= leap <= 19 and gap < 0.12
+                and (leap / 19.0) < cfg["slide"] + 0.35):
+            hz0 = 440.0 * (2.0 ** ((prev["pitch"] - 69) / 12.0))
+            w = _slide_pulse(hz0, hz, ln, sr, duty, cfg["slide_ms"], np, depth)
         else:
-            duty = 0.125 if pitch >= 72 else (0.25 if pitch >= 60 else 0.5)
             vib = _vibrato(ln, sr, depth if n["dur"] > 0.35 else 0.0, 6.0, np)
             t = np.arange(ln, dtype=np.float64) / sr
             ph = 2 * np.pi * hz * np.cumsum(vib) / sr
             w = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
-            env = _env(ln, sr, 2.0, 4.0, 0.55, np)
-            gain = 0.20
-        buf[start:start + ln] += w * env * gain * vel
+        buf[start:start + ln] += w * _env(ln, sr, 2.0, 4.0, 0.55, np) * 0.20 * vel
+        prev = n
+
+    # --- bass on the triangle ----------------------------------------------
+    for n in bass:
+        start = int(round(n["t"] * sr))
+        ln = max(int(round(n["dur"] * sr)), int(0.02 * sr))
+        if start >= total:
+            continue
+        ln = min(ln, total - start)
+        hz = 440.0 * (2.0 ** ((n["pitch"] - 69) / 12.0))
+        vel = (n.get("vel") or 100) / 127.0
+        buf[start:start + ln] += (_tri_sweep_note(hz, ln, sr, np)
+                                  * _env(ln, sr, 3.0, 3.0, 0.75, np) * 0.34 * vel)
 
     for t, gm in (drums or []):
         start = int(round(t * sr))
@@ -689,6 +743,7 @@ def render_timed(a, notes, drums, duration, np, mood=None):
         w = _lfsr_note(ln, sr, period, np) * _env(ln, sr, 1.0, dec, 0.0, np)
         buf[start:start + ln] += w * g
 
+    buf = _chip_verb(buf, sr, cfg["verb"], np)
     peak = float(np.abs(buf).max())
     if peak > 1e-9:
         buf = buf * (10.0 ** (a.normalize_db / 20.0) / peak)
@@ -719,3 +774,106 @@ def _lfsr_note(n, sr, period, np, seed=1):
             val = 1.0 if (reg & 1) else -1.0
         out[i] = val
     return out
+
+
+# =============================================================================
+# CHIPPINESS
+#
+# A 2A03 has one note per channel. It cannot play a chord — so the era's composers
+# faked one by cycling the chord tones every frame or two, fast enough that the ear
+# fuses them into a buzzy shimmer. That fast arpeggio is more the sound of the
+# format than the square waves are. They also used pitch SLIDES constantly, because
+# a pitch register is cheap to ramp and it disguises how few voices there are.
+#
+# Playing a MIDI chord as three simultaneous notes is therefore both unfaithful and
+# less characteristic: technically more accurate, audibly less chip. This dial
+# trades accuracy for idiom, which matches the stated priority — music first, then
+# timbre, then accuracy.
+#
+#   off    exact polyphony, as written
+#   some   chords of 3+ arpeggiate at 32 Hz; slides on big leaps
+#   lots   all chords arpeggiate at 50 Hz; most leaps slide; vibrato
+#   max    frame-rate 60 Hz arpeggios, aggressive slides, duty modulation
+# =============================================================================
+CHIPPY = {
+    "off":  dict(arp_hz=0.0,  min_notes=99, slide=0.00, slide_ms=0,
+                 vib=0.000, duty_mod=0, verb=0.00),
+    "some": dict(arp_hz=32.0, min_notes=3,  slide=0.35, slide_ms=45,
+                 vib=0.004, duty_mod=0, verb=0.00),
+    "lots": dict(arp_hz=50.0, min_notes=2,  slide=0.60, slide_ms=60,
+                 vib=0.010, duty_mod=1, verb=0.10),
+    "max":  dict(arp_hz=60.0, min_notes=2,  slide=0.90, slide_ms=80,
+                 vib=0.018, duty_mod=2, verb=0.22),
+}
+
+
+def _chip_verb(buf, sr, amount, np):
+    """Subtle multi-tap echo.
+
+    A 2A03 cannot do this — but chiptune as *heard* usually has it, because
+    trackers had echo commands and emulator captures pick up room. So it belongs
+    on the stylistic end of the dial rather than in the synthesis: at "max" the
+    goal is what chip music sounds like on a record, not what the silicon emits.
+
+    Three prime-ish taps rather than one, so it reads as space instead of as a
+    slapback repeat.
+    """
+    if amount <= 0:
+        return buf
+    out = buf.copy()
+    for ms, g in ((53.0, 1.00), (97.0, 0.62), (149.0, 0.38)):
+        d = int(sr * ms / 1000.0)
+        if d < len(buf):
+            out[d:] += buf[:-d] * (amount * g)
+    return out
+
+
+def _cluster_chords(notes, tol=0.045):
+    """Group near-simultaneous overlapping notes into chords.
+
+    `tol` is how close two onsets must be to count as one chord. 45 ms is roughly
+    the limit at which the ear hears a single event rather than two.
+    """
+    out = []
+    cur = []
+    for n in sorted(notes, key=lambda x: x["t"]):
+        if cur and abs(n["t"] - cur[0]["t"]) <= tol:
+            cur.append(n)
+        else:
+            if cur:
+                out.append(cur)
+            cur = [n]
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _arp_voice(pitches, n, sr, arp_hz, duty, np, vib_depth=0.0):
+    """One voice cycling through `pitches` at `arp_hz` — the chip chord."""
+    per = max(1, int(sr / max(arp_hz, 1.0)))
+    out = np.zeros(n)
+    k = 0
+    pos = 0
+    while pos < n:
+        ln = min(per, n - pos)
+        hz = 440.0 * (2.0 ** ((pitches[k % len(pitches)] - 69) / 12.0))
+        t = np.arange(ln, dtype=np.float64) / sr
+        ph = 2 * np.pi * hz * t
+        if vib_depth:
+            ph = ph * (1.0 + vib_depth * np.sin(2 * np.pi * 6.0 * (pos / sr + t)))
+        out[pos:pos + ln] = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
+        pos += ln
+        k += 1
+    return out
+
+
+def _slide_pulse(hz0, hz1, n, sr, duty, slide_ms, np, vib_depth=0.0):
+    """A pulse wave that glides from hz0 to hz1 over slide_ms, then holds."""
+    t = np.arange(n, dtype=np.float64) / sr
+    ns = max(1, min(n, int(sr * slide_ms / 1000.0)))
+    f = np.full(n, hz1)
+    f[:ns] = np.linspace(hz0, hz1, ns)
+    if vib_depth:
+        f = f * (1.0 + vib_depth * np.sin(2 * np.pi * 6.0 * t))
+    ph = 2 * np.pi * np.cumsum(f) / sr
+    return np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
