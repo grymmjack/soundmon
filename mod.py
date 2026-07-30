@@ -278,7 +278,8 @@ def write_mod(path, ev, bars, spb, steps, np, title="soundmon", bpm=None,
         """
         seq = sorted(items, key=lambda it: it[0] * rows_per_bar + it[1])
         prev_pitch = None
-        legato = False               # did the previous note run INTO this one?
+        prev_end = None              # row where the previous note stopped sounding
+        row_s = float(spb) / rows_per_bar
         for i, it in enumerate(seq):
             bar, step, dur, pitch = it[0], it[1], it[2], it[3]
             start = bar * rows_per_bar + step
@@ -291,9 +292,12 @@ def write_mod(path, ev, bars, spb, steps, np, title="soundmon", bpm=None,
             e, p, span, cont = chip_effects(
                 frac, pitch, prev_pitch, int(dur),
                 is_chord_top=(ch == CH_ARP), chippy=chippy,
-                legato=legato, ticks_per_row=ticks,
+                ticks_per_row=ticks,
                 chord=chords.get((bar, step), ()),
-                avail=(nxt - start) if nxt is not None else None)
+                avail=(nxt - start) if nxt is not None else None,
+                gap_s=((start - prev_end) * row_s
+                       if prev_end is not None else 1e9),
+                row_s=row_s)
             prev_pitch = pitch
             place(bar, step, ch, sample, pitch, e, p)
             # Carry the effect across the rows it needs. Bounded by the next onset
@@ -306,12 +310,10 @@ def write_mod(path, ev, bars, spb, steps, np, title="soundmon", bpm=None,
                 place_fx(*divmod(row, rows_per_bar), ch, e, cont)
             # Release one row past the last sounding row, clamped to the next
             # onset. Landing exactly ON the next onset needs no release at all:
-            # retriggering a sample ends the previous note by itself — and that
-            # unbroken hand-off is also the only place a glide can work, so the
-            # next iteration is told about it.
+            # retriggering a sample ends the previous note by itself.
             end = start + max(1, int(dur))
-            legato = nxt is not None and end >= nxt
-            if legato:
+            prev_end = min(end, nxt) if nxt is not None else end
+            if nxt is not None and end >= nxt:
                 continue
             eb, es = divmod(end, rows_per_bar)
             place_off(eb, es, ch)
@@ -509,7 +511,7 @@ def vib_depth(pitch, cents=20.0, max_cents=40.0):
 
 def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
                  chippy="off", legato=False, ticks_per_row=6, chord=(),
-                 avail=None):
+                 avail=None, gap_s=0.0, row_s=0.02):
     """Choose an effect for a note, in the era's idiom.
 
     Mirrors what --chippy does in the synthesis path, so a MOD carries the same
@@ -559,16 +561,28 @@ def chip_effects(ident_frac, pitch, prev_pitch, dur, is_chord_top=False,
         e, p = fx("arpeggio", x, y)
         return e, p, max(1, min(int(dur), 12, avail)), p
 
-    if prev_pitch is not None and legato:
-        # ONLY when the previous note ran straight into this one. Tone portamento
-        # does not retrigger the sample, which is what makes it a glide — but it
-        # also means the channel volume is whatever it already was. After a C00
-        # release that is zero, so a slide there is perfectly silent.
-        step = abs(int(pitch) - int(prev_pitch))
-        if 1 <= step <= 7 and ident_frac < strength:
-            # Glide over a few rows so it reads as a slide rather than a soft
-            # attack, but never past the end of the note.
-            rows = max(1, min(3, max(1, int(dur) // 2), avail))
+    if prev_pitch is not None:
+        # SAME RULES AS THE SYNTH PATH, which is the version grymmjack signed off
+        # on ("i adore the pitch slides"). mod.py had invented its own and got
+        # them close to backwards:
+        #
+        #   leap    synth 3..19 semitones, mod.py 1..7. The ranges barely overlap,
+        #           and the difference is not cosmetic: 39 of 83 slides were under
+        #           3 semitones and 8 were a SINGLE semitone. A one-semitone glide
+        #           is not heard as a slide, it is heard as a note out of tune,
+        #           which is exactly what "portamento is the issue" sounds like.
+        #
+        #   spacing synth wants the notes merely CLOSE (gap < 120 ms), not
+        #           overlapping. mod.py demanded true legato, which is both rarer
+        #           and, on a register-assigned channel, arbitrary.
+        #
+        #   length  synth slides for a fixed 45/60/80 ms by level. mod.py used
+        #           "up to 3 rows", which is a different duration at every grid.
+        leap = abs(int(pitch) - int(prev_pitch))
+        if 3 <= leap <= 19 and gap_s < 0.12 and ident_frac < strength:
+            ms = {"some": 45.0, "lots": 60.0, "max": 80.0}.get(chippy, 60.0)
+            rows = max(1, int(round(ms / 1000.0 / max(row_s, 1e-6))))
+            rows = max(1, min(rows, max(1, int(dur)), avail))
             e, p = fx("tone_porta", porta_rate(pitch, prev_pitch,
                                                ticks_per_row, rows))
             return e, p, rows, 0
