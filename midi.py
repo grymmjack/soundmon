@@ -248,8 +248,14 @@ def to_events(path, np, seconds=None, steps_per_bar=None, transpose=0,
         if b < 0 or b >= want_bars:
             continue
         dur = max(1, int(round((en - st) / step_ticks)))
-        buckets.setdefault((b, s), []).append((pitch + transpose, vel,
-                                               min(dur, steps - s), prog))
+        # NOTE: duration is NOT clamped to the bar. It used to be
+        # min(dur, steps - s), which silently truncated every note that crossed a
+        # bar line — 4% of notes in Zelda's Title01, and they are exactly the
+        # sustained ones a theme is built from. The note then decayed to nothing
+        # and left a hole until the next attack, which reads as "no release
+        # envelope". render_poly indexes absolute steps, so it handles a note that
+        # outlives its bar perfectly well.
+        buckets.setdefault((b, s), []).append((pitch + transpose, vel, dur, prog))
 
     ev = {"lead": [], "arp": [], "bass": [], "drum": []}
     # GM program per voice per step, so a renderer with a real bank can select the
