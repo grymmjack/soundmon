@@ -20,10 +20,14 @@ import urllib.request
 
 # soundmon can render on a REMOTE ComfyUI (e.g. a faster box on the LAN). Choose a
 # target with `--server NAME` (an alias from servers.json) or `--server host[:port]`/URL,
-# or the SOUNDMON_SERVER env var. Default is local. When the target is remote, results
-# are fetched back over HTTP (/view) — no shared filesystem needed.
-SERVER = "http://127.0.0.1:8188"
-REMOTE = False
+# or the SOUNDMON_SERVER env var. When the target is remote, results are fetched back
+# over HTTP (/view) — no shared filesystem needed.
+#
+# THE DEFAULT IS THE `local` ALIAS, NOT A HARDCODED 127.0.0.1. That literal was the
+# real default before, so repointing the alias in servers.json changed `--server local`
+# and left a bare `soundmon "..."` still aimed at a machine with no ComfyUI on it —
+# two defaults that could disagree, which is exactly the kind of split that makes a
+# config change look like it did nothing. Now there is one place to edit.
 POOL = []   # >1 entry (--server a,b,c) turns on render-farm mode (jobs fan across GPUs)
 COMFY = os.path.expanduser("~/ComfyUI")
 OUTPUT = os.path.join(COMFY, "output")
@@ -55,6 +59,9 @@ try:
 except Exception:
     SERVERS = {}
 SERVERS.setdefault("local", "http://127.0.0.1:8188")
+
+SERVER = SERVERS.get("local", "http://127.0.0.1:8188")
+REMOTE = not any(_h in SERVER for _h in ("127.0.0.1", "localhost", "[::1]"))
 
 # Stable Audio 3's prompt-rewriter system prompts, lifted verbatim from
 # ComfyUI's official SA3 workflow (JsonExtractString node). SA3 is trained on
