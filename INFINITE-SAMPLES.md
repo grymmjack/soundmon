@@ -20,6 +20,7 @@ new3 - NEON MARKET/
   2 Loops/        143 loops, cut on the bar lines, tempo in the file
   3 One-shots/    59 hits and notes, root notes set
   4 FX/           risers, falls, the ending's tail
+  5 Instruments/  the one-shots as sampler instruments: a drum kit, notes, chords, pads
 ```
 
 The first pack (NEON-CASTER's `new3`, 2026-10-23) took 47 seconds of music to 224 samples in
@@ -123,7 +124,7 @@ ln -sf "$(.venv/bin/python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_f
 ```
 
 (The separator needs `ffmpeg` on the PATH; `imageio-ffmpeg` brings one without sudo.) Copy the
-script over: `scp ~/git/soundmon/tools/stems.py daw:stems/`. The models (~2.3 GB) download into
+scripts over: `scp ~/git/soundmon/tools/stems.py ~/git/soundmon/tools/instruments.py daw:stems/`. The models (~2.3 GB) download into
 `~/stems/models` on the first run.
 
 ### Each track
@@ -166,6 +167,10 @@ new3 - NEON MARKET/
 │   ├── Synth Mid/    new3 - synth mid - C4.wav, ... - held bar 19.wav (a looped pad)
 │   └── ...
 ├── 4 FX/             new3 - riser - from reverb 03.wav, new3 - ending tail - full mix.wav
+├── 5 Instruments/    new3 - drum kit.multisample (+ its keys .txt), new3 - bass.multisample,
+│   │                 new3 - bass chords.multisample, new3 - synth mid pad.multisample, ...
+│   ├── Renoise/      the same as .xrni: new3 - drum kit.xrni, new3 - bass.xrni, ...
+│   └── Bitwig/       the same as .bwpreset: new3 - drum kit.bwpreset (a Drum Machine), ...
 └── stems.json        tempo, bar grid, every file and where in the track it came from
 ```
 
@@ -199,7 +204,11 @@ Separation isn't magic. Expect:
 - **synth layers that are layers, not instruments** - two synths of the same brightness stay
   together;
 - **the odd wrong note name** - pitch tracking on a separated part can catch a harmonic;
-- **"vocals" in an instrumental** - a voice-like lead or a vocoder-ish synth.
+- **"vocals" in an instrumental** - a voice-like lead or a vocoder-ish synth;
+- **thin packs from ambient tracks** - a layer next to silent (30 dB under the mix) is left
+  out (`left_out_quiet` in stems.json). A track with no drums finds its bars in the whole mix
+  and gets no kit; NEON-CASTER's HYDROPONICS and ORBITAL SPIRE came out as bass, one
+  "synths + fx" stem and reverb - so a bass and bass-chords instrument each.
 
 It's raw material: food for the muse, not studio stems.
 
@@ -209,3 +218,30 @@ It's raw material: food for the muse, not studio stems.
   run on the farm like everything else.
 - A whole set in one go, with a report page to audition each pack.
 - More stems where models exist (a dedicated synth/keys model when one appears).
+
+## Sampler instruments
+
+`tools/instruments.py OUTDIR` (stems.py runs it at the end when it's beside it; it needs only
+Python's standard library, so it runs anywhere - on an older pack too) turns `3 One-shots/` into
+Bitwig's open `.multisample` format (a zip of the WAVs and a `multisample.xml`): drag one onto a
+track, or open it in Sampler.
+
+| file | what's in it |
+|---|---|
+| `NAME - drum kit.multisample` | every drum hit, a key each from C1 (where Drum Machine's pads start), kick, snare, toms, hats, ride, crash in turn; `NAME - drum kit keys.txt` lists them |
+| `NAME - PART.multisample` | a part's notes, each on its own pitch, its zone reaching halfway to its neighbours' - a playable bass or synth |
+| `NAME - PART chords.multisample` | the part's chords and stabs, a key each from C3 |
+| `NAME - PART pad.multisample` | a sustained part's held bar, looped as it was cut, on every key (C3 plays it as it was) |
+
+Key names are Bitwig's (C3 = MIDI 60); the one-shots' file names count C4 = 60, an octave up.
+
+Each comes in two more forms beside it:
+
+- **`Renoise/NAME.xrni`** - Renoise's own instrument: drag it into the instrument list (or load it
+  there). The keys are where MIDI plays them, so the same sounds as in Bitwig: the kit from C-2
+  (MIDI 36, Bitwig's C1), the chords from C-4 (MIDI 60). Drum hits are one-shots, not pitched;
+  notes reach halfway to their neighbours; pads loop. `drum kit keys.txt` gives both names.
+- **`Bitwig/NAME.bwpreset`** - Bitwig's own devices, made where Bitwig is installed
+  (`tools/bwpreset.py` reads its empty Drum Machine and Sampler from Bitwig's Library): the kit is
+  a **Drum Machine** with a Sampler on each pad, the rest are Samplers (zones, the pad's loop).
+  Drag one onto a track from the file manager, or put the folder in Bitwig's Locations.

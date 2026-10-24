@@ -863,11 +863,33 @@ soundmon/
 ├── servers.example.json       template for --server aliases (copy to servers.json)
 ├── bin/soundmon               wrapper: ensures the server is up, then runs soundmon.py
 ├── tools/
-│   └── spectral-check.py      measure spectral cutoff — catches hollow output
+│   ├── spectral-check.py      measure spectral cutoff — catches hollow output
+│   ├── stems.py               a finished track → stems, loops, one-shots, FX (INFINITE-SAMPLES.md)
+│   ├── instruments.py         the one-shots → sampler instruments: Bitwig .multisample, Renoise .xrni,
+│   │                          Bitwig .bwpreset (a Drum Machine kit, Samplers)
+│   └── bwpreset.py            reads and writes Bitwig's binary .bwpreset (used by instruments.py)
 └── custom_nodes/
     └── retro_sfx/             the finishing node (trim→format→fade→normalize) + WAV saver
         └── nodes.py           FORMATS registry — add your own hardware formats here
 ```
+
+### Stems, loops and sampler instruments (`tools/stems.py`, `tools/instruments.py`)
+
+A finished track (a `--music` take, or any WAV) taken apart into a sample pack: stems
+(Demucs, DrumSep, de-reverb, synth layers), bar loops, one-shots (drum hits, notes, chords,
+held bars) and FX - then the one-shots built into instruments for both DAWs:
+
+```bash
+python tools/stems.py track.wav "out/track - TITLE" --name track --title TITLE --bpm 128
+python tools/instruments.py "out/track - TITLE"     # stems.py runs it at the end too
+```
+
+`5 Instruments/` gets each instrument three ways: `.multisample` (Bitwig's open format),
+`Renoise/*.xrni` (drag into Renoise's instrument list; keys as MIDI plays them) and, where
+Bitwig is installed, `Bitwig/*.bwpreset` - its own Drum Machine (a Sampler a pad) and Samplers,
+written by `tools/bwpreset.py`, which reads and writes Bitwig's binary preset format.
+`instruments.py` and `bwpreset.py` need only Python's standard library. The whole walk-through,
+from the prompt to the sampler, is [INFINITE-SAMPLES.md](INFINITE-SAMPLES.md).
 
 ### Checking output (`tools/spectral-check.py`)
 
