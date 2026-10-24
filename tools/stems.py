@@ -22,6 +22,8 @@ chunk, so a sampler or DAW loops and syncs it as it loads. Into OUTDIR ("new3 - 
   3 One-shots/PART/  drum hits ("new3 - kick 01.wav"), notes by pitch ("new3 - bass - C2.wav"),
                   chords and stabs, and a held bar of each sustained part, looped (pads)
   4 FX/           swoops, risers and falls found in the track, and its ending (the reverb tail)
+  5 Instruments/  the one-shots as Bitwig .multisample instruments - a drum kit, each part's notes,
+                  chords and pads (instruments.py, run at the end when it's beside this script)
   stems.json      the tempo, the bar grid, every file and its numbers
 
 Levels are left as they come out (nothing normalized). Separation isn't clean - bleed, reverb and
@@ -386,7 +388,8 @@ def main():
     for k, v in parts.items():
         write_wav(os.path.join(out, '1 Stems', f'{key} - stem - {pretty(k)}.wav'), v)
     print('3/6 tempo and bars...', flush=True)
-    tempo, spbar, bars = grid(mix, parts.get('kick', parts['drums']), a.bpm)
+    beat = parts.get('kick', parts.get('drums', mix))   # (a track with no drums - near-silent, left out - finds its bars in the mix)
+    tempo, spbar, bars = grid(mix, beat, a.bpm)
     stop = live_end(mix, bars)
     print(f'    {tempo:.2f} bpm, {len(bars)} bars, music to {stop / SR:.1f}s', flush=True)
     info = {'track': os.path.basename(a.track), 'key': key, 'title': a.title, 'bpm': round(tempo, 3),
@@ -403,7 +406,7 @@ def main():
         info['oneshots'] += oneshots(k, parts[k], out, key, pitched=False, others=rest, keep=4, max_len=1.0)
     for k in ('bass', 'synth-low', 'synth-mid', 'synth-high', 'other-hits', 'piano', 'guitar'):
         if k in parts:
-            info['oneshots'] += oneshots(k, parts[k], out, key, pitched=True, others=parts['drums'], keep=8, max_len=2.0)
+            info['oneshots'] += oneshots(k, parts[k], out, key, pitched=True, others=parts.get('drums'), keep=8, max_len=2.0)
     for k in ('other-sustain', 'synth-low', 'synth-mid'):
         if k in parts:
             info['oneshots'] += held(k, parts[k], bars, spbar, stop, out, key)
@@ -413,6 +416,11 @@ def main():
         json.dump(info, f, indent=1)
     shutil.rmtree(work, ignore_errors=True)
     print(f"done: {len(parts)} stems, {len(info['loops'])} loops, {len(info['oneshots'])} one-shots, {len(info['fx'])} fx", flush=True)
+    try:  # the one-shots as sampler instruments (instruments.py, beside this script: copy it too)
+        import instruments
+        print(f"instruments: {len(instruments.build(out))}", flush=True)
+    except ImportError:
+        print('(no instruments.py beside stems.py: run it on OUTDIR for the .multisample instruments)', flush=True)
 
 
 if __name__ == '__main__':
