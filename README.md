@@ -655,6 +655,76 @@ In **soundmon-gui**:
   2.5 kHz, harsh seconds, tilt) and a sonogram;
 - **▶ Mastered** lets you hear it through the chain first.
 
+`--master DIR --master-like REF` matches every file's tone and loudness to a reference
+sound instead (see `--match-tone` below).
+
+### Steering with a reference (`--ref`, `--ref-match`, `--match-tone`)
+
+"Make me a sound like this one." It works like pixelmon's image and depth steering:
+
+| pixelmon | soundmon | what it does |
+|---|---|---|
+| init image (`--init`, strength) | `--ref FILE --ref-strength N` | start from your sound instead of silence |
+| depth lock | `--ref-match` | keep its tempo and key (songs and music loops) |
+| colour match | `--match-tone REF` | EQ and level each take toward the reference |
+
+```bash
+soundmon "heavy iron door slam" --ref door.wav                    # SFX, a variation at 0.6
+soundmon "heavy iron door slam" --ref door.wav --ref-strength 0.3 # stays close to door.wav
+soundmon --music "dark synth loop" --ref loop.wav --ref-match     # its BPM and key go in the prompt
+soundmon --song "chiptune rock anthem" --ref demo.wav --ref-match # --bpm/--key/--seconds from demo.wav
+soundmon "laser zap" -n 8 --match-tone our_laser.wav              # sit with the game's other sounds
+```
+
+- `--ref` works with the AI engines: SFX, `--music` and `--song`. The reference is
+  converted to 44.1 kHz stereo, trimmed or padded to `--seconds`, uploaded to each
+  ComfyUI box's `input/` folder, and encoded by the model's own VAE. Sampling starts
+  from it with KSampler denoise = `--ref-strength`: **0.3** is a close variation, **0.6**
+  (default) keeps its shape, **0.9** only borrows from it. Takes get `_ref` in their name.
+- Without `--seconds`, the render is as long as the reference (capped at 120 s for SA3,
+  47 s for SAO).
+- `--ref-match` reads tempo and key from the reference (the same analysis as
+  `--from-audio`). Songs fill `--bpm`, `--key` and `--seconds` unless you set them;
+  music loops get "N BPM, in <key>" added to the prompt. For chip and AdLib, use
+  `--from-audio` instead.
+- `--match-tone REF` runs after rendering. It compares the take's 1/3-octave curve
+  with REF's, applies the difference (smoothed, at most ±9 dB), and sets the level to
+  REF's loudest 400 ms, never past −1 dBTP. It works with every engine; for CPU engines
+  you can also do it afterwards with `--master DIR --master-like REF`.
+- **Not yet proven on a GPU.** The graph is checked here; whether SA3's 8-step sampler
+  gives good variations from an encoded reference needs an rtx run. If SA3 does badly,
+  try `--engine sao`, the classic Stable Audio Open audio-to-audio.
+
+### Finding similar sounds on disk (`--index`, `--similar`)
+
+Like Sononym: drop a sound, get back the files on your disk that sound like it.
+
+```bash
+soundmon --index ~/samples,~/games/neon-caster/sfx     # build or refresh the index (only changed files are read)
+soundmon --similar door.wav                            # the 20 closest, best first
+soundmon --similar door.wav -n 50 --in ~/samples/foley # only look inside one folder
+```
+
+```
+🔎 sounds like door.wav  (1840 indexed)
+     1.  91%    0.84s  /home/me/samples/foley/metal_door_03.wav   [timbre, envelope]
+     2.  87%    1.10s  /home/me/samples/foley/gate_clang.wav      [timbre]
+```
+
+Each file gets a fingerprint built only from signal processing (no model, no GPU),
+taken from its audible part:
+- **timbre**: the average 32-band spectrum and how much each band moves;
+- **brightness**: spectral centroid, flatness (tonal or noisy) and roll-off;
+- **envelope**: attack time, hits per second, and the loudness shape;
+- **length**.
+
+A search compares every feature on the same scale and weights timbre highest. Results
+show a 0–100 "how alike" score and which aspects match. Identical copies show once.
+
+The index is `~/soundmon-gallery/similar/index.json`. It skips `mastered/`, backups, and
+folders starting with `_` or `.`, and reads the first 30 s of long files. It needs numpy
+and ffmpeg, but no ComfyUI.
+
 ### Compressing output (`--ogg`)
 
 WAV is the default because it is lossless and every tool reads it. When size
@@ -776,6 +846,15 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
 
   Takes are just gallery jobs tagged with the set and key, so a set survives
   restarts and every take keeps its seed and command.
+- **Reference** (SFX, Music, Song): drop a sound to steer the render (`--ref`), with a
+  slider from "close variation" to "loosely inspired", plus "use its tempo, key and
+  length" (`--ref-match`) and "match its tone" (`--match-tone`). The job keeps a copy
+  of the reference, and its gallery card has **ref ▶** to hear it. A set's theme can
+  carry a reference too, and a set can export **mastered like the reference**.
+- **🔎 Find** indexes the folders you choose (they're saved in Setup), then lists the
+  sounds most like the one you drop, or like any gallery take or set take (🔎 on its
+  card). Each result can be played, **Use**d as the form's reference, opened in its
+  folder, or have its path copied.
 - **Voices** speaks one of your lines in every Kokoro voice, so you can compare them;
   **Use** puts one in the Narrate form.
 - **Presets** (top of the form) save and load the form's settings by name.
@@ -949,7 +1028,8 @@ soundmon/
 ├── chipfx.py                  --chipfx/--oplfx: sfxr-style effect recipes
 ├── opl.py                     --opl: Nuked OPL3 FM (core fetched, not vendored)
 ├── record.py                  --record: the terminal recording booth (mic → pack)
-├── master.py                  --master: per-sound mastering chain (from NEON-CASTER), + analyse()
+├── master.py                  --master: per-sound mastering chain (from NEON-CASTER), + analyse(), match_tone()
+├── similar.py                 --index / --similar: DSP fingerprints, find sounds like this one
 ├── sounds.json                --style guide snippets (edit / add your own)
 ├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI
 ├── servers.example.json       template for --server aliases (copy to servers.json)

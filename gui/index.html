@@ -194,6 +194,12 @@ tr:last-child td { border-bottom: 0; }
 .keys { font: 11px var(--mono); color: var(--dim); }
 .keys kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; color: var(--text); }
 .editor { display: grid; gap: 10px; }
+.fres { display: grid; grid-template-columns: 52px 180px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.fres .sc { font: 600 15px var(--mono); color: var(--accent); text-align: right; }
+.fres canvas { width: 100%; height: 34px; display: block; background: var(--bg); border-radius: 3px; cursor: pointer; }
+.fres .nm { min-width: 0; font-size: 12px; } .fres .nm b { font: 600 12.5px var(--mono); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fres .nm span { color: var(--dim); font: 11px var(--mono); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+@media (max-width: 760px) { .fres { grid-template-columns: 52px minmax(0, 1fr); } }
 .measure { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
 .measure .lab { color: var(--dim); font: 10.5px var(--mono); text-transform: uppercase; width: 64px; text-align: right; margin-right: 4px; }
 .sono { width: 100%; height: 34px; display: block; image-rendering: pixelated; border-radius: 3px; background: #000; }
@@ -244,6 +250,17 @@ tr:last-child td { border-bottom: 0; }
   <fieldset data-eng="sfx music song">
     <legend>Style guides <span class="dim">· sounds.json</span></legend>
     <div class="chips" id="styleChips"></div>
+  </fieldset>
+
+  <fieldset data-eng="sfx music song">
+    <legend>Reference <span class="dim">· make it like a sound you have</span></legend>
+    <div class="drop" data-drop="ref" data-flag="--ref"><span>Start from: <b id="ref_name">drop a sound here (or 🔎 Find → Use)</b></span><button type="button" data-clear="ref">✕</button></div>
+    <label class="f" data-flag="--ref-strength">How far from it <span class="mono" id="refStrengthV"></span>
+      <input id="ref_strength" type="range" min="0.05" max="1" step="0.05" value="0.6"></label>
+    <div class="hint" style="display:flex;justify-content:space-between;margin-top:-6px"><span>close variation</span><span>loosely inspired</span></div>
+    <label class="c" data-flag="--ref-match"><input type="checkbox" id="ref_match"> use its tempo and key</label>
+    <label class="c" data-flag="--match-tone"><input type="checkbox" id="match_tone"> match its tone and loudness afterwards</label>
+    <div class="hint">Its length becomes the length unless you set Seconds. Every take keeps a copy of it.</div>
   </fieldset>
 
   <fieldset data-eng="sfx music song chip opl fx">
@@ -386,7 +403,7 @@ tr:last-child td { border-bottom: 0; }
         <label class="f">&nbsp;<span class="c" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="edMono"> mono</span></label>
       </div>
       <label class="f">Master on export <span>— neon-caster's chain: tilt toward −3 dB/octave, tame 2.5–5 kHz and sibilance, back to each sound's own loudness, never past −1 dBTP</span>
-        <select id="edMaster" style="max-width:340px"><option value="off">off (export the take as made)</option><option value="sfx">master as sound effects</option><option value="speech">master as voices (left alone unless bright)</option></select></label>
+        <select id="edMaster" style="max-width:340px"><option value="off">off (export the take as made)</option><option value="sfx">master as sound effects</option><option value="speech">master as voices (left alone unless bright)</option><option value="like">match the tone of the theme's reference sound</option></select></label>
       <div id="edVoicesWrap" hidden><div class="hint">Narration takes are voices: each line is spoken once per voice you pick here (none = the theme's voice).</div><div class="chips" id="edVoices"></div></div>
       <div><button type="button" class="render" id="edSave" style="width:auto;padding:7px 18px">Create set</button> <span class="toast" id="edToast"></span></div>
     </div>
@@ -405,6 +422,22 @@ tr:last-child td { border-bottom: 0; }
       </div>
     </div>
     <div class="cols2" id="voiceGroups"></div>
+  </section>
+
+  <section class="pane" id="p-find" hidden>
+    <div class="paneh"><h2>Find</h2><span class="dim mono" id="findCount"></span><span class="sp"></span><button type="button" id="findIndexBtn">↻ Index folders</button></div>
+    <p class="lede">Drop a sound to find the ones on your disk that sound like it: same tone colour, brightness, the way it moves, and length. Listening is done by this machine; nothing is uploaded. <b>Use</b> makes a result the reference for a new render.</p>
+    <div class="card" style="display:grid;gap:6px">
+      <label class="f">Folders to search <span>(one per line, inside your home folder; re-index after adding sounds — only new or changed files are read)</span>
+        <textarea id="findFolders" rows="3" placeholder="~/git/neon-caster/neon-caster/sfx&#10;~/Music/samples"></textarea></label>
+      <div class="hint" id="findStatus"></div>
+    </div>
+    <div class="drop" id="findDrop" style="padding:14px"><span>Sounds like: <b id="findQuery">drop a sound here, or press 🔎 on any Gallery card or Set take</b></span></div>
+    <div class="filters" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <input type="text" id="findWithin" placeholder="only inside this folder (optional)" style="flex:1 1 240px;width:auto">
+      <select id="findK" style="width:auto"><option>30</option><option>60</option><option>100</option></select>
+      <button type="button" id="findAgain">Search</button></div>
+    <div id="findResults" style="display:grid;gap:5px"></div>
   </section>
 
   <section class="pane" id="p-queue" hidden>
@@ -504,10 +537,11 @@ let META = null, eng = store.get("engine", "sfx");
 let F = store.get("form", {});                      // engine -> {field: value}
 const FIELD_IDS = ["prompt", "reprompt", "seconds", "n", "seed", "loop", "lyrics", "timesig", "lang", "bpm", "key", "scale", "chippy", "arp",
   "write_mod", "write_rad", "write_midi", "opl_lead", "opl_arp", "opl_bass", "blip_rate", "blip_pitch", "blip_jitter", "blip_duty", "blip_speed",
-  "voice", "speed", "pitch", "bits", "lufs", "name"];
-const CHIP_FIELDS = ["styles", "mood", "archetype", "fx_kind", "blip_style", "blip_wave", "format", "encode", "servers", "from_midi", "from_audio", "opl_bank"];
+  "voice", "speed", "pitch", "bits", "lufs", "name", "ref_strength", "ref_match", "match_tone"];
+const CHIP_FIELDS = ["styles", "mood", "archetype", "fx_kind", "blip_style", "blip_wave", "format", "encode", "servers", "from_midi", "from_audio", "opl_bank", "ref"];
 const DEFAULTS = { mood: "auto", archetype: "", fx_kind: "psg", blip_style: "synth", blip_wave: "square", format: "none", encode: "wav", styles: [], servers: [],
-  reprompt: true, loop: true, write_mod: true, write_rad: true, n: "1", bits: "16", lufs: "", speed: "1", pitch: "0" };
+  reprompt: true, loop: true, write_mod: true, write_rad: true, n: "1", bits: "16", lufs: "", speed: "1", pitch: "0",
+  ref: "", ref_strength: "0.6", ref_match: false, match_tone: false };
 function cur() { return F[eng] || (F[eng] = {}); }
 function val(k) { const v = cur()[k]; return v === undefined ? (DEFAULTS[k] ?? "") : v; }
 
@@ -520,6 +554,7 @@ function writeForm() {
   for (const id of FIELD_IDS) { const e = $(id); if (!e) continue; const v = val(id); if (e.type === "checkbox") e.checked = !!v; else e.value = v; }
   drawChips(); drawDrops();
   $("speedV").textContent = (+$("speed").value).toFixed(2) + "×";
+  $("refStrengthV").textContent = (+$("ref_strength").value).toFixed(2);
   $("pitchV").textContent = (+$("pitch").value > 0 ? "+" : "") + $("pitch").value + " st";
 }
 function params() {
@@ -578,7 +613,7 @@ function drawChips() {
     $(id).querySelectorAll("button").forEach(b => { b.setAttribute("aria-pressed", String(val(key) === b.dataset.v)); b.onclick = () => { cur()[key] = b.dataset.v; store.set("form", F); drawChips(); queueCommand(); }; });
 }
 function drawDrops() {
-  const lab = { from_midi: "drop a .mid here", from_audio: "drop audio here", opl_bank: "built-in (drop a .sbi)" };
+  const lab = { from_midi: "drop a .mid here", from_audio: "drop audio here", opl_bank: "built-in (drop a .sbi)", ref: "drop a sound here (or 🔎 Find → Use)" };
   for (const k of Object.keys(lab)) $(k + "_name").textContent = val(k) || lab[k];
 }
 
@@ -599,7 +634,7 @@ async function updateCommand() {
     $("cli").classList.toggle("err", !empty); $("renderBtn").disabled = true; $("renderBtn").textContent = "RENDER";
   }
 }
-$("form").addEventListener("input", e => { if (e.target.id === "speed" || e.target.id === "pitch") writeForm(); readForm(); queueCommand(); });
+$("form").addEventListener("input", e => { if (["speed", "pitch", "ref_strength"].includes(e.target.id)) { readForm(); writeForm(); } readForm(); queueCommand(); });
 $("form").addEventListener("change", () => { readForm(); queueCommand(); });
 $("renderBtn").addEventListener("click", async () => {
   const b = $("renderBtn"); b.disabled = true;
@@ -645,7 +680,7 @@ $("prompt").addEventListener("drop", async e => {                    // a .txt m
 });
 
 /* ================= tabs ================= */
-const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
+const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["find", "🔎 Find"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
 let tab = store.get("tab", "gallery");
 function showTab(t) {
   if (!TABS.some(x => x[0] === t)) t = "gallery";
@@ -657,6 +692,7 @@ function showTab(t) {
   if (t === "gallery") loadGallery();
   if (t === "sets") loadSets();
   if (t === "voices") drawVoices();
+  if (t === "find") findStatus();
   if (t === "setup") loadServers();
   if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
 }
@@ -817,6 +853,8 @@ function card(j, o) {
       el("button", { type: "button", text: "Copy CLI", onclick: e => copyText(cmd, e.target) }),
       el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
       ...(o.scores || []).map(s => el("a", { class: "b", href: fileUrl(j.dir, s, true), text: "⬇ " + s.split(".").pop(), title: "tracker / MIDI score" })),
+      el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
+      j.params.ref ? el("button", { type: "button", text: "ref ▶", title: "hear the reference this take was steered by", onclick: () => play(fileUrl(j.dir, "input-" + j.params.ref), "reference: " + j.params.ref) }) : null,
       el("button", { type: "button", text: "📂", title: "open this job's folder", onclick: () => api("/api/open", { target: { folder: true, dir: j.dir } }).catch(e => toast(e.message, true)) })));
 }
 function loadSettings(p, seed) {
@@ -946,6 +984,7 @@ function detail(r, takes) {
       el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", disabled: t.seed == null, onclick: () => renderKeys([k], { seed: t.seed }) }),
       el("button", { type: "button", text: flagged ? "Unflag" : "Flag", onclick: () => mark(k, flagged ? "unflag" : "flag", t.take) }),
       el("button", { type: "button", text: "Copy CLI", onclick: e => copyText((t.command || "") + (t.seed != null && !/--seed/.test(t.command || "") ? " --seed " + t.seed : ""), e.target) }),
+      el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this take", onclick: () => findFrom({ take: t.take }, `${k} take ${tlabel(t, i)}`) }),
       el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) })),
     el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
       try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
@@ -1126,6 +1165,62 @@ $("vGo").addEventListener("click", async () => {
   try { const r = await api("/api/voices", { line: $("vLine").value, speed: $("vSpeed").value, pitch: $("vPitch").value }); vGroup = r.group; store.set("vGroup", vGroup); drawVoices.sig = ""; toast(`Queued ${r.jobs.length} voices`); pollSoon(); }
   catch (e) { toast(e.message, true); }
 });
+
+
+/* ================= find ================= */
+let FQ = null, findPoll = 0;
+async function findStatus() {
+  try {
+    const r = await api("/api/similar/status");
+    if (!$("findFolders").dataset.touched) $("findFolders").value = (r.setup_folders.length ? r.setup_folders : r.folders).join("\n");
+    const j = r.job;
+    $("findCount").textContent = `${r.count} sound${r.count === 1 ? "" : "s"} indexed`;
+    $("findStatus").textContent = j && j.running ? `Indexing ${j.done} / ${j.total || "…"}  ${j.current}`
+      : j && j.error ? `Indexing failed: ${j.error}` : j && j.stats ? `Indexed: ${j.stats.added} new or changed, ${j.stats.kept} unchanged, ${j.stats.removed} gone, ${j.stats.failed} unreadable.`
+      : r.updated ? `Last indexed ${new Date(r.updated * 1000).toLocaleString()}.` : "Nothing indexed yet: add folders above and press ↻ Index folders.";
+    $("findIndexBtn").disabled = !!(j && j.running);
+    clearTimeout(findPoll); if (j && j.running) findPoll = setTimeout(findStatus, 1000);
+  } catch (e) { $("findStatus").textContent = e.message; }
+}
+$("findFolders").addEventListener("input", () => $("findFolders").dataset.touched = "1");
+$("findIndexBtn").addEventListener("click", async () => {
+  const folders = $("findFolders").value.split("\n").map(s => s.trim()).filter(Boolean);
+  try { await api("/api/similar/index", { folders }); delete $("findFolders").dataset.touched; findStatus(); } catch (e) { toast(e.message, true); }
+});
+function findFrom(q, label) { FQ = q; $("findQuery").textContent = label || q.input || q.path || q.take; showTab("find"); findSearch(); }
+async function findSearch() {
+  if (!FQ) return;
+  $("findResults").replaceChildren(el("div", { class: "empty", text: "Listening…" }));
+  try {
+    const r = await api("/api/similar/search", { ...FQ, within: $("findWithin").value.trim(), k: +$("findK").value });
+    if (!r.results.length) { $("findResults").replaceChildren(el("div", { class: "empty", text: "No matches in the index. Index more folders, or clear the folder filter." })); return; }
+    $("findResults").replaceChildren(...r.results.map(x => {
+      const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = el("canvas", { title: "play / stop", "data-url": url });
+      cv.addEventListener("click", () => play(url, name, cv)); io.observe(cv);
+      return el("div", { class: "fres" },
+        el("span", { class: "sc", text: x.score + "%", title: "how alike, 100 = the same" }),
+        cv,
+        el("div", { class: "nm" }, el("b", { text: name, title: x.path }), el("span", { text: x.path, title: x.path }),
+          el("div", { class: "btnrow", style: "margin-top:2px" }, el("span", { class: "dim mono", style: "font-size:11px", text: (x.seconds ?? "?") + " s" }),
+            ...x.aspects.map(a => el("span", { class: "badge ac", text: a, title: "matches in " + a })))),
+        el("div", { class: "btnrow" },
+          el("button", { type: "button", text: "Use", title: "make this the Reference for a new render", onclick: async () => {
+            try { const u = await api("/api/similar/use", { path: x.path }); readForm(); if (!["sfx", "music", "song"].includes(eng)) { eng = "sfx"; store.set("engine", eng); }
+              cur().ref = u.file; store.set("form", F); showEngine(); toast(`Reference: ${name}. Describe what to make from it and press RENDER.`); } catch (e) { toast(e.message, true); } } }),
+          el("button", { type: "button", text: "🔎", title: "find sounds like this one", onclick: () => findFrom({ path: x.path }, name) }),
+          el("button", { type: "button", text: "📂", title: "open its folder", onclick: () => api("/api/open", { target: { indexed: x.path } }).catch(e => toast(e.message, true)) }),
+          el("button", { type: "button", text: "Copy path", onclick: e => copyText(x.path, e.target) })));
+    }));
+  } catch (e) { $("findResults").replaceChildren(el("div", { class: "empty", text: e.message })); }
+}
+$("findAgain").addEventListener("click", findSearch);
+$("findK").addEventListener("change", findSearch);
+{ const d = $("findDrop");
+  d.addEventListener("dragover", e => { e.preventDefault(); d.classList.add("over"); });
+  d.addEventListener("dragleave", () => d.classList.remove("over"));
+  const go = async file => { try { const j = await upload(file); findFrom({ input: j.file }, file.name); } catch (err) { toast(err.message, true); } };
+  d.addEventListener("drop", e => { e.preventDefault(); d.classList.remove("over"); if (e.dataTransfer.files[0]) go(e.dataTransfer.files[0]); });
+  d.addEventListener("click", () => { const inp = el("input", { type: "file", accept: "audio/*" }); inp.onchange = () => inp.files[0] && go(inp.files[0]); inp.click(); }); }
 
 /* ================= presets ================= */
 let PRESETS = [];

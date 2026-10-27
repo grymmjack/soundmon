@@ -232,6 +232,15 @@ def print_help():
         f"{c['b']}{c['cyan']}MASTERING{c['rst']}  {c['dim']}(make a set of sounds sit together — no model){c['rst']}",
         opt("--master F|DIR", "master a sound or a folder into --output-to (default DIR/mastered/)"),
         opt("--master-kind K", "sfx / speech / auto (speech for voice folders)", "auto"),
+        opt("--master-like REF", "match tone + loudness to REF instead"),
+        "",
+        f"{c['b']}{c['cyan']}STEERING & FINDING{c['rst']}  {c['dim']}(make it like a sound you have, or find ones like it){c['rst']}",
+        opt("--ref FILE", "start from FILE instead of silence (SFX, --music, --song)"),
+        opt("--ref-strength N", "0.3 close variation … 0.9 loosely inspired", "0.6"),
+        opt("--ref-match", "also take its tempo and key"),
+        opt("--match-tone REF", "EQ + level each take toward REF"),
+        opt("--index DIR[,DIR]", "index folders of sounds (incremental)"),
+        opt("--similar FILE", "list indexed sounds most like FILE (-n, --in DIR)"),
         "",
         f"{c['b']}{c['cyan']}OUTPUT{c['rst']}",
         f"  {c['dim']}{OUTPUT}/soundmon/{c['rst']}",
@@ -363,11 +372,16 @@ def build_graph(a, seed, subject=None, server=None):
 
     name = slug(subject) if a.batch else (a.name or slug(subject))
     tag = f"{a.bpm}bpm" if a.song else a.format
-    prefix = f"soundmon/{name}_{a.seconds:g}s_{tag}_s{seed}"
+    steer = getattr(a, "ref_name", None)
+    prefix = f"soundmon/{name}_{a.seconds:g}s_{tag}{'_ref' if steer else ''}_s{seed}"
+    if getattr(a, "ref_tail", ""):
+        prompt = f"{prompt}, {a.ref_tail}"
 
     if a.song:
         # Different engine, same tail — _song_nodes also lands its AUDIO on "10".
         g = _song_nodes(a, seed, subject)
+        if steer:
+            _apply_ref(a, g)
         g["11"] = {"class_type": "RetroSFX",
                    "inputs": {"audio": ["10", 0], "format": a.format,
                               "trim_silence": not a.no_trim, "max_seconds": a.max_seconds,
@@ -414,6 +428,8 @@ def build_graph(a, seed, subject=None, server=None):
         if ref:
             g.update(rp)
             g["6"]["inputs"]["text"] = ref
+    if steer:
+        _apply_ref(a, g)
 
     return _attach_save(a, g, prefix)
 
@@ -435,6 +451,105 @@ def _attach_save(a, g, prefix):
                    "inputs": {"audio": ["11", 0], "filename_prefix": prefix,
                               "bit_depth": str(a.bits)}}
     return g
+
+
+# --- steering with a reference sound (--ref) -----------------------------------
+# pixelmon starts an image from your picture instead of noise ("keep composition");
+# this is the audio version. The reference is encoded by the checkpoint's own VAE and
+# sampled from at --ref-strength (KSampler denoise): 0.3 stays close, 0.9 only borrows.
+REF_CACHE = os.path.expanduser("~/.cache/soundmon/refs")
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def _ffprobe_seconds(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=30)
+        return float(r.stdout.strip())
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def prepare_ref(src, seconds):
+    """The reference as the model wants it: 44.1 kHz stereo WAV, exactly `seconds` long (trimmed, or
+    padded with silence). Cached by content + length, so a batch uploads one file."""
+    import hashlib
+    if not shutil.which("ffmpeg"):
+        sys.exit("--ref needs ffmpeg on PATH")
+    h = hashlib.sha1()
+    with open(src, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    h.update(f"{seconds:.3f}".encode())
+    os.makedirs(REF_CACHE, exist_ok=True)
+    out = os.path.join(REF_CACHE, f"soundmon_ref_{h.hexdigest()[:12]}.wav")
+    if not os.path.exists(out):
+        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-af", f"apad=whole_dur={seconds:.3f}",
+                            "-t", f"{seconds:.3f}", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", out],
+                           capture_output=True, text=True)
+        if r.returncode:
+            sys.exit(f"--ref: couldn't read {src}: {r.stderr.strip()[-300:]}")
+    return out
+
+
+def upload_ref(server, path):
+    """Put the reference in a ComfyUI box's input folder (the endpoint its own audio widget uses).
+    Top level, not a subfolder: LoadAudio only lists files directly in input/."""
+    boundary = "----soundmon" + os.urandom(8).hex()
+    name = os.path.basename(path)
+    with open(path, "rb") as f:
+        data = f.read()
+    body = b"".join([
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{name}\"\r\n"
+        f"Content-Type: audio/wav\r\n\r\n".encode(), data, b"\r\n",
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"type\"\r\n\r\ninput\r\n".encode(),
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n".encode(),
+        f"--{boundary}--\r\n".encode()])
+    req = urllib.request.Request(f"{server}/upload/image", data=body, method="POST",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        got = json.loads(r.read() or b"{}")
+    return got.get("name") or name
+
+
+def ref_summary(path):
+    """(bpm, 'D minor', seconds) of a reference, or None when it isn't musical enough to read."""
+    try:
+        import numpy as np
+        import soundfile as sf
+        sys.path.insert(0, _SCRIPT_DIR)
+        import transcribe
+        info = transcribe.analyze(path, np, sf)
+    except Exception:
+        return None
+    if not info:
+        return None
+    return int(round(info["bpm"])), f"{NOTE_NAMES[info['root'] % 12]} {info['mode']}", info["duration"]
+
+
+def _apply_ref(a, g):
+    """Swap the silent starting latent (node "9") for the encoded reference."""
+    g.pop("9", None)
+    g["30"] = {"class_type": "LoadAudio", "inputs": {"audio": a.ref_name}}
+    g["31"] = {"class_type": "VAEEncodeAudio", "inputs": {"audio": ["30", 0], "vae": ["4", 2]}}
+    g["3"]["inputs"]["latent_image"] = ["31", 0]
+    g["3"]["inputs"]["denoise"] = a.ref_strength
+    return g
+
+
+def match_tone_files(files, ref):
+    """--match-tone: EQ + level each finished file toward ref (master.match_tone), in place."""
+    sys.path.insert(0, _SCRIPT_DIR)
+    import master
+    out = []
+    for f in files:
+        try:
+            what = master.match_tone(f, f, ref)
+            print(f"   🎚 {os.path.basename(f)}: tone matched, gain {what['gain']:+.1f} dB")
+        except Exception as e:
+            print(f"   ⚠ couldn't match tone on {os.path.basename(f)}: {e}")
+        out.append(f)
+    return out
 
 
 def submit(graph, server=None):
@@ -868,6 +983,15 @@ def run_farm(a, work):
     if not ready:
         sys.exit(f"render farm: no server in the pool has {need}.")
     live = ready
+    if getattr(a, "ref_name", None):           # every box needs its own copy of the reference
+        for s in list(live):
+            try:
+                upload_ref(s, a.ref_file)
+            except Exception as e:
+                print(f"   ⚠ skipping {_short(s)}: couldn't send it the reference ({e})")
+                live.remove(s)
+        if not live:
+            sys.exit("render farm: no server accepted the reference.")
     print(f"   \U0001f69c render farm: {len(live)} GPU(s) — {', '.join(_short(s) for s in live)}")
     pending = list(work)        # (subject, seed, dest)
     inflight = {}               # server -> (subject, seed, dest, pid)
@@ -934,6 +1058,8 @@ def run_farm(a, work):
                     loop_wrap(f, a.loop_crossfade)
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
+            if getattr(a, "match_tone", None):
+                files = match_tone_files(files, a.match_tone)
             files = encode_all(files, a)
             done += 1
             fails[srv] = 0
@@ -1114,6 +1240,27 @@ def main():
                    help="master a sound or a folder of them into --output-to (default <dir>/mastered/): "
                         "tilt toward -3 dB/octave, tame 2.5-5 kHz and sibilance, back to its own loudness, "
                         "never past -1 dBTP. CPU + ffmpeg; no ComfyUI")
+    # --- find similar sounds on disk (similar.py) ---
+    p.add_argument("--index", default=None, metavar="DIR[,DIR]",
+                   help="index the sounds in these folders for --similar (incremental; ~/soundmon-gallery/similar/)")
+    p.add_argument("--similar", default=None, metavar="FILE",
+                   help="list the indexed sounds most like FILE (how alike, and in what: timbre, brightness, "
+                        "envelope, length). -n sets how many (default 20)")
+    p.add_argument("--in", dest="within", default=None, metavar="DIR", help="with --similar: only look inside DIR")
+    p.add_argument("--master-like", dest="master_like", default=None, metavar="REF",
+                   help="with --master: match each file's tone and loudness to REF instead of the standard chain")
+    # --- steering with a reference sound (the audio version of pixelmon's init image) ---
+    p.add_argument("--ref", default=None, metavar="FILE",
+                   help="start from this sound instead of silence (SFX, --music, --song): the result keeps "
+                        "its shape and rhythm, the description changes its character. Length defaults to the "
+                        "reference's")
+    p.add_argument("--ref-strength", dest="ref_strength", type=float, default=0.6, metavar="0..1",
+                   help="how far from the reference to go: 0.3 = a close variation, 0.9 = loosely inspired. default 0.6")
+    p.add_argument("--ref-match", dest="ref_match", action="store_true",
+                   help="also take the reference's tempo and key (--song sets --bpm/--key, --music adds them to the prompt)")
+    p.add_argument("--match-tone", dest="match_tone", default=None, metavar="REF",
+                   help="after rendering, EQ each take toward REF's spectrum and bring it to REF's loudness "
+                        "(never past -1 dBTP)")
     p.add_argument("--master-kind", dest="master_kind", default="auto", choices=["auto", "sfx", "speech"],
                    help="how --master treats each file: sfx (low-pass, de-ess more) or speech (left alone unless "
                         "bright). auto = speech for speech/ narration/ voice/ folders, else sfx")
@@ -1259,7 +1406,7 @@ def main():
                        and not a.blip_file and not a.chip and not a.opl
                        and not a.from_midi
                        and not a.chipfx and not a.oplfx and not a.list_moods
-                       and not a.list_devices and not a.master):
+                       and not a.list_devices and not a.master and not a.index and not a.similar):
         print_help()
         return
     if a.list_moods:
@@ -1358,6 +1505,12 @@ def main():
     # Recording is its own pipeline too — a terminal booth around a microphone,
     # no model of any kind. It shares --narrate's manifest parser and the whole
     # output tail, so a hand-voiced pack and a generated one are interchangeable.
+    # Similarity search reads files that already exist — no model, no server.
+    if a.index or a.similar:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import similar
+        similar.run(a)
+        return
     # Mastering works on files that already exist — no model, no server.
     if a.master:
         sys.path.insert(0, _SCRIPT_DIR)
@@ -1422,11 +1575,46 @@ def main():
     if a.format not in FORMATS:
         p.error(f"unknown format {a.format!r}. See --list-formats.")
 
+    # --ref / --match-tone: steering with a reference sound. Read it now (its length decides
+    # --seconds unless given); it is trimmed/padded and uploaded once the length is final.
+    def _given(flag):
+        return any(x == flag or x.startswith(flag + "=") for x in sys.argv)
+    a.ref_name, a.ref_file, a.ref_tail = None, None, ""
+    if a.match_tone:
+        a.match_tone = os.path.expanduser(a.match_tone)
+        if not os.path.isfile(a.match_tone):
+            p.error(f"--match-tone: no such file: {a.match_tone}")
+    if a.ref:
+        a.ref = os.path.expanduser(a.ref)
+        if not os.path.isfile(a.ref):
+            p.error(f"--ref: no such file: {a.ref}")
+        if not 0.05 <= a.ref_strength <= 1.0:
+            p.error("--ref-strength must be between 0.05 and 1")
+        cap = 1000.0 if a.song else (120.0 if a.engine == "sa3" else 47.0)
+        if not _given("--seconds"):
+            dur = _ffprobe_seconds(a.ref)
+            if dur:
+                a.seconds = round(min(cap, max(0.5, dur)), 2)
+        if a.ref_match:
+            got = ref_summary(a.ref)
+            if got:
+                bpm, key, _dur = got
+                if a.song:
+                    if not _given("--bpm"):
+                        a.bpm = bpm
+                    if not _given("--key") and key in KEYS:
+                        a.key = key
+                elif a.music:
+                    a.ref_tail = f"{bpm} BPM, in {key}"
+                print(f"   🎯 from the reference: {bpm} BPM, {key}, {a.seconds:g}s")
+            else:
+                print("   ⚠ --ref-match: no steady tempo or key in the reference; only its length is used")
+
     # --song is a different model with a very different length range: Stable
     # Audio tops out at 47s, ACE-Step goes to 1000s (~16 min). The default
     # differs too — 10s is right for an SFX, absurd for a song.
     if a.song:
-        if a.seconds == 10.0:              # untouched SFX default -> song default
+        if a.seconds == 10.0 and not a.ref:  # untouched SFX default -> song default
             a.seconds = 120.0
         if a.seconds <= 0 or a.seconds > 1000:
             p.error("--song --seconds must be between 0 and 1000")
@@ -1517,6 +1705,10 @@ def main():
             print(f"   ℹ --loop ignored: {mode} already loops by construction")
             a.loop = False
 
+    if a.ref:                              # the length is final now
+        a.ref_file = prepare_ref(a.ref, a.seconds)
+        a.ref_name = os.path.basename(a.ref_file)
+
     n = max(1, a.number)
     subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
     base = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
@@ -1564,6 +1756,11 @@ def main():
         eng = "SA3" if a.engine == "sa3" else "SAO1"
         print(f"🔊 {subj_label}  |  {a.seconds:g}s  |  {fmt_label}{style_label}  |  "
               f"{eng} {'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
+    if a.ref:
+        print(f"   🎯 steering with {os.path.basename(a.ref)} at strength {a.ref_strength:g}"
+              f"  (0.3 close · 0.9 loose)")
+    if a.match_tone:
+        print(f"   🎚 matching tone to {os.path.basename(a.match_tone)}")
     if total > 1:
         eta = total * per
         tip = "" if a.fast else "  (tip: add --fast for quick variations)"
@@ -1588,6 +1785,12 @@ def main():
             sys.exit(f"{_short(SERVER)} doesn't have {need}\n"
                      f"  provision it:  ./download-models.sh"
                      f"{' --song' if a.song else (' --sa3' if a.engine == 'sa3' else '')}")
+
+    if a.ref_name and len(POOL) <= 1:
+        try:
+            upload_ref(SERVER, a.ref_file)
+        except Exception as e:
+            sys.exit(f"couldn't send the reference to {_short(SERVER)}: {e}")
 
     t0 = time.time()
     first_open = None
@@ -1625,6 +1828,8 @@ def main():
                               f"({sec:.1f}s, {a.loop_crossfade:g}s crossfade)")
             if a.lufs_target is not None:
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
+            if a.match_tone:
+                files = match_tone_files(files, a.match_tone)
             files = encode_all(files, a)
             clip = files[0] if files else None
             first_open = first_open or clip
