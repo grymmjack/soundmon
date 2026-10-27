@@ -229,6 +229,10 @@ def print_help():
         opt("--list-voices", "show every TTS voice"),
         opt("--list-devices", "show every microphone this machine can see"),
         "",
+        f"{c['b']}{c['cyan']}MASTERING{c['rst']}  {c['dim']}(make a set of sounds sit together — no model){c['rst']}",
+        opt("--master F|DIR", "master a sound or a folder into --output-to (default DIR/mastered/)"),
+        opt("--master-kind K", "sfx / speech / auto (speech for voice folders)", "auto"),
+        "",
         f"{c['b']}{c['cyan']}OUTPUT{c['rst']}",
         f"  {c['dim']}{OUTPUT}/soundmon/{c['rst']}",
         f"  {c['dim']}44.1 kHz stereo WAV, trimmed and normalized{c['rst']}",
@@ -1105,6 +1109,14 @@ def main():
                    help="list microphones this machine can record from, and exit")
     p.add_argument("--record-rate", dest="record_rate", type=int, default=48000,
                    metavar="N", help="capture sample rate (--record). default 48000")
+    # --- mastering: neon-caster's chain, so a set of sounds sits together (master.py) ---
+    p.add_argument("--master", default=None, metavar="FILE|DIR",
+                   help="master a sound or a folder of them into --output-to (default <dir>/mastered/): "
+                        "tilt toward -3 dB/octave, tame 2.5-5 kHz and sibilance, back to its own loudness, "
+                        "never past -1 dBTP. CPU + ffmpeg; no ComfyUI")
+    p.add_argument("--master-kind", dest="master_kind", default="auto", choices=["auto", "sfx", "speech"],
+                   help="how --master treats each file: sfx (low-pass, de-ess more) or speech (left alone unless "
+                        "bright). auto = speech for speech/ narration/ voice/ folders, else sfx")
     # --- song mode (ACE-Step 1.5): full songs with vocals, lyrics, BPM, key ---
     p.add_argument("--song", action="store_true",
                    help="FULL SONG mode via ACE-Step 1.5 — real vocals and lyrics. "
@@ -1247,7 +1259,7 @@ def main():
                        and not a.blip_file and not a.chip and not a.opl
                        and not a.from_midi
                        and not a.chipfx and not a.oplfx and not a.list_moods
-                       and not a.list_devices):
+                       and not a.list_devices and not a.master):
         print_help()
         return
     if a.list_moods:
@@ -1346,6 +1358,12 @@ def main():
     # Recording is its own pipeline too — a terminal booth around a microphone,
     # no model of any kind. It shares --narrate's manifest parser and the whole
     # output tail, so a hand-voiced pack and a generated one are interchangeable.
+    # Mastering works on files that already exist — no model, no server.
+    if a.master:
+        sys.path.insert(0, _SCRIPT_DIR)
+        import master
+        master.run(a, slug, to_ogg, loudness_normalize, to_flac)
+        return
     if a.record or a.record_file:
         sys.path.insert(0, _SCRIPT_DIR)
         import record

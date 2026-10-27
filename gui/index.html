@@ -194,6 +194,9 @@ tr:last-child td { border-bottom: 0; }
 .keys { font: 11px var(--mono); color: var(--dim); }
 .keys kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; color: var(--text); }
 .editor { display: grid; gap: 10px; }
+.measure { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
+.measure .lab { color: var(--dim); font: 10.5px var(--mono); text-transform: uppercase; width: 64px; text-align: right; margin-right: 4px; }
+.sono { width: 100%; height: 34px; display: block; image-rendering: pixelated; border-radius: 3px; background: #000; }
 .editor textarea { font: 12.5px/1.5 var(--mono); }
 @media (max-width: 760px) { .krow { grid-template-columns: 1fr; } .krow .k, .kact { grid-row: auto; grid-column: 1; justify-self: start; } .detail { grid-template-columns: 1fr; } }
 
@@ -382,6 +385,8 @@ tr:last-child td { border-bottom: 0; }
         <label class="f">Export rate <span>(blank = as made)</span><input id="edRate" type="number" placeholder="as made"></label>
         <label class="f">&nbsp;<span class="c" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="edMono"> mono</span></label>
       </div>
+      <label class="f">Master on export <span>— neon-caster's chain: tilt toward −3 dB/octave, tame 2.5–5 kHz and sibilance, back to each sound's own loudness, never past −1 dBTP</span>
+        <select id="edMaster" style="max-width:340px"><option value="off">off (export the take as made)</option><option value="sfx">master as sound effects</option><option value="speech">master as voices (left alone unless bright)</option></select></label>
       <div id="edVoicesWrap" hidden><div class="hint">Narration takes are voices: each line is spoken once per voice you pick here (none = the theme's voice).</div><div class="chips" id="edVoices"></div></div>
       <div><button type="button" class="render" id="edSave" style="width:auto;padding:7px 18px">Create set</button> <span class="toast" id="edToast"></span></div>
     </div>
@@ -843,7 +848,7 @@ async function loadSets(keepSel) {
 async function loadSet(keepSel) {
   SET = await api("/api/set?id=" + encodeURIComponent(setId));
   SET_CMD = await themeText({ engine: SET.set.theme.engine, params: SET.set.theme.params }, SET.set.theme.takes);
-  store.set("set", setId);
+  store.set("set", setId); setSig = setJobSig();
   if (!keepSel || !SET.set.rows.some(r => r.key === selKey)) selKey = (SET.set.rows.find(r => !SET.set.picks[r.key]) || SET.set.rows[0] || {}).key;
   drawSet();
 }
@@ -867,7 +872,7 @@ function drawSet() {
     + (busy ? `<span class="pill ok"><b>${busy}</b> rendering</span>` : "") + (Object.keys(S.flags).length ? `<span class="pill bad"><b>${Object.keys(S.flags).length}</b> flagged</span>` : "")
     + (two ? `<span class="pill warn"><b>${two}</b> in two formats in the game</span>` : "") });
   const ex = T.export, th = [["Engine", `${E.icon || ""} ${E.name || T.engine}`], ["Takes per key", T.engine === "narrate" && T.voices.length ? T.voices.join(", ") : T.takes],
-    ["Game folder", T.game_folder || "— none (set one to export)"], ["Exports as", `<key>.${ex.encode === "same" ? "<as made>" : ex.encode}${ex.rate ? " · " + ex.rate + " Hz" : ""}${ex.mono ? " · mono" : ""}`],
+    ["Game folder", T.game_folder || "— none (set one to export)"], ["Exports as", `<key>.${ex.encode === "same" ? "<as made>" : ex.encode}${ex.rate ? " · " + ex.rate + " Hz" : ""}${ex.mono ? " · mono" : ""}${ex.master && ex.master !== "off" ? " · mastered (" + ex.master + ")" : ""}`],
     ["Theme command", SET_CMD || "…"]];
   const theme = el("div", { class: "card theme" }, ...th.map(([a, b]) => el("div", {}, el("span", { text: a }), el("code", { text: String(b) }))));
   const F = [["all", "All"], ["topick", "To pick"], ["picked", "Picked"], ["missing", "Without takes"], ["flagged", "Flagged"]];
@@ -944,7 +949,48 @@ function detail(r, takes) {
       el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) })),
     el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
       try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
+  const kind = S.theme.export.master && S.theme.export.master !== "off" ? S.theme.export.master : S.theme.engine === "narrate" ? "speech" : "sfx";
+  const mTake = el("div", { class: "measure" }, el("span", { class: "lab", text: "take" }), el("span", { class: "dim", text: "measuring…" }));
+  const mNow = hasNow ? el("div", { class: "measure" }, el("span", { class: "lab", text: "now" }), el("span", { class: "dim", text: "measuring…" })) : null;
+  const mMst = el("div", { class: "measure", hidden: true }, el("span", { class: "lab", text: "mastered" }));
+  const sono = el("canvas", { class: "sono", title: "sonogram: time across, 63 Hz – 16 kHz up, inferno heat" });
+  const sonoM = el("canvas", { class: "sono", hidden: true, title: "the same sound, mastered" });
+  left.append(mTake, sono, mNow, mMst, sonoM);
+  measure("/api/analyse?take=" + encodeURIComponent(t.take), mTake, sono);
+  if (hasNow) measure(`/api/analyse?set=${encodeURIComponent(setId)}&key=${encodeURIComponent(k)}`, mNow);
+  const showMst = r => { mMst.hidden = false; sonoM.hidden = false; fillMeasure(mMst, r.analysis); drawSono(sonoM, r.analysis.sonogram); };
+  const done = MST.get(t.take + "|" + kind);                // survives the row being redrawn
+  if (done) showMst(done);
+  rc.querySelector(".btnrow").append(el("button", { type: "button", text: "▶ Mastered", title: `hear this take through the mastering chain (${kind})`, onclick: async e => {
+    const b = e.target; b.disabled = true; b.textContent = "mastering…";
+    try { const r = await api("/api/master", { take: t.take, kind }); MST.set(t.take + "|" + kind, r); play(r.url, `${k} · take ${tlabel(t, i)} · mastered (${kind})`); showMst(r); }
+    catch (err) { toast(err.message, true); } finally { b.disabled = false; b.textContent = "▶ Mastered"; } } }));
   return el("div", { class: "detail" }, left, rc);
+}
+const MEAS = new Map(), MST = new Map();
+async function measure(url, host, cv) {
+  try { let a = MEAS.get(url); if (!a) { a = (await api(url)).analysis; MEAS.set(url, a); } fillMeasure(host, a); if (cv) drawSono(cv, a.sonogram); }
+  catch (e) { host.lastChild.textContent = e.message; if (cv) cv.hidden = true; }
+}
+function fillMeasure(host, a) {
+  const lab = host.firstChild, hot = a.harsh > 0.5 && a.harsh_s > 0.3;
+  host.replaceChildren(lab,
+    el("span", { class: "badge ac", text: `${a.lufs} LUFS`, title: "its loudest 400 ms" }),
+    el("span", { class: "badge" + (a.true_peak > -1 ? " warn" : ""), text: `${a.true_peak} dBTP`, title: "true peak" }),
+    el("span", { class: "badge" + (a.harsh > 0.5 ? " warn" : ""), text: `${Math.round(a.harsh * 100)}% above 2.5 kHz`, title: "the grating range: presence + sibilance + air" }),
+    el("span", { class: "badge" + (a.harsh_s > 0.3 ? " warn" : ""), text: `harsh ${a.harsh_s} s`, title: "time spent mostly above 2.5 kHz while loud" }),
+    el("span", { class: "badge", text: `tilt ${a.tilt > 0 ? "+" : ""}${a.tilt} dB/oct`, title: "a comfortable mix slopes down: −3 dB/octave" }),
+    ...(hot ? [el("span", { class: "badge bad", text: "bright + long" })] : []));
+}
+const INFERNO = [[0, 0, 4], [31, 12, 72], [85, 15, 109], [136, 34, 106], [186, 54, 85], [227, 89, 51], [249, 140, 10], [249, 201, 50], [252, 255, 164]];
+function drawSono(cv, s) {
+  if (!s || !s.cols) { cv.hidden = true; return; }
+  cv.width = s.cols; cv.height = s.rows; const g = cv.getContext("2d"), img = g.createImageData(s.cols, s.rows);
+  for (let c = 0; c < s.cols; c++) for (let r = 0; r < s.rows; r++) {
+    const v = s.data[c * s.rows + r] / 255, x = v * (INFERNO.length - 1), i = Math.min(INFERNO.length - 2, Math.floor(x)), f = x - i, A = INFERNO[i], B = INFERNO[i + 1];
+    const o = ((s.rows - 1 - r) * s.cols + c) * 4; img.data[o] = A[0] + (B[0] - A[0]) * f; img.data[o + 1] = A[1] + (B[1] - A[1]) * f; img.data[o + 2] = A[2] + (B[2] - A[2]) * f; img.data[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
 }
 function select(k, quiet) { if (selKey !== k) { selKey = k; drawRows(); } }
 function hear(k, i) {
@@ -985,7 +1031,7 @@ function exportBar() {
       el("button", { type: "button", text: "Preview", disabled: !T.game_folder || !picks, onclick: async () => {
         try { const r = await api("/api/sets/export", { id: setId, preview: true }); plan.hidden = false;
           plan.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Key</th><th>Becomes</th><th>Change</th><th>Also in the game</th></tr></thead><tbody>${r.plan.map(p =>
-            `<tr><td class="mono">${esc(p.key)}</td><td class="mono">${esc(p.to)}</td><td>${p.unchanged ? '<span class="dim">already exported</span>' : p.replaces ? '<span class="badge warn">replaces (backed up)</span>' : '<span class="badge ok">new file</span>'}${p.convert ? ' <span class="badge">converted</span>' : ""}</td><td class="mono" style="color:var(--warn)">${esc(p.other_formats.join(", "))}</td></tr>`).join("")}</tbody></table></div>`;
+            `<tr><td class="mono">${esc(p.key)}</td><td class="mono">${esc(p.to)}</td><td>${p.unchanged ? '<span class="dim">already exported</span>' : p.replaces ? '<span class="badge warn">replaces (backed up)</span>' : '<span class="badge ok">new file</span>'}${p.convert ? ' <span class="badge">converted</span>' : ""}${p.master && p.master !== "off" ? ' <span class="badge ac">mastered</span>' : ""}</td><td class="mono" style="color:var(--warn)">${esc(p.other_formats.join(", "))}</td></tr>`).join("")}</tbody></table></div>`;
         } catch (e) { toast(e.message, true); } } }),
       el("button", { type: "button", class: "go", text: "Export picks", disabled: !T.game_folder || !picks, onclick: async e => {
         e.target.disabled = true;
@@ -1021,6 +1067,7 @@ function openEditor(isNew) {
     return r.seconds != null ? `${r.key} | ${r.seconds}${ex.loop ? "s loop" : ""} | ${r.prompt}` : `${r.key} | ${r.prompt}`;
   }).reduce((a, line, i) => { const g = S.rows[i].group, prev = i ? S.rows[i - 1].group : null; if (g && g !== prev && !S.rows[i].key.startsWith(g + ".") && !S.rows[i].key.startsWith(g + "/")) a.push(`[${g}]`); a.push(line); return a; }, []).join("\n") : "";
   $("edTakes").value = S ? S.theme.takes : (eng === "narrate" ? 1 : 10);
+  $("edMaster").value = S ? (S.theme.export.master || "off") : "off";
   $("edEnc").value = S ? S.theme.export.encode : "wav"; $("edRate").value = S && S.theme.export.rate ? S.theme.export.rate : ""; $("edMono").checked = S ? S.theme.export.mono : false;
   ED = S ? { engine: S.theme.engine, params: S.theme.params, voices: S.theme.voices || [] } : { ...themeFromForm(), voices: [] };
   showTheme();
@@ -1040,7 +1087,7 @@ $("edManifest").addEventListener("drop", async e => {
 $("edSave").addEventListener("click", async () => {
   const S = $("edSave").textContent.startsWith("Save") && SET ? SET.set : null;
   const theme = { engine: ED.engine, params: ED.params, voices: ED.voices, takes: +$("edTakes").value || 1, game_folder: $("edFolder").value.trim(),
-    export: { encode: $("edEnc").value, rate: +$("edRate").value || 0, mono: $("edMono").checked } };
+    export: { encode: $("edEnc").value, rate: +$("edRate").value || 0, mono: $("edMono").checked, master: $("edMaster").value } };
   try {
     const r = S ? await api("/api/sets/update", { id: S.id, name: $("edName").value, theme, manifest: $("edManifest").value })
                 : await api("/api/sets/create", { name: $("edName").value, theme, manifest: $("edManifest").value });

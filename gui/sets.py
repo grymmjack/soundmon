@@ -178,8 +178,11 @@ class Sets:
         if rate and not 4000 <= rate <= 192000:
             raise ValueError("export sample rate must be 4000..192000 Hz (or blank)")
         voices = [v for v in (t.get("voices") or []) if v][:12]
+        mst = ex.get("master") or "off"
+        if mst not in ("off", "sfx", "speech"):
+            raise ValueError("master on export: off, sfx or speech")
         return {"engine": eng, "params": params, "takes": takes, "game_folder": folder, "voices": voices,
-                "export": {"encode": enc, "rate": rate, "mono": bool(ex.get("mono"))}}
+                "export": {"encode": enc, "rate": rate, "mono": bool(ex.get("mono")), "master": mst}}
 
     def update(self, body, validate):
         with LOCK:
@@ -348,12 +351,16 @@ class Sets:
                 raise ValueError(f"key {k!r} points outside the game folder")
             others = [f for f in now.get(k, []) if f != rel]
             done = s["exported"].get(k)
+            mst = ex.get("master") or "off"
             plan.append({"key": k, "from": pick, "to": rel, "replaces": os.path.exists(dest), "other_formats": others,
                          "convert": ext != os.path.splitext(src)[1].lower() or bool(ex["rate"]) or ex["mono"],
-                         "unchanged": bool(done and done.get("from") == pick and os.path.exists(dest))})
+                         "master": mst,
+                         "unchanged": bool(done and done.get("from") == pick and (done.get("master") or "off") == mst
+                                           and done.get("path") == rel and os.path.exists(dest))})
         return plan
 
-    def export(self, s, only_changed=True):
+    def export(self, s, only_changed=True, master=None):
+        """master: the master.master function (soundmon's mastering chain), needed when the theme masters."""
         d, ex = self.game_dir(s), s["theme"]["export"]
         plan = self.export_plan(s)
         backup = os.path.join(d, ".soundmon-backup", time.strftime("%Y-%m-%d_%H%M%S"))
@@ -368,8 +375,15 @@ class Sets:
                     b = os.path.join(backup, item["to"])
                     os.makedirs(os.path.dirname(b), exist_ok=True)
                     shutil.copy2(dest, b)
+                if item["master"] != "off":           # neon-caster's chain, then the format the game wants
+                    if master is None:
+                        raise RuntimeError("mastering isn't available (master.py didn't load)")
+                    mst = os.path.join(os.path.dirname(src), "_mastered", item["master"], os.path.splitext(os.path.basename(src))[0] + ".wav")
+                    if not os.path.exists(mst) or os.path.getmtime(mst) < os.path.getmtime(src):
+                        master(src, mst, item["master"])
+                    src = mst
                 convert(src, dest, ex)
-                s["exported"][item["key"]] = {"at": time.time(), "path": item["to"], "from": item["from"]}
+                s["exported"][item["key"]] = {"at": time.time(), "path": item["to"], "from": item["from"], "master": item["master"]}
                 done.append(item)
             except Exception as e:
                 errors.append({"key": item["key"], "error": str(e)[:300]})
@@ -389,24 +403,47 @@ def convert(src, dest, ex):
         return
     if not shutil.which("ffmpeg"):
         raise RuntimeError("converting needs ffmpeg on PATH")
+    opts = (["-ar", str(ex["rate"])] if ex.get("rate") else []) + (["-ac", "1"] if ex.get("mono") else [])
     tmp = dest + ".part" + d_ext
-    args = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src, "-map_metadata", "-1"]
-    if ex.get("rate"):
-        args += ["-ar", str(ex["rate"])]
-    if ex.get("mono"):
-        args += ["-ac", "1"]
-    codec = {".wav": ["-c:a", "pcm_s16le"], ".flac": ["-c:a", "flac"], ".ogg": ["-c:a", "libvorbis", "-q:a", "6"]}.get(d_ext, [])
-    r = subprocess.run(args + codec + [tmp], capture_output=True, text=True)
-    if r.returncode and d_ext == ".ogg" and shutil.which("oggenc"):
-        # some ffmpeg builds have no libvorbis (qb64-dungeon's NIGHT-NOTES): decode, then oggenc
-        wav = dest + ".part.wav"
-        r = subprocess.run(args + ["-c:a", "pcm_s16le", wav], capture_output=True, text=True)
-        if not r.returncode:
-            r = subprocess.run(["oggenc", "-Q", "-q", "6", "-o", tmp, wav], capture_output=True, text=True)
-        if os.path.exists(wav):
-            os.remove(wav)
+    r = _encode(src, tmp, d_ext, opts)
     if r.returncode or not os.path.exists(tmp):
         if os.path.exists(tmp):
             os.remove(tmp)
         raise RuntimeError("ffmpeg: " + (r.stderr or "conversion failed").strip()[-200:])
+    if d_ext == ".ogg":
+        # A lossy encode rebuilds the waveform, and its inter-sample peaks can land above a WAV that was
+        # under -1 dBTP (a mastered take came back at -0.5). Measure the OGG itself; if it's over, encode
+        # again that much quieter — the same guard as soundmon's --true-peak.
+        tp = true_peak(tmp)
+        if tp is not None and tp > -1.0:
+            again = dest + ".part2" + d_ext
+            r = _encode(src, again, d_ext, opts + ["-af", "volume=%.2fdB" % (-1.0 - tp - 0.2)])
+            if not r.returncode and os.path.exists(again):
+                os.replace(again, tmp)
+            elif os.path.exists(again):
+                os.remove(again)
     os.replace(tmp, dest)
+
+
+def _encode(src, out, ext, opts):
+    """ffmpeg src -> out in ext's codec; OGG falls back to oggenc when ffmpeg has no libvorbis
+    (qb64-dungeon's NIGHT-NOTES)."""
+    base = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src, "-map_metadata", "-1"] + opts
+    codec = {".wav": ["-c:a", "pcm_s16le"], ".flac": ["-c:a", "flac"], ".ogg": ["-c:a", "libvorbis", "-q:a", "6"]}.get(ext, [])
+    r = subprocess.run(base + codec + [out], capture_output=True, text=True)
+    if r.returncode and ext == ".ogg" and shutil.which("oggenc"):
+        wav = out + ".wav"
+        r = subprocess.run(base + ["-c:a", "pcm_s16le", wav], capture_output=True, text=True)
+        if not r.returncode:
+            r = subprocess.run(["oggenc", "-Q", "-q", "6", "-o", out, wav], capture_output=True, text=True)
+        if os.path.exists(wav):
+            os.remove(wav)
+    return r
+
+
+def true_peak(path):
+    """A file's true peak in dBTP (ffmpeg's EBU R128 scanner), or None."""
+    r = subprocess.run(["ffmpeg", "-nostdin", "-i", path, "-af", "ebur128=peak=true", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = re.findall(r"Peak:\s*(-?[\d.]+) dBFS", r.stderr)
+    return float(m[-1]) if m else None

@@ -992,6 +992,29 @@ def delete_preset(name):
     return list_presets()
 
 
+def mastering():
+    """soundmon's master.py (neon-caster's chain), loaded fresh; ValueError when numpy / ffmpeg are missing."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        raise LookupError("measuring and mastering need numpy — run soundmon-gui with ComfyUI's venv")
+    if not shutil.which("ffmpeg"):
+        raise LookupError("measuring and mastering need ffmpeg on PATH")
+    return load_module("master")
+
+
+def analysis(path, cache_dir):
+    """master.analyse() of one file, cached beside it (keyed by the file's mtime)."""
+    os.makedirs(cache_dir, exist_ok=True)
+    cf = os.path.join(cache_dir, os.path.basename(path) + ".json")
+    hit = _read_json(cf, None)
+    if hit and hit.get("mtime") == os.path.getmtime(path):
+        return hit["a"]
+    a = mastering().analyse(path, sonogram=True)
+    _write_json(cf, {"mtime": os.path.getmtime(path), "a": a})
+    return a
+
+
 def gallery_items(gallery, limit=400):
     items = []
     for jf in sorted(glob.glob(os.path.join(gallery, "*", "job.json")), reverse=True)[:limit]:
@@ -1125,6 +1148,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "pending": self.sets.pending(s["id"], self.jobs.snapshot())})
             except ValueError as e:
                 return self._json({"error": str(e)}, 404 if u.path == "/api/set/now" else 400)
+        if u.path == "/api/analyse":
+            # measure a take (?take=<job>/<file>) or the game's current file (?set=&key=): loudness, tilt,
+            # energy above 2.5 kHz, harsh seconds, sonogram — neon-caster's Sound Audit numbers
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                if q.get("take"):
+                    path = self.sets.take_path(q["take"][0])
+                    cache = os.path.join(os.path.dirname(path), "_analysis")
+                else:
+                    s = self.sets.load(q.get("set", [""])[0])
+                    path = self.sets.now_path(s, q.get("key", [""])[0])
+                    cache = os.path.join(SETS_ROOT, s["id"], "_analysis")
+                return self._json({"analysis": analysis(path, cache)})
+            except LookupError as e:
+                return self._json({"error": str(e)}, 501)
+            except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as e:
+                return self._json({"error": str(e)}, 400)
         if u.path.startswith("/files/"):
             rel = urllib.parse.unquote(u.path[len("/files/"):])
             full = os.path.realpath(os.path.join(self.gallery, rel))
@@ -1184,6 +1224,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ids = [self.jobs.add({"engine": "narrate", "prompt": line, "voice": v, "name": v, "speed": body.get("speed"),
                                       "pitch": body.get("pitch")}, group=group, label=v)["id"] for v in voices]
                 return self._json({"group": group, "jobs": ids})
+            if u.path == "/api/master":
+                # hear a take mastered before exporting it: writes <job>/_mastered/<kind>/<take>.wav (cached)
+                kind = body.get("kind") or "sfx"
+                src = self.sets.take_path(body.get("take"))
+                rel = os.path.relpath(src, self.gallery)
+                job_dir = rel.split(os.sep)[0]
+                dst = os.path.join(self.gallery, job_dir, "_mastered", safe_name(kind, 10),
+                                   os.path.splitext(os.path.basename(src))[0] + ".wav")
+                try:
+                    m = mastering()
+                    if kind not in m.KINDS:
+                        raise ValueError("kind must be sfx or speech")
+                    if not os.path.exists(dst) or os.path.getmtime(dst) < os.path.getmtime(src):
+                        m.master(src, dst, kind, analysis(src, os.path.join(os.path.dirname(src), "_analysis")))
+                    after = analysis(dst, os.path.join(os.path.dirname(dst), "_analysis"))
+                except LookupError as e:
+                    return self._json({"error": str(e)}, 501)
+                return self._json({"url": "/files/" + urllib.parse.quote(os.path.relpath(dst, self.gallery)), "analysis": after})
             if u.path.startswith("/api/sets/"):
                 return self._json(self._sets_post(u.path.rsplit("/", 1)[-1], body))
             if u.path == "/api/open":
@@ -1246,7 +1304,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s = self.sets.load(body.get("id"))
             if body.get("preview"):
                 return {"plan": self.sets.export_plan(s), "folder": self.sets.game_dir(s)}
-            return self.sets.export(s, only_changed=not body.get("all"))
+            mfn = None
+            if (s["theme"]["export"].get("master") or "off") != "off":
+                try:
+                    mfn = mastering().master
+                except LookupError as e:
+                    raise ValueError(str(e))
+            return self.sets.export(s, only_changed=not body.get("all"), master=mfn)
         raise ValueError(f"unknown sets action {act!r}")
 
     def _upload(self, q):
