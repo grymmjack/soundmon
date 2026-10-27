@@ -699,6 +699,46 @@ Per-platform notes from provisioning a real mixed fleet:
 
 ---
 
+## GUI (`soundmon-gui`)
+
+The same tool in a browser, built like pixelmon-gui (same layout, same look, and both
+can run at once):
+
+```bash
+soundmon-gui                 # http://127.0.0.1:8191
+soundmon-gui --lan           # reachable from other devices on the LAN
+soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick, else servers.json "_default")
+```
+
+- **Every engine on one form.** Nine engine buttons at the top (SFX, Music loop, Song,
+  Chiptune, AdLib, Retro FX, Blips, Narrate); only that engine's settings show. Style
+  guides, moods, archetypes, voices, keys and hardware formats are read live from
+  `sounds.json`, `chip.py`, `chipfx.py`, `opl.py`, `narrate.py` and the node, so the GUI
+  never offers something soundmon doesn't have. Hovering a field shows the flag's own
+  `--help` text.
+- **The command is always visible.** Under RENDER is the exact `soundmon …` command the
+  server will run (the server builds it, so the preview can't drift). COPY CLI takes it
+  to a terminal.
+- **Queue** shows each job's progress (`✅ [i/n]` lines), log and errors. When ComfyUI
+  fails a job, the job fails in seconds with the node's own message.
+  **⛔ CANCEL AND ABORT** in the status bar stops everything and empties the render
+  server's queue.
+- **Gallery** keeps every take with its waveform, seed, rating and the files beside it
+  (`.mod`, `.rad`, `.mid`). **Load** puts a take's settings back in the form; **Again**
+  renders that exact take again (same seed). Each job lives in
+  `~/soundmon-gallery/gui/<job>/` with a `job.json` recording the settings, the command
+  and every seed, so nothing depends on ComfyUI's history.
+- **Advanced** exposes the rest (sampler, reprompt, ACE-Step's LLM, trim/normalize/fade,
+  OGG quality, MIDI start). Blank means soundmon's own default.
+- **Setup** lists every `servers.json` box with its state and whether it has the models
+  each engine needs (SA3 medium, ACE-Step, T5Gemma, Qwen), and picks where GPU renders go.
+
+Drop a `.mid` or a recording on the Chiptune / AdLib form to have it followed
+(`--from-midi`, `--from-audio`), or a `.txt` of `key | text` lines on the Blips / Narrate
+text box to make one file per line.
+
+---
+
 ## How it works
 
 ```
@@ -862,6 +902,10 @@ soundmon/
 ├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI
 ├── servers.example.json       template for --server aliases (copy to servers.json)
 ├── bin/soundmon               wrapper: ensures the server is up, then runs soundmon.py
+├── bin/soundmon-gui           the web front end (gui/server.py on port 8191)
+├── gui/
+│   ├── server.py              stdlib server: job queue, gallery, setup — runs bin/soundmon
+│   └── index.html             the page (no build step, no CDN)
 ├── tools/
 │   ├── spectral-check.py      measure spectral cutoff — catches hollow output
 │   ├── stems.py               a finished track → stems, loops, one-shots, FX (INFINITE-SAMPLES.md)

@@ -55,10 +55,11 @@ fi
 # 2. Link our files into place (this repo stays the source of truth)
 link() { ln -sfn "$1" "$2"; echo "   linked $2 -> $1"; }
 mkdir -p "$HOME/.local/bin" "$COMFY/custom_nodes"
-chmod +x "$REPO/bin/soundmon" "$REPO/download-models.sh"
+chmod +x "$REPO/bin/soundmon" "$REPO/bin/soundmon-gui" "$REPO/download-models.sh"
 link "$REPO/soundmon.py"               "$COMFY/soundmon.py"
 link "$REPO/custom_nodes/retro_sfx"    "$COMFY/custom_nodes/retro_sfx"
 link "$REPO/bin/soundmon"              "$HOME/.local/bin/soundmon"
+link "$REPO/bin/soundmon-gui"          "$HOME/.local/bin/soundmon-gui"
 
 # 3. Reuse pixelmon's server aliases if you have them and haven't made your own.
 if [ ! -f "$REPO/servers.json" ] && [ -f "$HOME/pixelmon/servers.json" ]; then
@@ -79,6 +80,7 @@ cat <<EOF
    1) ./download-models.sh        # ~5.3 GB (Stable Audio Open 1.0 + T5)
    2) restart ComfyUI so it picks up the retro_sfx node
    3) soundmon "a heavy wooden door creaking open"
+   4) soundmon-gui               # the same, in a browser: http://127.0.0.1:8191
 
    Note: make sure ~/.local/bin is on your PATH.
 EOF

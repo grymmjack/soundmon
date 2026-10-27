@@ -962,7 +962,7 @@ def main():
                    help='comma-separated subjects to round-robin, one of each per pass; '
                         'each goes to its own folder')
     p.add_argument("--seconds", type=float, default=10.0,
-                   help="length in seconds (model max 47). default 10. The model conditions "
+                   help="length in seconds (SA3 max 120, SAO max 47). default 10. The model conditions "
                         "on this, so it shapes the sound — not just its length.")
     p.add_argument("--style", default="",
                    help="style guide(s) to append, comma-separated. see --list-styles")
