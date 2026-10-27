@@ -167,6 +167,53 @@ def master(src, dst, kind="sfx", a=None):
     return what
 
 
+def match_tone(src, dst, ref, a=None, r=None):
+    """EQ src toward ref's spectrum and bring it to ref's loudness — pixelmon's colour match, for sound.
+
+    Both 1/3-octave curves are taken relative to their own 125 Hz–8 kHz average (so it is the SHAPE
+    that is matched, not the level), the difference is smoothed over neighbouring bands, clamped to
+    ±9 dB and eased at the extremes, and only applied where src has something to boost. Then the
+    gain goes to ref's loudest 400 ms, never past -1 dBTP. dst may be src (written via a temp file).
+    """
+    a = a or analyse(src)
+    r = r or analyse(ref)
+    mid = [i for i, c in enumerate(CENTRES) if 125 <= c <= 8000]
+    ma = sum(a["bands"][i] for i in mid) / len(mid)
+    mr = sum(r["bands"][i] for i in mid) / len(mid)
+    d = [(r["bands"][i] - mr) - (a["bands"][i] - ma) for i in range(len(CENTRES))]
+    sm = [(d[max(0, i - 1)] + 2 * d[i] + d[min(len(d) - 1, i + 1)]) / 4 for i in range(len(d))]
+    eq = []
+    for i, c in enumerate(CENTRES):
+        gdb = max(-9.0, min(9.0, sm[i]))
+        if c < 60 or c > 14000:
+            gdb *= 0.5
+        if a["bands"][i] < -60 and gdb > 0:               # nothing there to lift: boosting only adds hiss
+            gdb = 0.0
+        eq.append(round(gdb, 1))
+    entries = ";".join(f"entry({c:g},{g:g})" for c, g in zip(CENTRES, eq))
+    sr, ch = _info(src)
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    ext = os.path.splitext(dst)[1].lower() or ".wav"
+    tmp = dst + ".tmp.wav"
+    out = dst + ".out" + ext
+    try:
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-af", f"firequalizer=gain_entry='{entries}'",
+                        "-ar", sr, "-ac", ch, "-c:a", "pcm_f32le", tmp], check=True, capture_output=True)
+        m1, tp1 = loudness(tmp)
+        g = min(r["lufs"] - m1, -1.0 - tp1, 12.0)
+        codec = ["-c:a", "pcm_s16le"] if ext == ".wav" else []
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", tmp, "-af", "volume=%gdB" % g,
+                        "-ar", sr, "-ac", ch] + codec + [out], check=True, capture_output=True)
+        os.replace(out, dst)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("ffmpeg: " + (e.stderr or b"").decode(errors="replace").strip()[-300:])
+    finally:
+        for f in (tmp, out):
+            if os.path.exists(f):
+                os.remove(f)
+    return {"eq": eq, "gain": round(g, 1), "kind": "like"}
+
+
 def guess_kind(path):
     """speech for voice folders and files (speech/, narration/, voice…), else sfx."""
     p = path.replace("\\", "/").lower()
@@ -191,10 +238,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         sys.exit(f"--master: no such file or folder: {a.master}")
     if not files:
         sys.exit(f"--master: no audio files in {a.master}")
+    like = os.path.expanduser(a.master_like) if getattr(a, "master_like", None) else None
+    if like and not os.path.isfile(like):
+        sys.exit(f"--master-like: no such file: {a.master_like}")
+    ref_a = analyse(like) if like else None
     out = os.path.expanduser(a.output_to) if a.output_to else os.path.join(base, "mastered")
     if os.path.realpath(out) == os.path.realpath(base):
         sys.exit("--master never overwrites its sources: pick a different --output-to")
-    print(f"🎛  mastering {len(files)} sound(s) -> {out}")
+    print(f"🎛  mastering {len(files)} sound(s) -> {out}" + (f"  (like {os.path.basename(like)})" if like else ""))
     done = 0
     for i, f in enumerate(files, 1):
         rel = os.path.relpath(f, base)
@@ -202,7 +253,12 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         dst = os.path.join(out, os.path.splitext(rel)[0] + ".wav")
         try:
             before = analyse(f)
-            what = master(f, dst, kind, before)
+            if like:
+                kind = "like"
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                what = match_tone(f, dst, like, before, ref_a)
+            else:
+                what = master(f, dst, kind, before)
             after = analyse(dst)
         except Exception as e:
             print(f"   ⚠ {rel}: {e}")

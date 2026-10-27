@@ -179,8 +179,10 @@ class Sets:
             raise ValueError("export sample rate must be 4000..192000 Hz (or blank)")
         voices = [v for v in (t.get("voices") or []) if v][:12]
         mst = ex.get("master") or "off"
-        if mst not in ("off", "sfx", "speech"):
-            raise ValueError("master on export: off, sfx or speech")
+        if mst not in ("off", "sfx", "speech", "like"):
+            raise ValueError("master on export: off, sfx, speech or like the reference")
+        if mst == "like" and not params.get("ref"):
+            raise ValueError("“match the reference” needs a reference sound in the theme (Reference, on the form)")
         return {"engine": eng, "params": params, "takes": takes, "game_folder": folder, "voices": voices,
                 "export": {"encode": enc, "rate": rate, "mono": bool(ex.get("mono")), "master": mst}}
 
@@ -379,7 +381,8 @@ class Sets:
                     if master is None:
                         raise RuntimeError("mastering isn't available (master.py didn't load)")
                     mst = os.path.join(os.path.dirname(src), "_mastered", item["master"], os.path.splitext(os.path.basename(src))[0] + ".wav")
-                    if not os.path.exists(mst) or os.path.getmtime(mst) < os.path.getmtime(src):
+                    # "like" depends on the theme's reference too, which can change: always redo it
+                    if item["master"] == "like" or not os.path.exists(mst) or os.path.getmtime(mst) < os.path.getmtime(src):
                         master(src, mst, item["master"])
                     src = mst
                 convert(src, dest, ex)

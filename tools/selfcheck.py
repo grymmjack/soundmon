@@ -105,6 +105,30 @@ def main():
           and _smj._job_error(running) is None and bool(_smj._job_error(empty)),
           f"error -> {_smj._job_error(err)!r}")
 
+    # --ref: both AI graphs must start from the encoded reference instead of silence:
+    # node "9" (the empty latent) gone, LoadAudio -> VAEEncodeAudio (the checkpoint's own
+    # VAE) into KSampler, and denoise == --ref-strength. Wiring checked offline; whether
+    # each model's VAE encodes well is only provable on a GPU box.
+    from types import SimpleNamespace
+    ga = SimpleNamespace(
+        prompt="door", style_add="", music=False, negative="x", style_neg="", batch=False, name=None,
+        song=False, bpm=120, format="16bit", seconds=2.0, base="b", text_encoder="t", steps=8, cfg=1,
+        sampler="lcm", scheduler="simple", no_trim=False, max_seconds=0, threshold_db=-50,
+        normalize_db=-1, fade_ms=5, engine="sao", no_reprompt=True, flac=False, mp3=False, opus=False,
+        bits=16, ref_name="soundmon_ref_x.wav", ref_strength=0.4, song_base="s", lyrics="",
+        no_audio_codes=True, timesig=4, lang="en", key="C major", llm_cfg=2, temperature=1, top_p=1,
+        top_k=0, min_p=0)
+    okg = []
+    for song in (False, True):
+        ga.song = song
+        g = _smj.build_graph(ga, 1)
+        okg.append("9" not in g and g["30"]["class_type"] == "LoadAudio"
+                   and g["31"]["inputs"] == {"audio": ["30", 0], "vae": ["4", 2]}
+                   and g["3"]["inputs"]["latent_image"] == ["31", 0] and g["3"]["inputs"]["denoise"] == 0.4
+                   and "_ref_" in g["12"]["inputs"]["filename_prefix"])
+    check("--ref wires LoadAudio -> VAEEncodeAudio -> KSampler at --ref-strength (SFX + song)",
+          all(okg), f"sfx/song ok: {okg}")
+
     # Mastering must calm a bright sound without ever pushing it past -1 dBTP:
     # the chain has no limiter on purpose, so the gain step is the only guard.
     import shutil as _shm
@@ -122,6 +146,56 @@ def main():
             check("--master calms 2.5 kHz+ and stays under -1 dBTP",
                   a2["harsh"] < b["harsh"] - 0.1 and a2["true_peak"] <= -0.9,
                   f"above 2.5k {b['harsh']:.0%} -> {a2['harsh']:.0%}, true peak {a2['true_peak']} dBTP")
+
+            # --match-tone: a bright sound EQ'd toward a dark reference must get darker
+            # (its band curve closer to the reference's) and still never pass -1 dBTP.
+            dark = os.path.join(mt, "dark.wav")
+            lp = np.convolve(np.random.default_rng(2).standard_normal(len(t)), np.ones(24) / 24, "same")
+            sf.write(dark, (0.6 * np.sin(2 * np.pi * 110 * t) + 2.0 * lp) * np.exp(-t) * 0.4, 44100)
+            r_ = _ms.analyse(dark)
+            like = os.path.join(mt, "like.wav")
+            _ms.match_tone(src, like, dark)
+            a3 = _ms.analyse(like)
+
+            def gap(x):
+                mid = lambda y: sum(y["bands"][8:20]) / 12     # noqa: E731
+                return sum(abs((p - mid(x)) - (q - mid(r_))) for p, q in zip(x["bands"], r_["bands"]))
+            check("--match-tone moves the band curve toward the reference, <= -1 dBTP",
+                  gap(a3) < gap(b) and a3["true_peak"] <= -0.9,
+                  f"curve gap {gap(b):.0f} -> {gap(a3):.0f} dB, true peak {a3['true_peak']} dBTP")
+
+            # --ref: the reference is trimmed or padded to exactly the render length.
+            _smj.REF_CACHE = os.path.join(mt, "refs")
+            okl = True
+            for want in (0.5, 3.0):
+                got = sf.info(_smj.prepare_ref(src, want))
+                okl &= abs(got.frames / got.samplerate - want) < 0.01 and got.channels == 2 \
+                    and got.samplerate == 44100
+            check("prepare_ref trims and pads the reference to --seconds", okl, "1.2 s -> 0.5 s and 3.0 s")
+
+            # similar.py: a sound's near-twins (same kind, other seeds) must outrank other kinds.
+            import similar as _sim
+            lib = os.path.join(mt, "lib")
+            os.makedirs(lib)
+            rng = np.random.default_rng(3)
+            t2 = np.arange(int(44100 * 0.6)) / 44100
+            for i in range(3):
+                f0 = 1400 + 120 * i
+                sf.write(os.path.join(lib, f"zap{i}.wav"),
+                         0.5 * np.sign(np.sin(2 * np.pi * f0 * np.exp(-t2 * 4) * t2)) * np.exp(-t2 * 5), 44100)
+                sf.write(os.path.join(lib, f"thud{i}.wav"),
+                         np.convolve(rng.standard_normal(len(t2)), np.ones(40) / 40, "same") * 3
+                         * np.exp(-t2 * (18 + 3 * i)), 44100)
+                sf.write(os.path.join(lib, f"pad{i}.wav"),
+                         0.3 * np.sin(2 * np.pi * (220 + 7 * i) * np.arange(44100 * 2) / 44100), 44100)
+            ix = _sim.Index(os.path.join(mt, "index.json"))
+            ix.update([lib])
+            ranks = []
+            for kind in ("zap", "thud", "pad"):
+                top = [os.path.basename(r["path"]) for r in ix.search(os.path.join(lib, f"{kind}0.wav"), k=2)]
+                ranks.append(all(n.startswith(kind) for n in top))
+            check("--similar ranks a sound's own kind first", all(ranks),
+                  f"zap/thud/pad top-2 own kind: {ranks}")
 
     # --- tracker output -----------------------------------------------------
     # These four were ALL shipped broken and all were invisible to inspection:

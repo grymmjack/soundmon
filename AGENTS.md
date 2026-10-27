@@ -417,10 +417,36 @@ before a model question.
 Aliases live in `servers.json` (gitignored — real LAN IPs stay out of the repo);
 `servers.example.json` is the template.
 
+## Steering with a reference (`--ref`) and finding similar sounds (`similar.py`)
+
+- **`--ref` changes the start of the graph and nothing else.** `_apply_ref()` deletes
+  node "9" (the empty latent) and adds `"30": LoadAudio` → `"31": VAEEncodeAudio`
+  (VAE from the checkpoint at `["4", 2]`, the same in the SA and song graphs) into
+  KSampler, with `denoise = --ref-strength`. The decode/RetroSFX/save tail is unchanged.
+  selfcheck asserts the wiring for both graphs.
+- **The upload goes to the top of `input/`**, not a subfolder: LoadAudio only lists
+  files directly in `input/`. `prepare_ref()` names the file
+  `soundmon_ref_<sha1 of content + seconds>.wav`, so a batch or a farm uploads the same
+  name once per box. `run_farm()` uploads to every live box before dispatching, and
+  drops a box that refuses, like an unreachable one.
+- **Only the wiring is proven offline.** Whether SA3's VAE encodes well, and how its
+  8-step lcm behaves at denoise < 1, needs a GPU run. If it doesn't work, `--engine sao`
+  is the fallback; don't add a silent fallback.
+- **`--match-tone` / `--master-like` use `master.match_tone()`**: the 1/3-octave curve
+  difference (each curve normalised by its own 125 Hz–8 kHz mean), smoothed, ±9 dB,
+  eased at the extremes, through ffmpeg `firequalizer`, then the gain step. As with
+  `master()`, that gain step is the only −1 dBTP guard.
+- **`similar.py` imports nothing heavy at module level** (the GUI imports it). Its
+  fingerprint is DSP only, from the audible part of the file (trimmed at −50 dB):
+  game sounds are often padded with silence, and before the trim the padding decided
+  the match. **Bump `METHOD` whenever `features()` changes**: an index made with
+  another method rebuilds itself rather than mixing two kinds of vector. The GUI's
+  `/api/similar/file` serves only paths that are in the index, never arbitrary paths.
+
 ## Run tools/selfcheck.py after touching an engine
 
-Thirteen assertions over the defects that broke SILENTLY in this repo — every one
-of which was found by ear, not by inspection:
+Assertions over the defects that broke SILENTLY in this repo — every one of
+which was found by ear, not by inspection:
 
     the -16 LUFS ceiling applying to music, and then a fix for it that sat AFTER
     the engine hand-offs and so never executed

@@ -51,7 +51,7 @@ DONE_LINE = re.compile(r"✅\s*\[(\d+)/(\d+)\]")
 SEED = re.compile(r"seed=(\d+)")
 AUDIO_EXT = (".wav", ".flac", ".ogg", ".mp3", ".opus")
 SCORE_EXT = (".mod", ".rad", ".mid")
-INPUT_EXT = (".mid", ".midi", ".wav", ".flac", ".ogg", ".mp3", ".sbi", ".txt")
+INPUT_EXT = (".mid", ".midi", ".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a", ".sbi", ".txt")
 HOME = os.path.realpath(os.path.expanduser("~"))
 IS_WIN, IS_MAC = sys.platform.startswith("win"), sys.platform == "darwin"
 
@@ -395,6 +395,7 @@ def load_setup():
     s.setdefault("audio_apps", [])      # [{name, exec, args}] — "{}" = the file, else appended
     s.setdefault("folder_apps", [])
     s.setdefault("game_folders", [])    # [{name, path}] — where Sets export picks
+    s.setdefault("similar_folders", []) # folders the Find tab indexes
     return s
 
 
@@ -410,6 +411,8 @@ def save_setup(body):
     if isinstance(body.get("game_folders"), list):
         s["game_folders"] = [{"name": str(g.get("name") or "")[:60], "path": str(g.get("path") or "")[:500]}
                              for g in body["game_folders"][:40] if isinstance(g, dict) and str(g.get("path") or "").strip()]
+    if isinstance(body.get("similar_folders"), list):
+        s["similar_folders"] = [str(f).strip()[:500] for f in body["similar_folders"][:40] if str(f).strip()]
     if "server" in body:
         s["server"] = re.sub(r"\s+", "", str(body["server"] or ""))[:300]
     _write_json(SETUP_FILE, s)
@@ -709,6 +712,16 @@ def build_argv(p, meta, jdir=None):
                     argv += [flag, v]
             if p.get("opl_bank"):
                 argv += ["--opl-bank", input_path(p["opl_bank"])]
+        if E["gpu"] and p.get("ref"):              # steer with a reference sound (audio-to-audio)
+            ref = input_path(p["ref"])
+            argv += ["--ref", ref]
+            st = num("ref_strength", float, 0.05, 1.0)
+            if st is not None and abs(st - 0.6) > 1e-9:
+                argv += ["--ref-strength", f"{st:g}"]
+            if p.get("ref_match"):
+                argv.append("--ref-match")
+            if p.get("match_tone"):
+                argv += ["--match-tone", ref]
         if E["gpu"]:
             srv = [s.strip() for s in (p.get("servers") or []) if str(s).strip()]
             for s in srv:
@@ -804,11 +817,11 @@ class JobQueue:
         jid = time.strftime("%Y%m%d-%H%M%S-") + f"{random.randrange(16**4):04x}"
         jdir = os.path.join(self.gallery, jid)
         os.makedirs(jdir, exist_ok=True)
-        for key in ("from_midi", "from_audio", "opl_bank"):        # the job keeps its own copy: reproducible later
+        for key in ("from_midi", "from_audio", "opl_bank", "ref"):  # the job keeps its own copy: reproducible later
             if params.get(key):
                 shutil.copy2(input_path(params[key]), os.path.join(jdir, "input-" + os.path.basename(params[key])))
         argv, files, takes = build_argv(params, meta, jdir)
-        for key in ("from_midi", "from_audio", "opl_bank"):
+        for key in ("from_midi", "from_audio", "opl_bank", "ref"):
             if params.get(key):
                 src = input_path(params[key])
                 argv = [os.path.join(jdir, "input-" + os.path.basename(src)) if a == src else a for a in argv]
@@ -1015,6 +1028,48 @@ def analysis(path, cache_dir):
     return a
 
 
+# ---------------------------------------------------------------------------
+# Find: sounds on disk like this one (similar.py)
+# ---------------------------------------------------------------------------
+FIND = {"index": None, "mtime": None, "job": None}
+
+
+def find_index():
+    """similar.Index, reloaded only when its file changed."""
+    sim = load_module("similar")
+    p = sim.INDEX
+    mt = os.path.getmtime(p) if os.path.exists(p) else None
+    if FIND["index"] is None or FIND["mtime"] != mt:
+        FIND["index"], FIND["mtime"] = sim.Index(p), mt
+    return FIND["index"]
+
+
+def find_start(folders):
+    """Index folders in the background; FIND["job"] reports progress."""
+    if FIND["job"] and FIND["job"]["running"]:
+        raise ValueError("already indexing — wait for it to finish")
+    folders = [home_path(f) for f in folders]
+    if not folders:
+        raise ValueError("add a folder to index first")
+    mastering()                                         # numpy + ffmpeg, or a clear 501
+    job = {"running": True, "done": 0, "total": 0, "current": "", "stats": None, "error": None, "started": time.time()}
+    FIND["job"] = job
+
+    def prog(i, n, path):
+        job.update(done=i, total=n, current=os.path.basename(path))
+
+    def run():
+        try:
+            idx = load_module("similar").Index()
+            job["stats"] = idx.update(folders, prog)
+        except Exception as e:
+            job["error"] = str(e)[:300]
+        job["running"] = False
+        FIND["index"] = None
+    threading.Thread(target=run, daemon=True).start()
+    return job
+
+
 def gallery_items(gallery, limit=400):
     items = []
     for jf in sorted(glob.glob(os.path.join(gallery, "*", "job.json")), reverse=True)[:limit]:
@@ -1136,6 +1191,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"sets": self.sets.list()})
         if u.path == "/api/presets":
             return self._json({"presets": list_presets()})
+        if u.path == "/api/similar/status":
+            try:
+                idx = find_index()
+                return self._json({"count": len(idx.data["files"]), "folders": idx.data["folders"],
+                                   "updated": idx.data.get("updated"), "job": FIND["job"],
+                                   "setup_folders": load_setup()["similar_folders"]})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
+        if u.path == "/api/similar/file":              # play a Find result: only files in the index
+            p = urllib.parse.parse_qs(u.query).get("path", [""])[0]
+            if p not in find_index().data["files"] or not os.path.isfile(p):
+                return self._json({"error": "not in the index"}, 404)
+            ext = os.path.splitext(p)[1].lower()
+            return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
         if u.path in ("/api/set", "/api/set/now"):
             q = urllib.parse.parse_qs(u.query)
             try:
@@ -1209,6 +1278,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(save_setup(body))
             if u.path == "/api/presets":
                 return self._json({"presets": save_preset(body)})
+            if u.path == "/api/similar/index":
+                folders = body.get("folders")
+                if isinstance(folders, list):
+                    save_setup({"similar_folders": folders})
+                try:
+                    return self._json({"job": find_start(load_setup()["similar_folders"])})
+                except LookupError as e:
+                    return self._json({"error": str(e)}, 501)
+            if u.path == "/api/similar/search":
+                # the query: a dropped file (input), a gallery take (take), or an indexed file (path)
+                idx = find_index()
+                if body.get("take"):
+                    q = self.sets.take_path(body["take"])
+                elif body.get("input"):
+                    q = input_path(body["input"])
+                elif body.get("path") in idx.data["files"]:
+                    q = body["path"]
+                else:
+                    raise ValueError("drop a sound to search with")
+                if not idx.data["files"]:
+                    raise ValueError("nothing is indexed yet — add your sound folders and press Index")
+                within = str(body.get("within") or "").strip()
+                if within:
+                    within = home_path(within)
+                k = max(1, min(200, int(body.get("k") or 30)))
+                try:
+                    mastering()
+                except LookupError as e:
+                    return self._json({"error": str(e)}, 501)
+                return self._json({"query": os.path.basename(q), "results": idx.search(q, k, within=within or None)})
+            if u.path == "/api/similar/use":            # a Find result becomes a reference (copied into inputs)
+                p = body.get("path")
+                if p not in find_index().data["files"] or not os.path.isfile(p):
+                    raise ValueError("that file isn't in the index")
+                os.makedirs(INPUTS, exist_ok=True)
+                name = safe_name(os.path.basename(p), 96)
+                if not name.lower().endswith(INPUT_EXT):
+                    name += ".wav"
+                out = unique_path(INPUTS, name)
+                shutil.copy2(p, out)
+                return self._json({"file": os.path.basename(out)})
             if u.path == "/api/presets/delete":
                 return self._json({"presets": delete_preset(body.get("name"))})
             if u.path == "/api/voices":
@@ -1248,8 +1358,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # open a sound or a job folder in a program saved in Setup, or the OS default.
                 # Only programs saved in Setup can be launched: the request names one, it can't supply a command.
                 setup, key, t = load_setup(), str(body.get("app") or "os"), body.get("target") or {}
-                is_dir = bool(t.get("folder"))
-                if is_dir:
+                is_dir = bool(t.get("folder")) or bool(t.get("indexed"))
+                if t.get("indexed"):                        # a Find result: open the folder it is in
+                    if t["indexed"] not in find_index().data["files"]:
+                        raise ValueError("that file isn't in the index")
+                    path = os.path.dirname(t["indexed"])
+                elif is_dir:
                     path = os.path.join(self.gallery, safe_name(t.get("dir"), 64)) if t.get("dir") else self.gallery
                     if not os.path.isdir(path):
                         raise ValueError("that folder doesn't exist any more")
@@ -1304,12 +1418,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s = self.sets.load(body.get("id"))
             if body.get("preview"):
                 return {"plan": self.sets.export_plan(s), "folder": self.sets.game_dir(s)}
-            mfn = None
-            if (s["theme"]["export"].get("master") or "off") != "off":
+            mfn, mode = None, s["theme"]["export"].get("master") or "off"
+            if mode != "off":
                 try:
-                    mfn = mastering().master
+                    m = mastering()
                 except LookupError as e:
                     raise ValueError(str(e))
+                if mode == "like":                    # match the tone of the set's reference sound
+                    ref = (s["theme"]["params"] or {}).get("ref")
+                    if not ref:
+                        raise ValueError("“match the reference” needs a reference sound in the set's theme")
+                    rp = input_path(ref)
+                    mfn = lambda src, dst, kind: m.match_tone(src, dst, rp)      # noqa: E731
+                else:
+                    mfn = m.master
             return self.sets.export(s, only_changed=not body.get("all"), master=mfn)
         raise ValueError(f"unknown sets action {act!r}")
 
