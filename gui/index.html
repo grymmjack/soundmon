@@ -1,0 +1,1193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>soundmon</title>
+<style>
+/* soundmon-gui: pixelmon-gui's frame and EGA palette (420px form | tabs | 30px status bar), built for sound. */
+:root {
+  color-scheme: dark;
+  --bg: #121216; --panel: #1b1b22; --panel2: #23232c; --line: #33333f;
+  --text: #e6e6ee; --dim: #9a9aab; --accent: #55ffff; --accent2: #ff55ff;
+  --ok: #55ff55; --warn: #ffff55; --bad: #ff5555; --radius: 6px;
+  --abort: #b3121b; --on-accent: #061416; --on-pick: #1a0418;
+  --mono: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { text-transform: uppercase; letter-spacing: .04em; cursor: pointer; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 5px 9px; font-size: 12px; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input, select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; min-width: 0; width: 100%; }
+input[type=checkbox], input[type=radio] { width: auto; accent-color: var(--accent); }
+input[type=range] { padding: 0; accent-color: var(--accent); }
+textarea { resize: vertical; }
+code, .mono { font-family: var(--mono); }
+.dim { color: var(--dim); }
+a { color: var(--accent); }
+
+.app { display: grid; grid-template-columns: 420px minmax(0, 1fr); height: calc(100vh - 30px); }
+@media (max-width: 900px) { .app { grid-template-columns: 1fr; height: auto; } .form { max-height: none; } }
+
+/* ---- form ---- */
+.form { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; display: flex; flex-direction: column; min-width: 0; }
+.formbody { padding: 12px 14px; display: grid; gap: 12px; }
+.brand { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.brand h1 { font: 700 21px var(--mono); letter-spacing: .14em; margin: 0 6px 0 0;
+  background: linear-gradient(90deg, var(--ok), var(--accent)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.srv { font: 11px var(--mono); color: var(--dim); border: 1px solid var(--line); border-radius: 10px; padding: 2px 8px; cursor: pointer; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-right: 5px; }
+.dot.up { background: var(--ok); box-shadow: 0 0 6px var(--ok); } .dot.down { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 0; padding: 8px 10px 10px; min-width: 0; display: grid; gap: 8px; }
+legend { color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-size: 12px; padding: 0 5px; }
+legend::before { content: "▾ "; color: var(--accent); }
+label.f { display: grid; gap: 3px; font-size: 12px; color: var(--dim); min-width: 0; }
+label.c { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.row { display: grid; gap: 8px; grid-template-columns: repeat(var(--c, 3), minmax(0, 1fr)); }
+.hint { font-size: 11.5px; color: var(--dim); }
+.hint b { color: var(--warn); font-weight: 500; }
+.engines { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.eng { display: grid; gap: 1px; text-align: left; padding: 6px 8px; text-transform: none; letter-spacing: 0; font-size: 13px; }
+.eng small { color: var(--dim); font: 10.5px var(--mono); }
+.eng[aria-pressed="true"] { border-color: var(--accent); background: rgba(85,255,255,.08); box-shadow: inset 0 0 0 1px var(--accent); }
+.eng[aria-pressed="true"] small { color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.chip { font: 11.5px var(--mono); text-transform: none; letter-spacing: 0; padding: 3px 7px; border-radius: 12px; }
+.chip[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.chip.m[aria-pressed="true"] { background: var(--accent2); border-color: var(--accent2); color: var(--on-pick); }
+.chip small { opacity: .7; }
+.chiplabel { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; width: 100%; margin-top: 2px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+.drop { border: 1px dashed var(--line); border-radius: 4px; padding: 6px 8px; font-size: 12px; color: var(--dim); display: flex; gap: 6px; align-items: center; min-width: 0; }
+.drop.over { border-color: var(--accent); background: rgba(85,255,255,.05); }
+.drop span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop b { color: var(--text); font-weight: 500; }
+.actions { position: sticky; bottom: 0; margin-top: auto; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 14px; display: grid; gap: 6px; z-index: 3; }
+.actions .btns { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.render { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 700; font-size: 14px; padding: 9px; }
+.cli { font: 11px/1.45 var(--mono); color: var(--dim); background: var(--bg); border: 1px dashed var(--line); border-radius: 4px; padding: 6px 8px; overflow-wrap: anywhere; max-height: 84px; overflow: auto; }
+.cli.err { color: var(--bad); border-color: var(--bad); }
+.toast { font-size: 12px; color: var(--ok); min-height: 1em; }
+.toast.err { color: var(--bad); }
+
+/* ---- main ---- */
+.main { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--line); overflow-x: auto; flex: none; }
+.tab { border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: none; text-transform: none; letter-spacing: 0; font-size: 14px; padding: 7px 12px; color: var(--dim); white-space: nowrap; }
+.tab[aria-selected="true"] { background: var(--panel); border-color: var(--line); color: var(--text); margin-bottom: -1px; }
+.tab .n { font: 10.5px var(--mono); background: var(--accent2); color: var(--on-pick); border-radius: 8px; padding: 0 5px; margin-left: 4px; }
+.panes { flex: 1; overflow-y: auto; min-height: 0; }
+.pane { padding: 14px; display: grid; gap: 12px; align-content: start; min-width: 0; }
+.paneh { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.paneh h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.sp { flex: 1; }
+.lede { color: var(--dim); margin: 0; max-width: 80ch; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; min-width: 0; }
+.badge { font: 10.5px var(--mono); border-radius: 3px; padding: 1px 5px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; text-transform: uppercase; }
+.badge.ok { color: var(--ok); border-color: rgba(85,255,85,.4); } .badge.warn { color: var(--warn); border-color: rgba(255,255,85,.4); }
+.badge.bad { color: var(--bad); border-color: rgba(255,85,85,.45); } .badge.ac { color: var(--accent); border-color: rgba(85,255,255,.4); }
+.empty { color: var(--dim); text-align: center; padding: 30px 10px; border: 2px dashed var(--line); border-radius: var(--radius); }
+
+.job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
+.job.failed { border-color: rgba(255,85,85,.5); }
+.job h4 { margin: 0; font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-weight: 500; }
+.job .cmd { grid-column: 1 / -1; font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+.bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; border: 1px solid var(--line); grid-column: 1 / -1; }
+.bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .3s; }
+.log { grid-column: 1 / -1; font: 11px/1.5 var(--mono); color: var(--dim); background: var(--bg); border-radius: 4px; padding: 6px 8px; overflow-x: auto; white-space: pre; max-height: 160px; overflow-y: auto; margin: 0; }
+.err { grid-column: 1 / -1; color: var(--bad); font-size: 12.5px; overflow-wrap: anywhere; }
+.outs { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+.outs button { text-transform: none; letter-spacing: 0; font-family: var(--mono); }
+
+.gfilter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.gfilter input { width: 220px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.gcard { display: grid; gap: 6px; align-content: start; }
+.gcard.playing { border-color: var(--accent); }
+.gcard canvas { width: 100%; height: 54px; display: block; background: var(--bg); border-radius: 3px; cursor: pointer; }
+.gcard .t { display: flex; gap: 6px; align-items: baseline; justify-content: space-between; min-width: 0; }
+.gcard .t b { font: 600 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.gcard .meta { font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
+.gcard .p { font-size: 12px; color: var(--dim); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.btnrow { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.btnrow button, .btnrow a.b { padding: 3px 7px; font-size: 11px; }
+a.b { border: 1px solid var(--line); border-radius: 4px; background: var(--panel2); color: var(--text); text-decoration: none; text-transform: uppercase; letter-spacing: .04em; }
+.stars { display: inline-flex; }
+.stars button { border: 0; background: none; padding: 0 1px; font-size: 13px; color: var(--line); }
+.stars button.on { color: var(--warn); }
+
+.cols2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
+.style { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.style:last-child { border-bottom: 0; }
+.style b { font: 600 12.5px var(--mono); color: var(--accent); }
+.style span { grid-column: 1; font-size: 12px; color: var(--dim); }
+.style button { grid-row: 1 / span 2; grid-column: 2; align-self: center; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); font-weight: 500; }
+tr:last-child td { border-bottom: 0; }
+.advgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; }
+.adv { display: grid; gap: 6px; align-content: start; }
+.adv h3, .card h3 { margin: 0 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); font-weight: 500; }
+.adv label { display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 8px; align-items: center; font-size: 12.5px; }
+.adv label code { font-size: 10.5px; color: var(--dim); display: block; }
+.adv label.set input, .adv label.set select { border-color: var(--accent2); color: var(--accent2); }
+.adv label.chk input { justify-self: start; }
+.apps { display: grid; gap: 6px; }
+.app3 { display: grid; grid-template-columns: 110px minmax(0, 1fr) 90px auto; gap: 6px; }
+
+/* ---- sets ---- */
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { font: 12px var(--mono); border: 1px solid var(--line); border-radius: 12px; padding: 2px 9px; color: var(--dim); background: var(--panel); }
+.pill b { color: var(--text); font-weight: 500; }
+.pill.ok b { color: var(--ok); } .pill.warn b { color: var(--warn); } .pill.bad b { color: var(--bad); } .pill.pk b { color: var(--accent2); }
+.theme { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px 14px; font-size: 12.5px; }
+.theme div { display: grid; gap: 1px; min-width: 0; }
+.theme span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.theme code { font-size: 12px; overflow-wrap: anywhere; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.filters input { flex: 1 1 180px; width: auto; }
+.group h3 { margin: 8px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); display: flex; gap: 8px; align-items: center; font-weight: 500; }
+.group h3::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.krow { display: grid; grid-template-columns: 170px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 4px; background: var(--panel); margin-bottom: 4px; }
+.krow.sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.krow.picked:not(.sel) { box-shadow: inset 3px 0 0 var(--accent2); }
+.krow .k { font: 600 13px var(--mono); overflow-wrap: anywhere; cursor: pointer; grid-row: 1 / span 2; }
+.krow .k small { display: block; font-weight: 400; color: var(--dim); font-size: 11px; }
+.krow .p { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.takes { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+.tk { font: 11.5px var(--mono); min-width: 27px; padding: 3px 4px; text-transform: none; letter-spacing: 0; position: relative; }
+.tk.heard { border-color: var(--accent); color: var(--accent); }
+.tk.chosen { background: var(--accent2); border-color: var(--accent2); color: var(--on-pick); }
+.tk.flag::after { content: ""; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
+.tk.now { color: var(--dim); }
+.tk.now.chosen { color: var(--on-pick); }
+.vsep { width: 1px; height: 20px; background: var(--line); margin-inline: 3px; }
+.kact { display: flex; gap: 4px; align-items: center; grid-column: 3; grid-row: 1 / span 2; justify-self: end; flex-wrap: wrap; justify-content: end; }
+.kact .pick { font-weight: 700; }
+.kact .pick.done { background: var(--accent2); border-color: var(--accent2); color: var(--on-pick); }
+.miss { font: 12px var(--mono); color: var(--warn); }
+.detail { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 10px 14px; border-top: 1px dashed var(--line); padding-top: 9px; margin-top: 4px; }
+.wv { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+.wv span { font: 10.5px var(--mono); color: var(--dim); text-align: right; text-transform: uppercase; }
+.wv canvas { width: 100%; height: 46px; display: block; background: var(--bg); border-radius: 3px; border: 1px solid var(--line); cursor: pointer; }
+.recipe { font: 11.5px/1.55 var(--mono); color: var(--dim); display: grid; gap: 6px; align-content: start; min-width: 0; overflow-wrap: anywhere; }
+.recipe b { color: var(--text); font-weight: 400; }
+.exportbar { position: sticky; bottom: 0; z-index: 2; background: #17171e; border: 1px solid var(--accent2); border-radius: var(--radius);
+  padding: 9px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; box-shadow: 0 -8px 20px rgba(0,0,0,.45); }
+.exportbar .t { font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+.exportbar .t b { color: var(--accent2); }
+.exportbar .w { color: var(--warn); font-size: 12px; }
+.exportbar .go { background: var(--accent2); color: var(--on-pick); border-color: var(--accent2); font-weight: 700; }
+.plan { grid-column: 1 / -1; max-height: 260px; overflow: auto; }
+.keys { font: 11px var(--mono); color: var(--dim); }
+.keys kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; color: var(--text); }
+.editor { display: grid; gap: 10px; }
+.editor textarea { font: 12.5px/1.5 var(--mono); }
+@media (max-width: 760px) { .krow { grid-template-columns: 1fr; } .krow .k, .kact { grid-row: auto; grid-column: 1; justify-self: start; } .detail { grid-template-columns: 1fr; } }
+
+/* ---- status bar ---- */
+.sb { position: fixed; left: 0; right: 0; bottom: 0; height: 30px; background: #0d0d11; border-top: 1px solid var(--line); display: flex; gap: 14px; align-items: center;
+  padding: 0 10px; font-size: 12px; color: var(--dim); white-space: nowrap; overflow-x: auto; z-index: 10; }
+.sb-abort { background: var(--abort); color: #fff; border-color: #ff8080; padding: 2px 9px; font-size: 11px; font-weight: 700; }
+.sb-abort::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff2a2a; box-shadow: 0 0 0 2px #fff; margin-right: 6px; }
+.np { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.np canvas { width: 120px; height: 18px; cursor: pointer; }
+.np button { padding: 1px 6px; font-size: 11px; }
+#sbStatus { color: var(--accent); font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div class="app">
+<!-- ================= FORM ================= -->
+<form class="form" id="form" onsubmit="return false" autocomplete="off">
+ <div class="formbody">
+  <div class="brand">
+    <h1>SOUNDMON</h1>
+    <span class="srv" id="srvPill" title="GPU render server — change it in Setup"><span class="dot" id="srvDot"></span><span id="srvName">…</span></span>
+    <span class="sp"></span>
+    <button type="button" id="resetBtn" title="put this engine's fields back to soundmon's defaults">↺ Reset</button>
+  </div>
+
+  <div class="presetbar" style="display:flex;gap:6px">
+    <select id="preset" aria-label="Presets" style="flex:1"><option value="">— presets —</option></select>
+    <button type="button" id="presetLoad">Load</button><button type="button" id="presetSave">Save…</button><button type="button" id="presetDel" title="delete this preset">✕</button>
+  </div>
+
+  <fieldset>
+    <legend>Engine</legend>
+    <div class="engines" id="engines"></div>
+    <div class="hint" id="engHint"></div>
+  </fieldset>
+
+  <fieldset>
+    <legend id="promptLegend">Describe the sound</legend>
+    <textarea id="prompt" rows="3"></textarea>
+    <div class="hint" id="promptHint"></div>
+    <label class="c" data-eng="sfx music"><input type="checkbox" id="reprompt" checked> Let SA3 rewrite the description first (Qwen reprompt)</label>
+  </fieldset>
+
+  <fieldset data-eng="sfx music song">
+    <legend>Style guides <span class="dim">· sounds.json</span></legend>
+    <div class="chips" id="styleChips"></div>
+  </fieldset>
+
+  <fieldset data-eng="sfx music song chip opl fx">
+    <legend>Length &amp; takes</legend>
+    <div class="row">
+      <label class="f" data-flag="--seconds">Seconds<input id="seconds" type="number" step="0.5" min="0"></label>
+      <label class="f" data-flag="-n">Takes<input id="n" type="number" min="1" max="200" value="1"></label>
+      <label class="f" data-flag="--seed">Seed<input id="seed" placeholder="random"></label>
+    </div>
+    <div class="hint" id="secsHint"></div>
+  </fieldset>
+
+  <fieldset data-eng="music">
+    <legend>Loop</legend>
+    <label class="c" data-flag="--loop"><input type="checkbox" id="loop" checked> Make it loop seamlessly</label>
+    <div class="hint">The model composes an ending, which leaves a hole at the seam. Looping crossfades the tail into the head.</div>
+  </fieldset>
+
+  <fieldset data-eng="song">
+    <legend>Song</legend>
+    <label class="f" data-flag="--lyrics">Lyrics <span>([verse] / [chorus] markers; empty = instrumental)</span><textarea id="lyrics" rows="6"></textarea></label>
+    <div class="row" style="--c:3">
+      <label class="f" data-flag="--timesig">Time<select id="timesig"></select></label>
+      <label class="f" data-flag="--lang">Language<input id="lang" placeholder="en" maxlength="2"></label>
+    </div>
+  </fieldset>
+
+  <fieldset data-eng="song chip opl">
+    <legend>Tempo &amp; key</legend>
+    <div class="row" style="--c:2">
+      <label class="f" data-flag="--bpm">BPM<input id="bpm" type="number" min="10" max="300" placeholder="120"></label>
+      <label class="f" data-flag="--key">Key<select id="key"></select></label>
+    </div>
+  </fieldset>
+
+  <fieldset data-eng="chip opl">
+    <legend>Composition</legend>
+    <div class="chips" id="moodChips" data-flag="--mood"></div>
+    <div class="row" style="--c:3">
+      <label class="f" data-flag="--scale">Scale<select id="scale"></select></label>
+      <label class="f" data-flag="--chippy">Chippy<select id="chippy"></select></label>
+      <label class="f" data-flag="--arp">Arp<input id="arp" type="number" min="0" max="16" placeholder="mood"></label>
+    </div>
+    <div class="drop" data-drop="from_midi" data-flag="--from-midi"><span>Follow a MIDI file: <b id="from_midi_name">drop a .mid here</b></span><button type="button" data-clear="from_midi">✕</button></div>
+    <div class="drop" data-drop="from_audio" data-flag="--from-audio"><span>…or a recording: <b id="from_audio_name">drop audio here</b></span><button type="button" data-clear="from_audio">✕</button></div>
+    <div class="chips"><span class="hint">Also write:</span>
+      <label class="c" data-eng="chip" data-flag="--write-mod"><input type="checkbox" id="write_mod" checked> .mod</label>
+      <label class="c" data-eng="opl" data-flag="--write-rad"><input type="checkbox" id="write_rad" checked> .rad</label>
+      <label class="c" data-flag="--write-midi"><input type="checkbox" id="write_midi"> .mid</label></div>
+  </fieldset>
+
+  <fieldset data-eng="opl">
+    <legend>AdLib voices</legend>
+    <div class="row">
+      <label class="f" data-flag="--opl-lead">Lead<select id="opl_lead"></select></label>
+      <label class="f" data-flag="--opl-arp">Arp<select id="opl_arp"></select></label>
+      <label class="f" data-flag="--opl-bass">Bass<select id="opl_bass"></select></label>
+    </div>
+    <div class="drop" data-drop="opl_bank" data-flag="--opl-bank"><span>Instrument bank: <b id="opl_bank_name">built-in (drop a .sbi)</b></span><button type="button" data-clear="opl_bank">✕</button></div>
+  </fieldset>
+
+  <fieldset data-eng="fx">
+    <legend>Retro FX</legend>
+    <div class="seg" id="fxKind"><button type="button" data-v="psg">PSG (NES / 2A03)</button><button type="button" data-v="fm">FM (AdLib / OPL3)</button></div>
+    <div class="chips" id="archChips" data-flag="--fx-archetype"></div>
+    <div class="hint">Auto picks the archetype from the name, then from words in the description ("door" → creak).</div>
+  </fieldset>
+
+  <fieldset data-eng="blip">
+    <legend>Blips</legend>
+    <div class="seg" id="blipStyle"><button type="button" data-v="synth">Synth</button><button type="button" data-v="voice">Voice</button></div>
+    <div class="chips" id="waveChips" data-flag="--blip-wave"></div>
+    <div class="row" style="--c:5">
+      <label class="f" data-flag="--blip-rate">Rate<input id="blip_rate" type="number" step="1" placeholder="14"></label>
+      <label class="f" data-flag="--blip-pitch">Pitch<input id="blip_pitch" type="number" step="1" placeholder="0"></label>
+      <label class="f" data-flag="--blip-jitter">Jitter<input id="blip_jitter" type="number" step="0.5" placeholder="1.5"></label>
+      <label class="f" data-flag="--blip-duty">Duty<input id="blip_duty" type="number" step="0.05" placeholder="0.55"></label>
+      <label class="f" data-flag="--blip-speed">Speed<input id="blip_speed" type="number" step="0.5" placeholder="3"></label>
+    </div>
+  </fieldset>
+
+  <fieldset data-eng="narrate blip">
+    <legend>Voice</legend>
+    <select id="voice" aria-label="Voice"></select>
+    <div class="row" style="--c:2" data-eng="narrate">
+      <label class="f" data-flag="--speed">Speed <span class="mono" id="speedV"></span><input id="speed" type="range" min="0.5" max="1.5" step="0.01" value="1"></label>
+      <label class="f" data-flag="--pitch">Pitch <span class="mono" id="pitchV"></span><input id="pitch" type="range" min="-12" max="12" step="1" value="0"></label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Hardware &amp; output</legend>
+    <div class="chips" id="fmtChips" data-flag="--format"></div>
+    <div class="row" style="--c:2">
+      <label class="f" data-flag="--bits">Bits<select id="bits"><option>16</option><option>8</option><option>24</option></select></label>
+      <label class="f" data-flag="--lufs">Loudness ceiling<select id="lufs"><option value="">default (−16; off for chip &amp; AdLib)</option><option value="-16">−16 LUFS</option><option value="-14">−14 LUFS</option><option value="-18">−18 LUFS</option><option value="-20">−20 LUFS</option><option value="-23">−23 LUFS</option><option value="off">off</option></select></label>
+    </div>
+    <div class="chips" id="encChips"><span class="hint">Save as:</span></div>
+    <label class="f" data-flag="--name">File name <span>(blank = from the description)</span><input id="name" maxlength="64"></label>
+  </fieldset>
+
+  <fieldset data-eng="sfx music song">
+    <legend>Render on</legend>
+    <div class="chips" id="serverChips"></div>
+    <div class="hint">Pick several to spread takes across the farm. None picked = the Setup tab's default.</div>
+  </fieldset>
+ </div>
+  <div class="actions">
+    <div class="btns"><button type="button" class="render" id="renderBtn">RENDER</button><button type="button" id="copyCli">COPY CLI</button></div>
+    <div class="cli" id="cli">…</div>
+    <div class="toast" id="toast"></div>
+  </div>
+</form>
+
+<!-- ================= MAIN ================= -->
+<main class="main">
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="panes">
+  <section class="pane" id="p-sets" hidden>
+    <div class="paneh">
+      <select id="setSel" aria-label="Sound set" style="width:auto;max-width:420px"></select>
+      <span class="sp"></span>
+      <button type="button" id="setEditBtn">✎ Edit set</button><button type="button" id="setNewBtn">＋ New set</button>
+    </div>
+    <div class="card editor" id="setEditor" hidden>
+      <div class="paneh"><h2 id="edTitle">New set</h2><span class="sp"></span><button type="button" id="edCancel">Cancel</button></div>
+      <div class="row" style="--c:2">
+        <label class="f">Name<input id="edName" maxlength="80" placeholder="neon-caster sfx"></label>
+        <label class="f">Game folder <span>(where picks are exported; inside your home folder)</span><input id="edFolder" placeholder="~/git/my-game/sfx"></label>
+      </div>
+      <label class="f">The list of sounds <span>— paste it, or drop a .txt here. One per line: <code>key | text</code>, <code>key | seconds | prompt</code>, <code>name | secs | bpm | key | mood</code>, or plain words. <code>[Group]</code> lines group the rows; <code>#</code> lines are skipped.</span>
+        <textarea id="edManifest" rows="9" placeholder="[Weapons]&#10;shoot | 1 | short punchy neon blaster shot, synthetic laser crack&#10;rail | 2 | electric railgun discharge, rising whine, heavy crack&#10;[Doors]&#10;door | 2 | sliding sci-fi door, pneumatic hiss and thunk"></textarea></label>
+      <div class="card" style="background:var(--bg)"><h3>Theme — every key renders with these settings</h3>
+        <div class="hint" id="edTheme"></div>
+        <div class="btnrow" style="margin-top:6px"><button type="button" id="edFromForm">Use the form's current settings</button><button type="button" id="edToForm">Put the theme in the form</button></div></div>
+      <div class="row" style="--c:4">
+        <label class="f">Takes per key <span>(each a different seed)</span><input id="edTakes" type="number" min="1" max="50" value="10"></label>
+        <label class="f">Export as<select id="edEnc"><option value="wav">WAV</option><option value="flac">FLAC</option><option value="ogg">OGG</option><option value="same">the take's own format</option></select></label>
+        <label class="f">Export rate <span>(blank = as made)</span><input id="edRate" type="number" placeholder="as made"></label>
+        <label class="f">&nbsp;<span class="c" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="edMono"> mono</span></label>
+      </div>
+      <div id="edVoicesWrap" hidden><div class="hint">Narration takes are voices: each line is spoken once per voice you pick here (none = the theme's voice).</div><div class="chips" id="edVoices"></div></div>
+      <div><button type="button" class="render" id="edSave" style="width:auto;padding:7px 18px">Create set</button> <span class="toast" id="edToast"></span></div>
+    </div>
+    <div id="setBody"></div>
+  </section>
+
+  <section class="pane" id="p-voices" hidden>
+    <div class="paneh"><h2>Voices</h2><span class="dim">Kokoro · runs on this machine</span></div>
+    <p class="lede">Hear one of your own lines in every voice before committing a set to one. Each voice renders as its own small job; <b>Use</b> puts it in the Narrate form.</p>
+    <div class="card" style="display:grid;gap:8px">
+      <label class="f">Line<input id="vLine" maxlength="400" value="Welcome, traveller. The dungeon below has been waiting for you."></label>
+      <div class="row" style="--c:3">
+        <label class="f">Speed <span class="mono" id="vSpeedV">1.00×</span><input type="range" id="vSpeed" min="0.5" max="1.5" step="0.01" value="1"></label>
+        <label class="f">Pitch <span class="mono" id="vPitchV">0 st</span><input type="range" id="vPitch" min="-12" max="12" step="1" value="0"></label>
+        <label class="f">&nbsp;<button type="button" id="vGo">▶ Speak it in every voice</button></label>
+      </div>
+    </div>
+    <div class="cols2" id="voiceGroups"></div>
+  </section>
+
+  <section class="pane" id="p-queue" hidden>
+    <div class="paneh"><h2>Queue</h2><span class="sp"></span><button type="button" id="clearQueue">✕ Clear finished</button></div>
+    <div id="jobList"></div>
+  </section>
+
+  <section class="pane" id="p-gallery" hidden>
+    <div class="paneh"><h2>Gallery</h2><span class="dim mono" id="galCount"></span><span class="sp"></span>
+      <div class="gfilter"><div class="chips" id="galEng"></div><input type="search" id="galQ" placeholder="find words, a name or a seed" aria-label="Search the gallery">
+      <button type="button" id="galOpen" title="open the gallery folder">📂</button></div></div>
+    <p class="lede">Every take keeps its recipe: the exact command, prompt and seed. <b>Load</b> puts a take's settings back in the form; <b>Again</b> renders that exact take again.</p>
+    <div class="grid" id="galGrid"></div>
+  </section>
+
+  <section class="pane" id="p-styles" hidden>
+    <div class="paneh"><h2>Styles</h2><span class="dim">read live from sounds.json</span></div>
+    <p class="lede">Proven prompt snippets appended to your description. Add your own to <code>sounds.json</code>; the key becomes the style's name.</p>
+    <div class="cols2" id="styleCols"></div>
+    <div class="paneh"><h2>Hardware formats</h2><span class="dim">custom_nodes/retro_sfx/nodes.py</span></div>
+    <div class="tablewrap"><table><thead><tr><th>Format</th><th>Rate</th><th>Bits</th><th>Channels</th></tr></thead><tbody id="fmtRows"></tbody></table></div>
+  </section>
+
+  <section class="pane" id="p-adv" hidden>
+    <div class="paneh"><h2>Advanced</h2><span class="badge" id="advCount"></span><span class="sp"></span><button type="button" id="advClear">↺ Clear overrides</button></div>
+    <p class="lede">Blank means soundmon's own default (shown in grey). SA3 already rewrites steps, CFG, sampler and scheduler to the values it needs (8 · 1.0 · lcm · simple) unless you set them here.</p>
+    <div class="advgrid" id="advGrid"></div>
+  </section>
+
+  <section class="pane" id="p-setup" hidden>
+    <div class="paneh"><h2>Setup</h2><span class="dim mono" id="setupFile"></span><span class="sp"></span><button type="button" id="srvRefresh">↻ Check servers</button></div>
+    <p class="lede">GPU engines (SFX, Music, Song) render on a ComfyUI server from <code>servers.json</code>. Chiptune, AdLib, Retro FX, Blips and Narrate run on this machine and never need one.</p>
+    <div class="tablewrap"><table><thead><tr><th>Default</th><th>Server</th><th>State</th><th>SA3 medium</th><th>ACE-Step</th><th>T5Gemma</th><th>Qwen</th><th>Auto-restart</th></tr></thead><tbody id="srvRows"><tr><td colspan="8" class="dim">checking…</td></tr></tbody></table></div>
+    <div class="cols2">
+      <div class="card apps"><h3>Open sounds with</h3><div id="audioApps" class="apps"></div><button type="button" data-addapp="audio_apps">＋ Add a program</button>
+        <div class="hint">"{}" in the arguments marks the file; otherwise it goes last. e.g. <code>audacity</code>, or <code>vlc</code> with <code>--play-and-exit {}</code></div></div>
+      <div class="card apps"><h3>Open folders with</h3><div id="folderApps" class="apps"></div><button type="button" data-addapp="folder_apps">＋ Add a program</button></div>
+    </div>
+    <div><button type="button" class="render" id="saveSetup" style="width:auto;padding:7px 18px">Save setup</button> <span class="toast" id="setupToast"></span></div>
+  </section>
+  </div>
+</main>
+</div>
+
+<div class="sb">
+  <button type="button" class="sb-abort" id="abortBtn" hidden title="cancel every waiting job, stop the running one, and empty the render server's queue">Cancel and abort</button>
+  <span class="np"><button type="button" id="npStop" aria-label="Stop">■</button><canvas id="npWave" width="240" height="36"></canvas><span id="npText" class="mono">nothing playing</span></span>
+  <span id="sbMade"></span>
+  <span id="sbStatus"></span>
+</div>
+<audio id="player" preload="none"></audio>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function el(t, a = {}, ...kids) {
+  const e = document.createElement(t);
+  for (const [k, v] of Object.entries(a)) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v; else if (k === "text") e.textContent = v; else if (k === "html") e.innerHTML = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v === true ? "" : v);
+  }
+  kids.flat().forEach(c => c != null && e.append(c));
+  return e;
+}
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({ error: `${r.status} ${r.statusText}` }));
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+}
+const store = { get(k, d) { try { const v = localStorage.getItem("smgui." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("smgui." + k, JSON.stringify(v)); } catch (e) {} } };
+function toast(msg, err) { const t = $("toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : ""); clearTimeout(toast.t); toast.t = setTimeout(() => t.textContent = "", 6000); }
+
+/* ================= engines ================= */
+const ENG = {
+  sfx:     { icon: "🔊", name: "SFX", sub: "SA3 · GPU", legend: "Describe the sound", ph: "a heavy wooden door slams shut in a stone corridor",
+             hint: "Stable Audio 3 medium on the render server. Seconds conditions the model, so ask for the length you want.", secs: "10" },
+  music:   { icon: "🎵", name: "Music loop", sub: "SA3 · GPU", legend: "Describe the music", ph: "busy neon night market, glitchy synth stabs, dark warehouse techno, instrumental game music",
+             hint: "Loops, beds and stings, up to 120 s. No vocals; use Song for those.", secs: "10" },
+  song:    { icon: "🎤", name: "Song", sub: "ACE-Step · GPU", legend: "Song tags", ph: "synthwave, female vocals, driving bass, 80s drums",
+             hint: "Full songs with sung vocals (ACE-Step 1.5). Genre tags here, lyrics below.", secs: "120" },
+  chip:    { icon: "👾", name: "Chiptune", sub: "2A03 · CPU", legend: "Describe the piece", ph: "boss fight in a crumbling clocktower",
+             hint: "Authentic NES music, composed and synthesized in Python. The words pick a mood; the seed composes the piece.", secs: "60" },
+  opl:     { icon: "🎹", name: "AdLib", sub: "OPL3 · CPU", legend: "Describe the piece", ph: "slow mournful dungeon crawl",
+             hint: "Real OPL3 FM through Nuked OPL3 (build it once with ./download-models.sh --opl).", secs: "60" },
+  fx:      { icon: "💥", name: "Retro FX", sub: "PSG/FM · CPU", legend: "Describe the sound", ph: "coin pickup",
+             hint: "Hand-built PSG or OPL3 recipes for 30 archetypes. Instant, and the same every time for a seed.", secs: "10" },
+  blip:    { icon: "💬", name: "Blips", sub: "synth · CPU", legend: "Line to blip", ph: "Welcome, traveller. The road ahead is long.",
+             hint: "JRPG text-box blips: one tick per letter, pitched by the letter. Paste `key | text` lines for one file each.", secs: "" },
+  narrate: { icon: "🗣", name: "Narrate", sub: "Kokoro · CPU", legend: "Line to speak", ph: "Welcome to Neon Station. The network is watching you.",
+             hint: "Kokoro speaks a line in about a second on the CPU. Paste `key | text` lines for one file each.", secs: "" },
+};
+let META = null, eng = store.get("engine", "sfx");
+let F = store.get("form", {});                      // engine -> {field: value}
+const FIELD_IDS = ["prompt", "reprompt", "seconds", "n", "seed", "loop", "lyrics", "timesig", "lang", "bpm", "key", "scale", "chippy", "arp",
+  "write_mod", "write_rad", "write_midi", "opl_lead", "opl_arp", "opl_bass", "blip_rate", "blip_pitch", "blip_jitter", "blip_duty", "blip_speed",
+  "voice", "speed", "pitch", "bits", "lufs", "name"];
+const CHIP_FIELDS = ["styles", "mood", "archetype", "fx_kind", "blip_style", "blip_wave", "format", "encode", "servers", "from_midi", "from_audio", "opl_bank"];
+const DEFAULTS = { mood: "auto", archetype: "", fx_kind: "psg", blip_style: "synth", blip_wave: "square", format: "none", encode: "wav", styles: [], servers: [],
+  reprompt: true, loop: true, write_mod: true, write_rad: true, n: "1", bits: "16", lufs: "", speed: "1", pitch: "0" };
+function cur() { return F[eng] || (F[eng] = {}); }
+function val(k) { const v = cur()[k]; return v === undefined ? (DEFAULTS[k] ?? "") : v; }
+
+function readForm() {
+  const f = cur();
+  for (const id of FIELD_IDS) { const e = $(id); if (!e) continue; f[id] = e.type === "checkbox" ? e.checked : e.value; }
+  store.set("form", F);
+}
+function writeForm() {
+  for (const id of FIELD_IDS) { const e = $(id); if (!e) continue; const v = val(id); if (e.type === "checkbox") e.checked = !!v; else e.value = v; }
+  drawChips(); drawDrops();
+  $("speedV").textContent = (+$("speed").value).toFixed(2) + "×";
+  $("pitchV").textContent = (+$("pitch").value > 0 ? "+" : "") + $("pitch").value + " st";
+}
+function params() {
+  readForm();
+  const f = cur(), p = { engine: eng };
+  for (const id of FIELD_IDS) p[id] = f[id];
+  for (const k of CHIP_FIELDS) p[k] = val(k);
+  if (p.seed === "" || p.seed == null) delete p.seed;
+  if (!p.lufs) delete p.lufs;
+  p.adv = advValues();
+  return p;
+}
+
+function buildEngines() {
+  $("engines").replaceChildren(...Object.entries(ENG).map(([k, e]) => el("button", { type: "button", class: "eng", "aria-pressed": String(k === eng),
+    onclick: () => { readForm(); eng = k; store.set("engine", eng); showEngine(); } }, el("span", { text: e.icon + " " + e.name }), el("small", { text: e.sub }))));
+}
+function showEngine() {
+  buildEngines();
+  const E = ENG[eng];
+  $("engHint").textContent = E.hint;
+  document.querySelectorAll("#form [data-eng]").forEach(n => n.hidden = !n.dataset.eng.split(" ").includes(eng));
+  $("promptLegend").textContent = E.legend;
+  $("prompt").placeholder = E.ph;
+  $("prompt").rows = ["blip", "narrate"].includes(eng) ? 5 : 3;
+  $("seconds").placeholder = E.secs;
+  $("secsHint").innerHTML = { sfx: "SA3 conditions on length: <b>2 s</b> asks for a short hit, not a cropped long one. Max 120.", music: "Up to 120 s on SA3 (47 on Stable Audio Open).",
+    song: "Up to 1000 s. Songs keep their silence (no trim) so bars stay aligned.", chip: "Rounded to whole bars, so it loops by construction.", opl: "Rounded to whole bars, so it loops by construction.", fx: "0.03 to 10 s." }[eng] || "";
+  $("promptHint").textContent = { blip: "One line, or `key | text` rows (one file per key; # comments are skipped).", narrate: "One line, or `key | text` rows (one file per key; # comments are skipped).",
+    chip: "Optional when you give it a MIDI or audio file to follow.", opl: "Optional when you give it a MIDI or audio file to follow." }[eng] || "";
+  writeForm(); queueCommand();
+}
+
+function chipRow(host, items, key, { multi = false, cls = "", label } = {}) {
+  host.replaceChildren(...(label ? [el("span", { class: "hint", text: label })] : []), ...items.map(it => {
+    const [v, lab, title] = Array.isArray(it) ? it : [it, it];
+    const on = multi ? val(key).includes(v) : val(key) === v;
+    return el("button", { type: "button", class: "chip " + cls, "aria-pressed": String(on), html: lab, title,
+      onclick: () => { const f = cur(); if (multi) { const s = new Set(val(key)); s.has(v) ? s.delete(v) : s.add(v); f[key] = [...s]; } else f[key] = v; store.set("form", F); drawChips(); queueCommand(); } });
+  }));
+}
+function drawChips() {
+  if (!META) return;
+  const st = META.styles, help = k => (st.styles[k] || {}).prompt;
+  const items = []; st.sections.forEach(s => s.keys.forEach(k => items.push([k, s.name === "Modifiers" ? "+" + k : k, help(k)])));
+  chipRow($("styleChips"), items, "styles", { multi: true });
+  chipRow($("fmtChips"), META.formats.map(f => [f.name, f.name + (f.rate ? ` <small>${f.rate >= 10000 ? Math.round(f.rate / 1000) + "k" : f.rate}/${f.bits}${f.mono ? "" : " st"}</small>` : ""),
+    f.rate ? `${f.rate} Hz, ${f.bits}-bit, ${f.mono ? "mono" : "stereo"}` : "the model's own output"]), "format", { cls: "m", label: "Sound like:" });
+  chipRow($("moodChips"), ["auto", ...META.moods], "mood");
+  chipRow($("archChips"), [["", "auto"], ...META.archetypes], "archetype");
+  chipRow($("waveChips"), META.waves, "blip_wave");
+  const gpu = META.engines[eng]?.gpu;
+  chipRow($("encChips"), ["wav", "flac", "ogg", ...(gpu ? ["mp3", "opus"] : [])].map(e => [e, e.toUpperCase()]), "encode", { label: "Save as:" });
+  chipRow($("serverChips"), META.known_servers.map(s => [s, s + (s === META.default_server ? " <small>default</small>" : "")]), "servers", { multi: true });
+  for (const [id, key] of [["fxKind", "fx_kind"], ["blipStyle", "blip_style"]])
+    $(id).querySelectorAll("button").forEach(b => { b.setAttribute("aria-pressed", String(val(key) === b.dataset.v)); b.onclick = () => { cur()[key] = b.dataset.v; store.set("form", F); drawChips(); queueCommand(); }; });
+}
+function drawDrops() {
+  const lab = { from_midi: "drop a .mid here", from_audio: "drop audio here", opl_bank: "built-in (drop a .sbi)" };
+  for (const k of Object.keys(lab)) $(k + "_name").textContent = val(k) || lab[k];
+}
+
+/* ---- the command RENDER would run, straight from the server ---- */
+let cmdTimer = 0, lastTakes = 1;
+function queueCommand() { clearTimeout(cmdTimer); cmdTimer = setTimeout(updateCommand, 200); }
+async function updateCommand() {
+  const p = params();
+  try {
+    const r = await api("/api/command", p);
+    if (r.invalid) throw new Error(r.invalid);
+    $("cli").textContent = r.command; $("cli").classList.remove("err"); lastTakes = r.takes;
+    $("renderBtn").textContent = r.takes > 1 ? `RENDER ${r.takes} ${["blip", "narrate"].includes(eng) ? "LINES" : "TAKES"}` : "RENDER";
+    $("renderBtn").disabled = false;
+  } catch (e) {               // an empty form is a starting point, not an error
+    const empty = !String(p.prompt || "").trim() && !p.from_midi && !p.from_audio;
+    $("cli").textContent = empty ? "the command appears here as you fill in the form" : e.message;
+    $("cli").classList.toggle("err", !empty); $("renderBtn").disabled = true; $("renderBtn").textContent = "RENDER";
+  }
+}
+$("form").addEventListener("input", e => { if (e.target.id === "speed" || e.target.id === "pitch") writeForm(); readForm(); queueCommand(); });
+$("form").addEventListener("change", () => { readForm(); queueCommand(); });
+$("renderBtn").addEventListener("click", async () => {
+  const b = $("renderBtn"); b.disabled = true;
+  try { const r = await api("/api/render", params()); toast(`Queued: ${r.command}`); pollSoon(); }
+  catch (e) { toast(e.message, true); }
+  finally { b.disabled = false; }
+});
+function copyText(t, btn) {
+  const done = () => { if (btn) { const o = btn.textContent; btn.textContent = "COPIED"; setTimeout(() => btn.textContent = o, 1200); } };
+  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(done).catch(() => {
+    const ta = el("textarea", { style: "position:fixed;opacity:0" }); ta.value = t; document.body.append(ta); ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) {} ta.remove(); });
+}
+$("copyCli").addEventListener("click", e => copyText($("cli").textContent, e.target));
+$("resetBtn").addEventListener("click", () => { F[eng] = {}; store.set("form", F); writeForm(); queueCommand(); toast(ENG[eng].name + " fields reset to soundmon's defaults"); });
+
+/* ---- dropping MIDI / audio / banks / manifests on the form ---- */
+async function upload(file) {
+  const r = await fetch("/api/upload?filename=" + encodeURIComponent(file.name), { method: "POST", body: file });
+  const j = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+}
+document.querySelectorAll("[data-drop]").forEach(d => {
+  const key = d.dataset.drop;
+  d.addEventListener("dragover", e => { e.preventDefault(); d.classList.add("over"); });
+  d.addEventListener("dragleave", () => d.classList.remove("over"));
+  d.addEventListener("drop", async e => {
+    e.preventDefault(); d.classList.remove("over");
+    const file = e.dataTransfer.files[0]; if (!file) return;
+    try { const j = await upload(file); cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); }
+    catch (err) { toast(err.message, true); }
+  });
+  d.addEventListener("click", e => { if (e.target.dataset.clear) return; const inp = el("input", { type: "file" }); inp.onchange = async () => {
+    if (!inp.files[0]) return; try { const j = await upload(inp.files[0]); cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); } catch (err) { toast(err.message, true); } }; inp.click(); });
+});
+document.querySelectorAll("[data-clear]").forEach(b => b.addEventListener("click", e => { e.stopPropagation(); cur()[b.dataset.clear] = ""; store.set("form", F); drawDrops(); queueCommand(); }));
+$("prompt").addEventListener("dragover", e => e.preventDefault());
+$("prompt").addEventListener("drop", async e => {                    // a .txt manifest dropped on the text box
+  const file = e.dataTransfer.files[0]; if (!file) return; e.preventDefault();
+  try { const j = await upload(file); if (j.text != null) { $("prompt").value = j.text; readForm(); queueCommand(); } else toast("drop a .txt of `key | text` lines here", true); }
+  catch (err) { toast(err.message, true); }
+});
+
+/* ================= tabs ================= */
+const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
+let tab = store.get("tab", "gallery");
+function showTab(t) {
+  if (!TABS.some(x => x[0] === t)) t = "gallery";
+  tab = t; store.set("tab", t);
+  const busy = JOBS.filter(j => j.status === "queued" || j.status === "running").length;
+  $("tabs").replaceChildren(...TABS.map(([k, l]) => el("button", { type: "button", role: "tab", class: "tab", "aria-selected": String(k === t), onclick: () => showTab(k),
+    html: esc(l) + (k === "queue" && busy ? `<span class="n">${busy}</span>` : k === "adv" && advCountN() ? `<span class="n">${advCountN()}</span>` : "") })));
+  TABS.forEach(([k]) => $("p-" + k).hidden = k !== t);
+  if (t === "gallery") loadGallery();
+  if (t === "sets") loadSets();
+  if (t === "voices") drawVoices();
+  if (t === "setup") loadServers();
+  if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
+}
+addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+
+/* ================= playback & waveforms ================= */
+const player = $("player"), PEAKS = new Map();
+let actx = null, nowKey = null;
+async function peaksFor(url) {
+  if (PEAKS.has(url)) return PEAKS.get(url);
+  const pr = (async () => {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const buf = await (await fetch(url)).arrayBuffer();
+    const a = await actx.decodeAudioData(buf);
+    const ch = a.getChannelData(0), n = 400, step = Math.max(1, Math.floor(ch.length / n)), out = new Float32Array(n);
+    for (let i = 0; i < n; i++) { let m = 0; const s = i * step; for (let j = 0; j < step && s + j < ch.length; j += 4) { const v = Math.abs(ch[s + j]); if (v > m) m = v; } out[i] = m; }
+    return { peaks: out, dur: a.duration, rate: a.sampleRate, chans: a.numberOfChannels };
+  })().catch(() => null);
+  PEAKS.set(url, pr); return pr;
+}
+function drawPeaks(cv, w, pos = -1) {
+  const dpr = devicePixelRatio || 1, W = cv.width = Math.max(1, cv.clientWidth * dpr), H = cv.height = Math.max(1, cv.clientHeight * dpr), g = cv.getContext("2d");
+  g.clearRect(0, 0, W, H);
+  if (!w) { g.fillStyle = "#33333f"; g.fillRect(0, H / 2 - 1, W, 2); return; }
+  const cs = getComputedStyle(document.documentElement), acc = cs.getPropertyValue("--accent").trim(), dim = cs.getPropertyValue("--dim").trim(), bad = cs.getPropertyValue("--bad").trim();
+  const n = w.peaks.length, bw = W / n;
+  for (let i = 0; i < n; i++) { const v = w.peaks[i], h = Math.max(1, v * (H / 2 - 1));
+    g.fillStyle = v > 0.995 ? bad : pos >= 0 && i / n > pos ? dim : acc; g.fillRect(i * bw, H / 2 - h, Math.max(1, bw - (bw > 2 ? 1 : 0)), h * 2); }
+}
+const io = new IntersectionObserver(es => es.forEach(async e => { if (!e.isIntersecting) return; io.unobserve(e.target); const w = await peaksFor(e.target.dataset.url); e.target._w = w; drawPeaks(e.target, w); if (w && e.target._meta) e.target._meta(w); }), { rootMargin: "300px" });
+function play(url, label, cv) {
+  if (nowKey === url && !player.paused) { stopPlay(); return; }
+  player.src = url; player.play().catch(e => toast("can't play this here: " + e.message, true));
+  nowKey = url; $("npText").textContent = "▶ " + label;
+  document.querySelectorAll(".gcard.playing").forEach(c => c.classList.remove("playing"));
+  cv?.closest(".gcard")?.classList.add("playing");
+  peaksFor(url).then(w => { $("npWave")._w = w; drawPeaks($("npWave"), w, 0); });
+}
+function stopPlay() { player.pause(); nowKey = null; $("npText").textContent = "nothing playing"; document.querySelectorAll(".gcard.playing").forEach(c => c.classList.remove("playing")); drawPeaks($("npWave"), $("npWave")._w, -1); }
+player.addEventListener("timeupdate", () => { if (player.duration) drawPeaks($("npWave"), $("npWave")._w, player.currentTime / player.duration); });
+player.addEventListener("ended", stopPlay);
+$("npStop").addEventListener("click", stopPlay);
+$("npWave").addEventListener("click", e => { if (player.duration) { const r = e.target.getBoundingClientRect(); player.currentTime = (e.clientX - r.left) / r.width * player.duration; } });
+document.addEventListener("keydown", e => { if (e.key === " " && !/INPUT|TEXTAREA|SELECT|BUTTON/.test(document.activeElement.tagName) && nowKey) { e.preventDefault(); stopPlay(); } });
+const fileUrl = (dir, file, dl) => "/files/" + encodeURIComponent(dir) + "/" + file.split("/").map(encodeURIComponent).join("/") + (dl ? "?download" : "");
+
+/* ================= queue ================= */
+let JOBS = [], pollT = 0, wasBusy = false, MADE = 0;
+const fmtT = s => s >= 60 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}` : `${Math.round(s)} s`;
+async function poll() {
+  clearTimeout(pollT);
+  try {
+    const r = await api("/api/jobs"); JOBS = r.jobs; MADE = r.made;
+    const busy = JOBS.some(j => j.status === "queued" || j.status === "running");
+    drawQueue(); statusBar(r.render, busy);
+    setsOnPoll();
+    if (tab === "voices") drawVoices();
+    if (wasBusy && !busy && tab === "gallery") loadGallery();
+    if (wasBusy !== busy) showTab(tab);
+    wasBusy = busy;
+    pollT = setTimeout(poll, busy ? 1200 : 5000);
+  } catch (e) { $("sbStatus").textContent = "GUI server unreachable"; pollT = setTimeout(poll, 5000); }
+}
+function pollSoon() { clearTimeout(pollT); pollT = setTimeout(poll, 300); }
+let lastQueue = "";
+function drawQueue() {
+  const sig = JSON.stringify(JOBS.map(j => [j.id, j.status, j.done, j.log.length]));
+  if (sig === lastQueue) return; lastQueue = sig;
+  const host = $("jobList");
+  if (!JOBS.length) { host.replaceChildren(el("div", { class: "empty", text: "Nothing rendered yet this session. Describe a sound and press RENDER." })); return; }
+  host.replaceChildren(...[...JOBS].reverse().map(j => {
+    const E = ENG[j.engine] || {}, st = { queued: ["", "queued"], running: ["ac", "running"], done: ["ok", "done"], failed: ["bad", "failed"], cancelled: ["warn", "cancelled"] }[j.status] || ["", j.status];
+    const t = j.finished ? fmtT(j.finished - (j.started || j.created)) : j.started ? fmtT(Date.now() / 1000 - j.started) : "";
+    const prompt = j.params.prompt ? j.params.prompt.split("\n")[0].slice(0, 90) : "";
+    const card = el("div", { class: "card job" + (j.status === "failed" ? " failed" : "") },
+      el("h4", {}, el("span", { class: "badge " + st[0], text: st[1] }), `${E.icon || ""} ${E.name || j.engine}`, el("span", { class: "dim", text: prompt })),
+      el("span", { class: "dim mono", text: `${j.done}/${j.total}${t ? " · " + t : ""}` }),
+      el("div", { class: "cmd", text: j.command }));
+    if (j.status === "running" || j.status === "queued") card.append(el("div", { class: "bar" }, el("i", { style: `width:${j.total ? Math.round(100 * j.done / j.total) : 0}%` })));
+    if (j.error) card.append(el("div", { class: "err", text: j.error }));
+    if (j.outputs.length) card.append(el("div", { class: "outs" }, ...j.outputs.map(o => el("button", { type: "button", text: "▶ " + o.file.split("/").pop(), onclick: () => play(fileUrl(j.dir, o.file), o.file) }))));
+    const acts = el("div", { class: "btnrow" });
+    if (j.status === "queued" || j.status === "running") acts.append(el("button", { type: "button", text: "Cancel", onclick: () => api("/api/cancel/" + j.id, {}).then(pollSoon) }));
+    acts.append(el("button", { type: "button", text: "Load", title: "put these settings back in the form", onclick: () => loadSettings(j.params) }));
+    card.querySelector("h4").after(acts); acts.style.gridColumn = "2"; acts.style.gridRow = "2";
+    if (j.log.length && j.status !== "done") card.append(el("pre", { class: "log", text: j.log.slice(-14).join("\n") }));
+    return card;
+  }));
+}
+$("clearQueue").addEventListener("click", () => api("/api/jobs/clear", {}).then(pollSoon));
+$("abortBtn").addEventListener("click", async () => {
+  try { const r = await api("/api/jobs/abort", {}); toast(`Stopped ${r.cancelled} job(s)` + (Object.keys(r.servers).length ? `; cleared ${Object.keys(r.servers).join(", ")}` : "")); } catch (e) { toast(e.message, true); }
+  pollSoon();
+});
+function statusBar(render, busy) {
+  $("abortBtn").hidden = !busy;
+  $("sbMade").textContent = `${MADE} sound${MADE === 1 ? "" : "s"} made this session`;
+  const run = JOBS.find(j => j.status === "running"), q = JOBS.filter(j => j.status === "queued").length;
+  $("sbStatus").textContent = run ? `${(ENG[run.engine] || {}).name} · ${run.done}/${run.total}${q ? ` · ${q} queued` : ""}` : "idle";
+  $("srvName").textContent = render.server + (render.stuck ? " · stuck" : render.up ? " · up" : " · down");
+  $("srvDot").className = "dot " + (render.stuck ? "warn" : render.up ? "up" : "down");
+}
+$("srvPill").addEventListener("click", () => showTab("setup"));
+
+/* ================= gallery ================= */
+let GAL = [], galEng = store.get("galEng", "all");
+async function loadGallery() { try { GAL = (await api("/api/gallery")).items; drawGallery(); } catch (e) { $("galGrid").replaceChildren(el("div", { class: "empty", text: e.message })); } }
+function drawGallery() {
+  const engs = [...new Set(GAL.map(j => j.engine))];
+  $("galEng").replaceChildren(...["all", ...engs].map(k => el("button", { type: "button", class: "chip", "aria-pressed": String(galEng === k), text: k === "all" ? "All" : (ENG[k]?.icon || "") + " " + (ENG[k]?.name || k),
+    onclick: () => { galEng = k; store.set("galEng", k); drawGallery(); } })));
+  const q = $("galQ").value.trim().toLowerCase();
+  const cards = [];
+  for (const j of GAL) {
+    if (galEng !== "all" && j.engine !== galEng) continue;
+    for (const o of j.outputs) {
+      const hay = `${textFor(j.params, o.file)} ${o.file} ${o.seed ?? ""} ${j.params.name || ""}`.toLowerCase();
+      if (q && !hay.includes(q)) continue;
+      cards.push(card(j, o));
+      if (cards.length >= 300) break;
+    }
+  }
+  $("galCount").textContent = cards.length ? `${cards.length} sound${cards.length === 1 ? "" : "s"}` : "";
+  $("galGrid").replaceChildren(...(cards.length ? cards : [el("div", { class: "empty", text: GAL.length ? "No sounds match. Clear the search or pick All." : "No sounds yet. Render something and it lands here." })]));
+}
+$("galQ").addEventListener("input", drawGallery);
+$("galOpen").addEventListener("click", () => api("/api/open", { target: { folder: true } }).then(r => toast("Opened " + r.opened)).catch(e => toast(e.message, true)));
+function textFor(p, file) {
+  // a manifest job: the line this file was made from (`key | text` -> key.wav), else the description
+  const stem = file.split("/").pop().replace(/\.[^.]+$/, ""), lines = String(p.prompt || "").split("\n");
+  if (lines.length > 1 || lines[0].includes("|")) {
+    const hit = lines.find(l => l.includes("|") && l.split("|")[0].trim() === stem);
+    if (hit) return hit.split("|").slice(1).join("|").trim();
+  }
+  return lines[0];
+}
+function card(j, o) {
+  const E = ENG[j.engine] || {}, url = fileUrl(j.dir, o.file), name = o.file.split("/").pop();
+  const cv = el("canvas", { "data-url": url, title: "play / stop" }), meta = el("div", { class: "meta" });
+  const base = [o.seed != null ? "seed " + o.seed : null, name.split(".").pop().toUpperCase()].filter(Boolean);
+  meta.textContent = base.join(" · ");
+  cv._meta = w => { meta.textContent = [fmtT(w.dur).replace(/^(\d+) s$/, (m, s) => (+w.dur).toFixed(2) + " s"), `${(w.rate / 1000).toFixed(w.rate % 1000 ? 1 : 0)} kHz`, w.chans === 1 ? "mono" : "stereo", ...base].join(" · "); };
+  cv.addEventListener("click", () => play(url, name, cv));
+  io.observe(cv);
+  const r = (j.ratings || {})[o.file] || 0;
+  const stars = el("span", { class: "stars" }, ...[1, 2, 3, 4, 5].map(n => el("button", { type: "button", class: n <= r ? "on" : "", text: "★", "aria-label": `${n} star${n > 1 ? "s" : ""}`,
+    onclick: async () => { try { j.ratings = (await api("/api/rate", { dir: j.dir, file: o.file, stars: n === r ? 0 : n })).ratings; drawGallery(); } catch (e) { toast(e.message, true); } } })));
+  const again = () => { const p = JSON.parse(JSON.stringify(j.params)); if (o.seed != null) p.seed = o.seed; p.n = 1; return p; };
+  const cmd = j.command + (o.seed != null && !/--seed/.test(j.command) ? ` --seed ${o.seed}` : "");
+  return el("div", { class: "card gcard" },
+    el("div", { class: "t" }, el("b", { text: name, title: o.file }), el("span", { class: "badge", text: (E.icon || "") + " " + (E.name || j.engine) })),
+    cv, meta,
+    j.params.prompt ? el("div", { class: "p", text: textFor(j.params, o.file), title: j.params.prompt }) : null,
+    el("div", { class: "t" }, stars, el("span", { class: "btnrow" },
+      el("button", { type: "button", text: "Load", title: "put this take's settings back in the form", onclick: () => loadSettings(j.params, o.seed) }),
+      el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", onclick: () => api("/api/render", again()).then(r => { toast("Queued: " + r.command); pollSoon(); }).catch(e => toast(e.message, true)) }))),
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "Copy CLI", onclick: e => copyText(cmd, e.target) }),
+      el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
+      ...(o.scores || []).map(s => el("a", { class: "b", href: fileUrl(j.dir, s, true), text: "⬇ " + s.split(".").pop(), title: "tracker / MIDI score" })),
+      el("button", { type: "button", text: "📂", title: "open this job's folder", onclick: () => api("/api/open", { target: { folder: true, dir: j.dir } }).catch(e => toast(e.message, true)) })));
+}
+function loadSettings(p, seed) {
+  readForm();
+  eng = p.engine || "sfx"; store.set("engine", eng);
+  const f = {}; for (const k of [...FIELD_IDS, ...CHIP_FIELDS]) if (p[k] !== undefined) f[k] = p[k];
+  if (seed != null) { f.seed = String(seed); f.n = "1"; }
+  F[eng] = f; store.set("form", F);
+  setAdv(p.adv || {});
+  showEngine(); toast(seed != null ? `Loaded the settings of seed ${seed}` : "Loaded those settings");
+}
+
+/* ================= sets ================= */
+let SETQ = "", SET_CMD = "";
+const FIXED = ["blip", "narrate"];                   // same text in, same sound out: takes are voices, not seeds
+let SETS = [], SET = null, setId = store.get("set", ""), selKey = null, setFilt = "all", setSig = "";
+const heard = {};                                      // key -> take heard last (not saved)
+async function loadSets(keepSel) {
+  try {
+    SETS = (await api("/api/sets")).sets;
+    if (!SETS.some(s => s.id === setId)) setId = SETS[0]?.id || "";
+    $("setSel").replaceChildren(...(SETS.length ? SETS.map(s => el("option", { value: s.id, text: `${s.name} · ${s.keys} keys · ${(ENG[s.engine] || {}).name || s.engine}`, selected: s.id === setId }))
+      : [el("option", { value: "", text: "no sets yet" })]));
+    $("setEditBtn").disabled = !setId;
+    if (!setId) { SET = null; drawSet(); if (!SETS.length && $("setEditor").hidden) openEditor(true); return; }
+    await loadSet(keepSel);
+  } catch (e) { $("setBody").replaceChildren(el("div", { class: "empty", text: e.message })); }
+}
+async function loadSet(keepSel) {
+  SET = await api("/api/set?id=" + encodeURIComponent(setId));
+  SET_CMD = await themeText({ engine: SET.set.theme.engine, params: SET.set.theme.params }, SET.set.theme.takes);
+  store.set("set", setId);
+  if (!keepSel || !SET.set.rows.some(r => r.key === selKey)) selKey = (SET.set.rows.find(r => !SET.set.picks[r.key]) || SET.set.rows[0] || {}).key;
+  drawSet();
+}
+$("setSel").addEventListener("change", e => { setId = e.target.value; selKey = null; loadSet(); });
+function setJobSig() { return JSON.stringify(JOBS.filter(j => j.group === "set:" + setId).map(j => [j.id, j.status, j.done])); }
+function setsOnPoll() { if (tab !== "sets" || !setId) return; const s = setJobSig(); if (s !== setSig) { setSig = s; loadSet(true); } }
+const takeUrl = t => fileUrl(t.job, t.file);
+const nowUrl = key => `/api/set/now?id=${encodeURIComponent(setId)}&key=${encodeURIComponent(key)}`;
+const tlabel = (t, i) => t.voice ? t.voice.replace(/^[ab][mf]_/, "") : String(i + 1).padStart(2, "0");
+
+function drawSet() {
+  const host = $("setBody");
+  if (!SET) { host.replaceChildren(el("div", { class: "empty", html: "A <b>set</b> is a list of sounds a game needs. soundmon renders takes for every key, you hear them next to the sound the game has today, pick one per key, and export the picks into the game folder under their keys. Press <b>＋ New set</b> to start." })); return; }
+  const S = SET.set, T = S.theme, takes = SET.takes, now = SET.now, pend = SET.pending, E = ENG[T.engine] || {};
+  const rows = S.rows, n = rows.length;
+  const missing = rows.filter(r => !(takes[r.key] || []).length).length, picked = rows.filter(r => S.picks[r.key]).length;
+  const two = Object.values(now).filter(v => v.length > 1).length, nTakes = Object.values(takes).reduce((a, v) => a + v.length, 0);
+  const busy = Object.values(pend).reduce((a, v) => a + v, 0);
+  const pills = el("div", { class: "pills", html: `<span class="pill"><b>${n}</b> keys</span><span class="pill"><b>${nTakes}</b> takes</span><span class="pill pk"><b>${picked}</b> picked</span>`
+    + `<span class="pill warn"><b>${n - picked - missing}</b> to pick</span><span class="pill bad"><b>${missing}</b> without takes</span>`
+    + (busy ? `<span class="pill ok"><b>${busy}</b> rendering</span>` : "") + (Object.keys(S.flags).length ? `<span class="pill bad"><b>${Object.keys(S.flags).length}</b> flagged</span>` : "")
+    + (two ? `<span class="pill warn"><b>${two}</b> in two formats in the game</span>` : "") });
+  const ex = T.export, th = [["Engine", `${E.icon || ""} ${E.name || T.engine}`], ["Takes per key", T.engine === "narrate" && T.voices.length ? T.voices.join(", ") : T.takes],
+    ["Game folder", T.game_folder || "— none (set one to export)"], ["Exports as", `<key>.${ex.encode === "same" ? "<as made>" : ex.encode}${ex.rate ? " · " + ex.rate + " Hz" : ""}${ex.mono ? " · mono" : ""}`],
+    ["Theme command", SET_CMD || "…"]];
+  const theme = el("div", { class: "card theme" }, ...th.map(([a, b]) => el("div", {}, el("span", { text: a }), el("code", { text: String(b) }))));
+  const F = [["all", "All"], ["topick", "To pick"], ["picked", "Picked"], ["missing", "Without takes"], ["flagged", "Flagged"]];
+  const q = el("input", { type: "search", id: "setQ", placeholder: "find a key or words in its prompt", "aria-label": "Find a key", value: SETQ });
+  q.addEventListener("input", () => { SETQ = q.value; drawRows(); });
+  const filters = el("div", { class: "filters" }, el("div", { class: "chips" }, ...F.map(([k, l]) => el("button", { type: "button", class: "chip", "aria-pressed": String(setFilt === k), text: l, onclick: () => { setFilt = k; drawSet(); } }))), q,
+    el("button", { type: "button", text: `Render ${missing} without takes`, disabled: !missing, onclick: () => renderKeys("missing") }));
+  const list = el("div", { id: "setRows" });
+  const keys = el("div", { class: "keys", html: "<kbd>1</kbd>–<kbd>0</kbd> hear takes · <kbd>N</kbd> hear the game's current file · <kbd>P</kbd> pick what you heard · <kbd>F</kbd> flag it · <kbd>J</kbd>/<kbd>K</kbd> next / previous key · <kbd>Space</kbd> stop" });
+  host.replaceChildren(pills, theme, filters, list, keys, exportBar());
+  drawRows();
+}
+function visibleRows() {
+  const S = SET.set, takes = SET.takes, q = SETQ.trim().toLowerCase();
+  return S.rows.filter(r => {
+    if (q && !(r.key + " " + r.prompt).toLowerCase().includes(q)) return false;
+    const has = (takes[r.key] || []).length, p = S.picks[r.key];
+    return setFilt === "all" || (setFilt === "missing" && !has) || (setFilt === "picked" && p) || (setFilt === "topick" && has && !p) || (setFilt === "flagged" && S.flags[r.key]);
+  });
+}
+function drawRows() {
+  const host = $("setRows"); if (!host) return;
+  const vis = visibleRows(), groups = [];
+  for (const r of vis) { if (!groups.length || groups[groups.length - 1][0] !== r.group) groups.push([r.group, []]); groups[groups.length - 1][1].push(r); }
+  host.replaceChildren(...(vis.length ? groups.map(([g, rs]) => el("div", { class: "group" }, g ? el("h3", { text: g }) : null, ...rs.map(keyRow)))
+    : [el("div", { class: "empty", text: "No keys match. Clear the search or pick another filter." })]));
+}
+function keyRow(r) {
+  const S = SET.set, k = r.key, takes = SET.takes[k] || [], pick = S.picks[k], h = heard[k], flags = new Set(S.flags[k] || []), isSel = k === selKey;
+  const nowFiles = SET.now[k] || [], pend = SET.pending[k] || 0;
+  const row = el("div", { class: "krow" + (isSel ? " sel" : "") + (pick ? " picked" : "") });
+  const sub = [r.seconds && !["narrate", "blip"].includes(S.theme.engine) ? r.seconds + " s" : null, nowFiles.length > 1 ? "⚠ " + nowFiles.map(f => f.split(".").pop()).join(" + ") : null, flags.size ? "flagged" : null, S.notes[k] ? "note" : null].filter(Boolean).join(" · ");
+  row.append(el("div", { class: "k", onclick: () => select(k), html: `${esc(k)}<small>${esc(sub)}</small>` }));
+  row.append(el("div", { class: "p", text: r.prompt, title: r.prompt, onclick: () => select(k) }));
+  const strip = el("div", { class: "takes" });
+  strip.append(el("button", { type: "button", class: "tk now" + (pick === "now" ? " chosen" : ""), text: "▶ NOW", disabled: !nowFiles.length, title: nowFiles.length ? "the file the game plays today: " + nowFiles[0] : "the game has no file for this key yet",
+    onclick: () => { select(k, true); play(nowUrl(k), k + " · in the game now"); } }), el("span", { class: "vsep" }));
+  if (!takes.length) strip.append(el("span", { class: "miss", text: pend ? `rendering ${pend}…` : "no takes yet" }));
+  takes.forEach((t, i) => {
+    const cls = ["tk"]; if (pick === t.take) cls.push("chosen"); else if (h === t.take) cls.push("heard"); if (flags.has(t.take)) cls.push("flag");
+    strip.append(el("button", { type: "button", class: cls.join(" "), text: tlabel(t, i), title: `take ${i + 1} · seed ${t.seed ?? "?"}`, onclick: () => hear(k, i) }));
+  });
+  if (takes.length && pend) strip.append(el("span", { class: "miss", text: `+${pend} rendering…` }));
+  row.append(strip);
+  const took = pick && pick !== "now" && (!h || h === pick);
+  const ti = took ? takes.findIndex(t => t.take === pick) : h ? takes.findIndex(t => t.take === h) : -1;
+  const act = el("div", { class: "kact" },
+    el("button", { type: "button", class: "pick" + (took || pick === "now" ? " done" : ""), disabled: !h && !pick,
+      text: took ? "PICKED " + tlabel(takes[ti] || {}, ti) : h ? "PICK " + tlabel(takes[ti] || {}, ti) : pick === "now" ? "KEEPING OLD" : "PICK",
+      onclick: () => h ? mark(k, "pick", h) : pick ? mark(k, "pick", null) : null }),
+    el("button", { type: "button", text: "Keep old", disabled: !nowFiles.length || pick === "now", title: "keep the file the game has today", onclick: () => mark(k, "pick", "now") }),
+    el("button", { type: "button", text: !takes.length ? "Render" : FIXED.includes(SET.set.theme.engine) ? "Re-render" : "＋" + SET.set.theme.takes,
+      title: FIXED.includes(SET.set.theme.engine) ? "render this key again (after editing its line)" : "render more takes for this key", onclick: () => renderKeys([k]) }));
+  row.append(act);
+  if (isSel && takes.length) row.append(detail(r, takes));
+  return row;
+}
+function detail(r, takes) {
+  const S = SET.set, k = r.key, cur = heard[k] || (S.picks[k] && S.picks[k] !== "now" ? S.picks[k] : takes[0].take), i = Math.max(0, takes.findIndex(t => t.take === cur)), t = takes[i];
+  const cvA = el("canvas", { title: "play / stop" }), cvB = el("canvas", { title: "play / stop" }), hasNow = (SET.now[k] || []).length;
+  cvA.onclick = () => play(takeUrl(t), `${k} · take ${tlabel(t, i)}`); cvB.onclick = () => hasNow && play(nowUrl(k), k + " · in the game now");
+  const left = el("div", { style: "display:grid;gap:6px;min-width:0" }, el("div", { class: "wv" }, el("span", { text: "take " + tlabel(t, i) }), cvA), hasNow ? el("div", { class: "wv" }, el("span", { text: "now" }), cvB) : null);
+  peaksFor(takeUrl(t)).then(w => drawPeaks(cvA, w)); if (hasNow) peaksFor(nowUrl(k)).then(w => drawPeaks(cvB, w));
+  const flagged = (S.flags[k] || []).includes(t.take);
+  const promptIn = el("input", { value: r.prompt, "aria-label": "Prompt for " + k });
+  const rc = el("div", { class: "recipe" },
+    el("div", { html: `<b>${esc(k)}</b> · take ${esc(tlabel(t, i))} · seed <b>${esc(t.seed ?? "?")}</b>` }),
+    el("div", { text: t.command || "" }),
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "▶ A/B", disabled: !hasNow, title: "this take, then the game's current file", onclick: () => { play(takeUrl(t), `${k} · A: take ${tlabel(t, i)}`); player.addEventListener("ended", () => play(nowUrl(k), k + " · B: in the game now"), { once: true }); } }),
+      el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", disabled: t.seed == null, onclick: () => renderKeys([k], { seed: t.seed }) }),
+      el("button", { type: "button", text: flagged ? "Unflag" : "Flag", onclick: () => mark(k, flagged ? "unflag" : "flag", t.take) }),
+      el("button", { type: "button", text: "Copy CLI", onclick: e => copyText((t.command || "") + (t.seed != null && !/--seed/.test(t.command || "") ? " --seed " + t.seed : ""), e.target) }),
+      el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) })),
+    el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
+      try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
+  return el("div", { class: "detail" }, left, rc);
+}
+function select(k, quiet) { if (selKey !== k) { selKey = k; drawRows(); } }
+function hear(k, i) {
+  const takes = SET.takes[k] || [], t = takes[i]; if (!t) return;
+  selKey = k; heard[k] = t.take; drawRows();
+  play(takeUrl(t), `${k} · take ${tlabel(t, i)}`);
+}
+async function mark(k, action, take) {
+  try { SET.set = (await api("/api/sets/mark", { id: setId, key: k, action, take })).set; if (action === "pick") delete heard[k]; drawSet(); }
+  catch (e) { toast(e.message, true); }
+}
+async function renderKeys(keys, extra = {}) {
+  try { const r = await api("/api/sets/render", { id: setId, keys, ...extra }); toast(`Queued ${r.jobs.length} render${r.jobs.length > 1 ? "s" : ""}`); pollSoon(); setTimeout(() => loadSet(true), 600); }
+  catch (e) { toast(e.message, true); }
+}
+document.addEventListener("keydown", e => {
+  if (tab !== "sets" || !SET || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+  const vis = visibleRows(), idx = vis.findIndex(r => r.key === selKey), k = selKey;
+  if (/^[0-9]$/.test(e.key) && k) { hear(k, e.key === "0" ? 9 : +e.key - 1); }
+  else if (e.key === "n" && k && (SET.now[k] || []).length) play(nowUrl(k), k + " · in the game now");
+  else if (e.key === "p" && heard[k]) mark(k, "pick", heard[k]);
+  else if (e.key === "f" && heard[k]) mark(k, "flag", heard[k]);
+  else if (e.key === "j" && idx < vis.length - 1) { selKey = vis[idx + 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
+  else if (e.key === "k" && idx > 0) { selKey = vis[idx - 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
+  else return;
+  e.preventDefault();
+});
+function exportBar() {
+  const S = SET.set, T = S.theme, picks = S.rows.filter(r => S.picks[r.key] && S.picks[r.key] !== "now").length;
+  const two = Object.entries(SET.now).filter(([, v]) => v.length > 1).map(([k]) => k);
+  const ext = T.export.encode === "same" ? "<as made>" : T.export.encode;
+  const plan = el("div", { class: "plan", hidden: true });
+  const bar = el("div", { class: "exportbar" },
+    el("div", { class: "t", html: T.game_folder ? `Export <b>${picks} pick${picks === 1 ? "" : "s"}</b> → <code>${esc(T.game_folder)}</code> as <code>${esc("<key>." + ext)}</code> · anything replaced is copied to <code>.soundmon-backup/</code> first`
+      + (two.length ? `<div class="w">⚠ ${two.length} key${two.length > 1 ? "s" : ""} (${esc(two.slice(0, 4).join(", "))}${two.length > 4 ? "…" : ""}) exist in two formats in the game folder; the game may keep playing the other one.</div>` : "")
+      : "Set a <b>game folder</b> in ✎ Edit set to export picks into the game." }),
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "Preview", disabled: !T.game_folder || !picks, onclick: async () => {
+        try { const r = await api("/api/sets/export", { id: setId, preview: true }); plan.hidden = false;
+          plan.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Key</th><th>Becomes</th><th>Change</th><th>Also in the game</th></tr></thead><tbody>${r.plan.map(p =>
+            `<tr><td class="mono">${esc(p.key)}</td><td class="mono">${esc(p.to)}</td><td>${p.unchanged ? '<span class="dim">already exported</span>' : p.replaces ? '<span class="badge warn">replaces (backed up)</span>' : '<span class="badge ok">new file</span>'}${p.convert ? ' <span class="badge">converted</span>' : ""}</td><td class="mono" style="color:var(--warn)">${esc(p.other_formats.join(", "))}</td></tr>`).join("")}</tbody></table></div>`;
+        } catch (e) { toast(e.message, true); } } }),
+      el("button", { type: "button", class: "go", text: "Export picks", disabled: !T.game_folder || !picks, onclick: async e => {
+        e.target.disabled = true;
+        try { const r = await api("/api/sets/export", { id: setId }); toast(`Exported ${r.exported.length}` + (r.skipped ? `, ${r.skipped} unchanged` : "") + (r.errors.length ? `; ${r.errors.length} failed: ${r.errors[0].key}: ${r.errors[0].error}` : "") + (r.backup ? ` · backup in ${r.backup}` : ""), !!r.errors.length); loadSet(true); }
+        catch (err) { toast(err.message, true); } finally { e.target.disabled = false; } } })),
+    plan);
+  return bar;
+}
+
+/* ---- new / edit set ---- */
+let ED = null;                                          // the theme being edited
+function themeFromForm() { const p = params(); delete p.prompt; delete p.seed; delete p.n; delete p.name; return { engine: eng, params: p }; }
+async function themeText(th, n) {
+  try { const r = await api("/api/command", { ...th.params, engine: th.engine, prompt: "PROMPT", name: "KEY", n: n || 1 }); return r.invalid ? "⚠ " + r.invalid : r.command; } catch (e) { return "⚠ " + e.message; }
+}
+async function showTheme() {
+  $("edTheme").textContent = `${(ENG[ED.engine] || {}).icon || ""} ${(ENG[ED.engine] || {}).name || ED.engine}: ` + await themeText(ED, +$("edTakes").value);
+  $("edVoicesWrap").hidden = ED.engine !== "narrate";
+  $("edTakes").closest("label").hidden = FIXED.includes(ED.engine);
+  if (ED.engine === "narrate") $("edVoices").replaceChildren(...Object.keys(META.voices).map(v => el("button", { type: "button", class: "chip", "aria-pressed": String((ED.voices || []).includes(v)), text: v,
+    onclick: () => { const s = new Set(ED.voices || []); s.has(v) ? s.delete(v) : s.add(v); ED.voices = [...s]; showTheme(); } })));
+}
+function openEditor(isNew) {
+  $("setEditor").hidden = false;
+  const S = !isNew && SET ? SET.set : null;
+  $("edTitle").textContent = S ? "Edit " + S.name : "New set";
+  $("edSave").textContent = S ? "Save set" : "Create set";
+  $("edName").value = S ? S.name : "";
+  $("edFolder").value = S ? S.theme.game_folder : "";
+  $("edManifest").value = S ? S.rows.map(r => {
+    const ex = r.extra || {};
+    if (ex.bpm) return `${r.key} | ${r.seconds} | ${ex.bpm} | ${ex.key} | ${ex.mood}`;
+    return r.seconds != null ? `${r.key} | ${r.seconds}${ex.loop ? "s loop" : ""} | ${r.prompt}` : `${r.key} | ${r.prompt}`;
+  }).reduce((a, line, i) => { const g = S.rows[i].group, prev = i ? S.rows[i - 1].group : null; if (g && g !== prev && !S.rows[i].key.startsWith(g + ".") && !S.rows[i].key.startsWith(g + "/")) a.push(`[${g}]`); a.push(line); return a; }, []).join("\n") : "";
+  $("edTakes").value = S ? S.theme.takes : (eng === "narrate" ? 1 : 10);
+  $("edEnc").value = S ? S.theme.export.encode : "wav"; $("edRate").value = S && S.theme.export.rate ? S.theme.export.rate : ""; $("edMono").checked = S ? S.theme.export.mono : false;
+  ED = S ? { engine: S.theme.engine, params: S.theme.params, voices: S.theme.voices || [] } : { ...themeFromForm(), voices: [] };
+  showTheme();
+  $("setEditor").scrollIntoView({ block: "nearest" });
+}
+$("setNewBtn").addEventListener("click", () => openEditor(true));
+$("setEditBtn").addEventListener("click", () => openEditor(false));
+$("edCancel").addEventListener("click", () => $("setEditor").hidden = true);
+$("edFromForm").addEventListener("click", () => { ED = { ...themeFromForm(), voices: ED?.voices || [] }; showTheme(); });
+$("edToForm").addEventListener("click", () => { loadSettings({ ...ED.params, engine: ED.engine }); });
+$("edTakes").addEventListener("input", () => ED && showTheme());
+$("edManifest").addEventListener("dragover", e => e.preventDefault());
+$("edManifest").addEventListener("drop", async e => {
+  const f = e.dataTransfer.files[0]; if (!f) return; e.preventDefault();
+  try { const j = await upload(f); if (j.text != null) $("edManifest").value = j.text; else $("edToast").textContent = "drop a .txt list"; } catch (err) { $("edToast").textContent = err.message; }
+});
+$("edSave").addEventListener("click", async () => {
+  const S = $("edSave").textContent.startsWith("Save") && SET ? SET.set : null;
+  const theme = { engine: ED.engine, params: ED.params, voices: ED.voices, takes: +$("edTakes").value || 1, game_folder: $("edFolder").value.trim(),
+    export: { encode: $("edEnc").value, rate: +$("edRate").value || 0, mono: $("edMono").checked } };
+  try {
+    const r = S ? await api("/api/sets/update", { id: S.id, name: $("edName").value, theme, manifest: $("edManifest").value })
+                : await api("/api/sets/create", { name: $("edName").value, theme, manifest: $("edManifest").value });
+    setId = r.set.id; $("setEditor").hidden = true; $("edToast").textContent = ""; await loadSets(true);
+    toast(S ? "Set saved" : `Created ${r.set.name} with ${r.set.rows.length} keys. Press "Render … without takes" to start.`);
+  } catch (e) { $("edToast").textContent = e.message; $("edToast").className = "toast err"; }
+});
+
+
+/* ================= voices ================= */
+let vGroup = store.get("vGroup", "");
+const GRADE = d => (String(d).match(/\[([A-D])\]/) || [])[1] || "";
+function drawVoices() {
+  if (!META) return;
+  const outs = {};
+  for (const j of JOBS) if (j.group === vGroup) outs[j.label] = j;
+  const groups = {};
+  for (const [v, d] of Object.entries(META.voices)) { const g = { bm: "British male", bf: "British female", am: "American male", af: "American female" }[v.slice(0, 2)] || "Other"; (groups[g] = groups[g] || []).push([v, d]); }
+  const sig = JSON.stringify([vGroup, Object.values(outs).map(j => [j.status, j.outputs.length])]);
+  if (sig === drawVoices.sig && $("voiceGroups").children.length) return; drawVoices.sig = sig;
+  if (!Object.keys(groups).length) { $("voiceGroups").replaceChildren(el("div", { class: "empty", text: "narrate.py's voice list didn't load: " + (META.load_errors?.narrate || "unknown error") })); return; }
+  $("voiceGroups").replaceChildren(...Object.entries(groups).map(([g, vs]) => el("div", { class: "card" }, el("h3", { text: g }), ...vs.map(([v, d]) => {
+    const j = outs[v], o = j && j.outputs[0], gr = GRADE(d);
+    const state = !j ? "" : o ? "" : j.status === "failed" ? "failed" : j.status === "cancelled" ? "cancelled" : "rendering…";
+    return el("div", { class: "style", style: "grid-template-columns:auto minmax(0,1fr) auto auto" },
+      el("span", { class: "badge " + ({ A: "ok", B: "ac", C: "warn", D: "bad" }[gr] || ""), text: gr || "?", title: "Kokoro's training grade", style: "grid-row:1 / span 2;align-self:center" }),
+      el("b", { text: v }), el("button", { type: "button", text: o ? "▶" : state || "▶", disabled: !o, title: j && j.error ? j.error : "", style: "grid-row:1 / span 2;grid-column:3",
+        onclick: () => play(fileUrl(j.dir, o.file), v) }),
+      el("button", { type: "button", text: "Use", style: "grid-row:1 / span 2;grid-column:4", onclick: () => { readForm(); eng = "narrate"; store.set("engine", eng);
+        cur().voice = v; cur().speed = $("vSpeed").value; cur().pitch = $("vPitch").value; store.set("form", F); showEngine(); toast(`Narrate now speaks with ${v}`); } }),
+      el("span", { text: d.replace(/\s*\[[A-D]\]/, ""), style: "grid-column:2" }));
+  }))));
+}
+for (const [id, out, fmt] of [["vSpeed", "vSpeedV", v => (+v).toFixed(2) + "×"], ["vPitch", "vPitchV", v => (v > 0 ? "+" : "") + v + " st"]]) $(id).addEventListener("input", () => $(out).textContent = fmt($(id).value));
+$("vGo").addEventListener("click", async () => {
+  try { const r = await api("/api/voices", { line: $("vLine").value, speed: $("vSpeed").value, pitch: $("vPitch").value }); vGroup = r.group; store.set("vGroup", vGroup); drawVoices.sig = ""; toast(`Queued ${r.jobs.length} voices`); pollSoon(); }
+  catch (e) { toast(e.message, true); }
+});
+
+/* ================= presets ================= */
+let PRESETS = [];
+async function loadPresets(sel) {
+  try { PRESETS = (await api("/api/presets")).presets; } catch (e) { PRESETS = []; }
+  $("preset").replaceChildren(el("option", { value: "", text: "— presets —" }), ...PRESETS.map(p => el("option", { value: p.name, text: `${p.name}  · ${(ENG[p.engine] || {}).name || p.engine}`, selected: p.name === sel })));
+}
+$("presetLoad").addEventListener("click", () => {
+  const p = PRESETS.find(x => x.name === $("preset").value); if (!p) return toast("pick a preset first", true);
+  readForm(); eng = p.snapshot.engine; store.set("engine", eng); F[eng] = { ...p.snapshot.form }; store.set("form", F); setAdv(p.snapshot.adv || {}); showEngine(); toast(`Loaded preset ${p.name}`);
+});
+$("presetSave").addEventListener("click", async () => {
+  const name = (window.prompt("Save these settings as:", $("preset").value || "") || "").trim(); if (!name) return;
+  readForm();
+  try { PRESETS = (await api("/api/presets", { name, snapshot: { engine: eng, form: cur(), adv: ADVV } })).presets; await loadPresets(name); toast(`Saved preset ${name}`); } catch (e) { toast(e.message, true); }
+});
+$("presetDel").addEventListener("click", async () => {
+  const name = $("preset").value; if (!name) return;
+  if (!window.confirm(`Delete the preset "${name}"?`)) return;
+  try { await api("/api/presets/delete", { name }); await loadPresets(); toast(`Deleted preset ${name}`); } catch (e) { toast(e.message, true); }
+});
+
+/* ================= styles ================= */
+function drawStyles() {
+  const st = META.styles;
+  $("styleCols").replaceChildren(...st.sections.map(s => el("div", { class: "card" }, el("h3", { text: `${s.name} · ${s.keys.length}` }),
+    ...s.keys.map(k => el("div", { class: "style" }, el("b", { text: k }), el("span", { text: st.styles[k].prompt || "" }),
+      el("button", { type: "button", text: "Use", title: "add to the form's style guides", onclick: () => { if (!["sfx", "music", "song"].includes(eng)) { readForm(); eng = s.name === "Music" ? "music" : "sfx"; } const v = new Set(val("styles")); v.add(k); cur().styles = [...v]; store.set("form", F); showEngine(); toast(`Added style ${k}`); } }))))));
+  $("fmtRows").innerHTML = META.formats.map(f => `<tr><td class="mono">${esc(f.name)}</td><td class="mono">${f.rate ? f.rate.toLocaleString() + " Hz" : "—"}</td><td class="mono">${f.bits || "—"}</td><td>${f.rate ? (f.mono ? "mono" : "stereo") : "—"}</td></tr>`).join("");
+}
+
+/* ================= advanced ================= */
+const ADV_GROUPS = [
+  ["Model & sampler", [["engine", "Engine", "--engine", ["sa3", "sao"]], ["sa3_size", "SA3 size", "--sa3-size", ["medium", "small"]], ["steps", "Steps", "--steps", "num", "8 on SA3"],
+    ["cfg", "CFG", "--cfg", "num", "1.0 on SA3"], ["fast", "Fewer steps", "--fast", "check"], ["sampler", "Sampler", "--sampler", "text", "lcm on SA3"], ["scheduler", "Scheduler", "--scheduler", "text", "simple on SA3"],
+    ["base", "Checkpoint", "--base", "text", "per engine"], ["text_encoder", "Text encoder", "--text-encoder", "text", "t5gemma on SA3"], ["negative", "Negative prompt", "--negative", "text", "per mode"]]],
+  ["Reprompt (SA3)", [["reprompt_model", "Model", "--reprompt-model"], ["reprompt_temp", "Temperature", "--reprompt-temp", "num"]]],
+  ["Song (ACE-Step)", [["llm_cfg", "LLM CFG", "--llm-cfg", "num"], ["temperature", "Temperature", "--temperature", "num"], ["top_p", "Top-p", "--top-p", "num"], ["top_k", "Top-k", "--top-k", "num"],
+    ["min_p", "Min-p", "--min-p", "num"], ["no_audio_codes", "No audio codes", "--no-audio-codes", "check"], ["song_base", "Checkpoint", "--song-base"]]],
+  ["Clean-up", [["trim", "Silence trim", "--trim / --no-trim", ["trim", "no-trim"]], ["max_seconds", "Cap length (s)", "--max-seconds", "num"], ["threshold_db", "Silence below (dB)", "--threshold-db", "num"],
+    ["normalize_db", "Normalize (dB)", "--normalize-db", "num"], ["fade_ms", "Fade (ms)", "--fade-ms", "num"], ["loop_crossfade", "Loop crossfade (s)", "--loop-crossfade", "num"], ["true_peak", "True peak (dBTP)", "--true-peak", "num"]]],
+  ["Files & MIDI", [["ogg_quality", "OGG quality", "--ogg-quality", "num"], ["keep_wav", "Keep the WAV too", "--keep-wav", "check"], ["midi_start", "MIDI start (s)", "--midi-start", "num"], ["transpose", "Transpose (semitones)", "--transpose", "num"]]],
+];
+let ADVV = store.get("adv", {});
+function advValues() { const o = {}; for (const [k, v] of Object.entries(ADVV)) if (v !== "" && v !== false && v != null) o[k] = v; return o; }
+function advCountN() { return Object.keys(advValues()).length; }
+function setAdv(v) { ADVV = { ...v }; store.set("adv", ADVV); drawAdv(); }
+function drawAdv() {
+  const cli = META?.cli || {};
+  $("advGrid").replaceChildren(...ADV_GROUPS.map(([g, fs]) => el("div", { class: "card adv" }, el("h3", { text: g }), ...fs.map(([k, label, flag, kind = "text", ph]) => {
+    const spec = cli[flag.split(" ")[0]] || {}, def = ph || (spec.default != null && spec.default !== false ? String(spec.default) : "default"), v = ADVV[k] ?? "";
+    let input;
+    if (Array.isArray(kind)) input = el("select", {}, el("option", { value: "", text: `default` }), ...kind.map(o => el("option", { value: o, text: o, selected: v === o })));
+    else if (kind === "check") input = el("input", { type: "checkbox", checked: !!v });
+    else input = el("input", { type: kind === "num" ? "number" : "text", step: "any", placeholder: def, value: v });
+    const set = () => { ADVV[k] = kind === "check" ? input.checked : input.value.trim(); store.set("adv", ADVV); lab.className = (advValues()[k] != null ? "set" : "") + (kind === "check" ? " chk" : ""); $("advCount").textContent = advCountN() ? `${advCountN()} override${advCountN() > 1 ? "s" : ""} active` : "no overrides"; queueCommand(); };
+    input.addEventListener("change", set); input.addEventListener("input", set);
+    const lab = el("label", { class: (advValues()[k] != null ? "set" : "") + (kind === "check" ? " chk" : ""), title: spec.help || "" }, el("span", { html: `${esc(label)}<code>${esc(flag)}</code>` }), input);
+    return lab;
+  }))));
+  $("advCount").textContent = advCountN() ? `${advCountN()} override${advCountN() > 1 ? "s" : ""} active` : "no overrides";
+}
+$("advClear").addEventListener("click", () => { setAdv({}); queueCommand(); });
+
+/* ================= setup ================= */
+let SETUP = null;
+async function loadServers() {
+  try {
+    SETUP = await api("/api/setup"); drawApps();
+    $("setupFile").textContent = "";
+    const r = await api("/api/servers");
+    const yes = (b, warn) => b == null ? '<span class="dim">?</span>' : b ? '<span style="color:var(--ok)">✓</span>' : `<span style="color:var(${warn ? "--bad" : "--dim"})">✗</span>`;
+    $("srvRows").innerHTML = r.servers.map(s => `<tr><td><input type="radio" name="defsrv" value="${esc(s.name)}" ${r.render.split(",").includes(s.name) ? "checked" : ""} aria-label="use ${esc(s.name)}"></td>
+      <td><b>${esc(s.name)}</b> <span class="dim mono">${esc(s.url || "")}</span>${s.default ? ' <span class="badge ac">servers.json default</span>' : ""}</td>
+      <td><span class="dot ${s.up ? "up" : "down"}"></span>${s.up ? "up" : "down"}</td>
+      <td>${s.up ? yes(s.models?.sa3, true) : "—"}</td><td>${s.up ? yes(s.models?.ace) : "—"}</td><td>${s.up ? yes(s.models?.t5gemma, true) : "—"}</td><td>${s.up ? yes(s.models?.qwen) : "—"}</td>
+      <td>${s.restart ? "yes" : '<span class="dim">no</span>'}</td></tr>`).join("");
+    $("srvRows").querySelectorAll("input[name=defsrv]").forEach(i => i.addEventListener("change", async () => {
+      try { SETUP = await api("/api/setup", { server: i.value }); toast(`GPU renders now go to ${i.value}`); poll(); queueCommand(); } catch (e) { toast(e.message, true); } }));
+  } catch (e) { $("srvRows").innerHTML = `<tr><td colspan="8" style="color:var(--bad)">${esc(e.message)}</td></tr>`; }
+}
+$("srvRefresh").addEventListener("click", loadServers);
+function drawApps() {
+  for (const [key, host] of [["audio_apps", "audioApps"], ["folder_apps", "folderApps"]]) {
+    $(host).replaceChildren(...(SETUP[key] || []).map((a, i) => el("div", { class: "app3" },
+      ...["name", "exec", "args"].map(f => { const inp = el("input", { value: a[f] || "", placeholder: { name: "name", exec: "program", args: "{}" }[f], "aria-label": f }); inp.addEventListener("input", () => a[f] = inp.value); return inp; }),
+      el("button", { type: "button", text: "✕", "aria-label": "remove", onclick: () => { SETUP[key].splice(i, 1); drawApps(); } }))));
+  }
+}
+document.querySelectorAll("[data-addapp]").forEach(b => b.addEventListener("click", () => { SETUP[b.dataset.addapp].push({ name: "", exec: "", args: "{}" }); drawApps(); }));
+$("saveSetup").addEventListener("click", async () => { try { SETUP = await api("/api/setup", SETUP); drawApps(); $("setupToast").textContent = "Saved"; setTimeout(() => $("setupToast").textContent = "", 3000); } catch (e) { $("setupToast").textContent = e.message; } });
+
+/* ================= boot ================= */
+async function boot() {
+  try { META = await api("/api/meta"); }
+  catch (e) { document.body.prepend(el("div", { class: "card", style: "margin:20px;color:var(--bad)", text: "Couldn't reach the soundmon-gui server: " + e.message })); return; }
+  const opt = (id, list, blank) => $(id).replaceChildren(...(blank ? [el("option", { value: "", text: blank })] : []), ...list.map(v => Array.isArray(v) ? el("option", { value: v[0], text: v[1] }) : el("option", { value: v, text: v })));
+  opt("key", META.keys, "default (C minor)"); opt("scale", META.scales, "from the mood"); opt("chippy", META.chippy); opt("timesig", META.timesigs.map(String));
+  $("timesig").value = "4";
+  for (const id of ["opl_lead", "opl_arp", "opl_bass"]) opt(id, META.opl_instruments, "from the mood");
+  const groups = {};
+  for (const [v, d] of Object.entries(META.voices)) { const g = { bm: "British male", bf: "British female", am: "American male", af: "American female" }[v.slice(0, 2)] || "Other"; (groups[g] = groups[g] || []).push([v, d]); }
+  $("voice").replaceChildren(el("option", { value: "", text: "default (bm_george)" }), ...Object.entries(groups).map(([g, vs]) => el("optgroup", { label: g }, ...vs.map(([v, d]) => el("option", { value: v, text: `${v} — ${d}` })))));
+  if (!META.voices || !Object.keys(META.voices).length) $("voice").title = "narrate.py didn't load: " + (META.load_errors?.narrate || "");
+  const cli = META.cli || {};
+  document.querySelectorAll("[data-flag]").forEach(n => { const h = cli[n.dataset.flag]?.help; if (h) n.title = `${n.dataset.flag}: ${h}`; });
+  drawStyles(); drawAdv(); showEngine(); loadPresets(); showTab(location.hash.slice(1) || tab); poll();
+}
+boot();
+</script>
+</body>
+</html>

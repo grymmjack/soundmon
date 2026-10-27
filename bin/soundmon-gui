@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# soundmon-gui — web front end for soundmon. GPU renders go to the server picked in its Setup tab
+# (default: servers.json "_default", else 'local'), or: soundmon-gui --server NAME  /  SOUNDMON_SERVER=NAME soundmon-gui
+#   soundmon-gui            -> http://127.0.0.1:8191
+#   soundmon-gui --lan      -> reachable from other devices on the LAN
+set -euo pipefail
+REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+# Prefer ComfyUI's venv (it has numpy + soundfile for the engines); plain python3 serves the page too.
+PY="$HOME/ComfyUI/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3)"
+exec "$PY" "$REPO/gui/server.py" "$@"

@@ -91,6 +91,20 @@ def main():
           abs(float(chip._dc_block(x, np, 44100)[2048:].mean())) < 0.02,
           "a 12.5% duty pulse sits at a mean of -0.75")
 
+    # A ComfyUI job that raises gets status "error" and NO outputs. Waiting for
+    # outputs alone sat out the full 30-minute timeout on every dead job.
+    sys.path.insert(0, HERE)
+    import soundmon as _smj
+    err = {"outputs": {}, "status": {"status_str": "error", "completed": False,
+           "messages": [["execution_error", {"node_type": "CLIPLoader",
+                                             "exception_message": "missing model"}]]}}
+    running = {"outputs": {}, "status": {"status_str": "success", "completed": False}}
+    empty = {"outputs": {}, "status": {"status_str": "success", "completed": True}}
+    check("a failed ComfyUI job is seen as failed, not still running",
+          bool(_smj._job_error(err)) and "CLIPLoader" in _smj._job_error(err)
+          and _smj._job_error(running) is None and bool(_smj._job_error(empty)),
+          f"error -> {_smj._job_error(err)!r}")
+
     # --- tracker output -----------------------------------------------------
     # These four were ALL shipped broken and all were invisible to inspection:
     # correct-looking bytes, wrong interpretation. Only a replayer or arithmetic

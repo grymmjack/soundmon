@@ -1,0 +1,1326 @@
+#!/usr/bin/env python3
+"""soundmon-gui — a local web front end for the soundmon CLI.
+
+Serves a single-page UI, queues render jobs, and runs them one at a time by
+shelling out to bin/soundmon (always --no-open --output-to <job folder>). Each
+job renders into its own folder under the gallery dir with a job.json recording
+the exact settings, the command and every take's seed, so any take can be made
+again exactly without ComfyUI's history.
+
+Sibling of pixelmon-gui (same skeleton, same look). The render server is a
+servers.json alias, host[:port] or URL: --server NAME, else $SOUNDMON_SERVER,
+else the one picked in the Setup tab, else servers.json "_default", else "local".
+CPU engines (chiptune, AdLib, retro FX, blips, narration) never touch it.
+
+Standard library only. usage: soundmon-gui [--port 8191] [--lan] [--server NAME] [--gallery DIR]
+"""
+import argparse
+import ast
+import glob
+import http.server
+import importlib.util
+import json
+import mimetypes
+import os
+import queue
+import random
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import sets as setsmod                          # noqa: E402  (gui/sets.py)
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO = os.path.dirname(HERE)
+SOUNDMON = os.path.join(REPO, "bin", "soundmon")
+SERVER_ARG = ""          # --server / $SOUNDMON_SERVER: overrides the Setup tab's choice
+GALLERY_HOME = os.path.expanduser("~/soundmon-gallery")
+INPUTS = os.path.join(GALLERY_HOME, "inputs")         # MIDI / audio / banks dropped on the form
+SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
+SETS_ROOT = os.path.join(GALLERY_HOME, "sets")         # one folder per sound set (gui/sets.py)
+PRESETS = os.path.join(GALLERY_HOME, "gui-presets")    # saved form snapshots, one .json each
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+DONE_LINE = re.compile(r"✅\s*\[(\d+)/(\d+)\]")
+SEED = re.compile(r"seed=(\d+)")
+AUDIO_EXT = (".wav", ".flac", ".ogg", ".mp3", ".opus")
+SCORE_EXT = (".mod", ".rad", ".mid")
+INPUT_EXT = (".mid", ".midi", ".wav", ".flac", ".ogg", ".mp3", ".sbi", ".txt")
+HOME = os.path.realpath(os.path.expanduser("~"))
+IS_WIN, IS_MAC = sys.platform.startswith("win"), sys.platform == "darwin"
+
+# Engines: what the form calls them -> how soundmon is told, and what they need.
+ENGINES = {
+    "sfx":     {"flags": [],            "gpu": True,  "label": "SFX"},
+    "music":   {"flags": ["--music"],   "gpu": True,  "label": "Music loop"},
+    "song":    {"flags": ["--song"],    "gpu": True,  "label": "Song"},
+    "chip":    {"flags": ["--chip"],    "gpu": False, "label": "Chiptune"},
+    "opl":     {"flags": ["--opl"],     "gpu": False, "label": "AdLib"},
+    "fx":      {"flags": [],            "gpu": False, "label": "Retro FX"},     # --chipfx / --oplfx
+    "blip":    {"flags": ["--blip"],    "gpu": False, "label": "Blips"},
+    "narrate": {"flags": ["--narrate"], "gpu": False, "label": "Narrate"},
+}
+ENCODES = {"wav": [], "flac": ["--flac"], "ogg": ["--ogg"], "mp3": ["--mp3"], "opus": ["--opus"]}
+
+
+# ---------------------------------------------------------------------------
+# Metadata, read live from soundmon's own files so the GUI never drifts
+# ---------------------------------------------------------------------------
+def load_module(name):
+    """A fresh import of one of soundmon's engine modules (stdlib-only at the top), so a
+    `git pull` shows up without restarting the GUI."""
+    if REPO not in sys.path:
+        sys.path.insert(0, REPO)
+    spec = importlib.util.spec_from_file_location(f"_sm_{name}", os.path.join(REPO, name + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def source_constant(path, name, default=None):
+    """Evaluate one top-level assignment of a source file on its own (literals, dict(...),
+    comprehensions) without importing the file — soundmon.py pulls in torch via the node."""
+    try:
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                ns = {}
+                exec(compile(ast.Module(body=[node], type_ignores=[]), path, "exec"),
+                     {"__builtins__": {"dict": dict, "range": range, "list": list, "tuple": tuple}}, ns)
+                return ns[name]
+    except Exception:
+        pass
+    return default
+
+
+def cli_spec():
+    """Every soundmon flag's default / choices / help, read from the add_argument calls in
+    soundmon.py — the GUI's tooltips and validation come from the CLI itself."""
+    out = {}
+    try:
+        tree = ast.parse(open(os.path.join(REPO, "soundmon.py"), encoding="utf-8").read())
+    except OSError:
+        return out
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_argument"):
+            continue
+        flags = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        if not flags:
+            continue
+        rec = {"flags": flags}
+        for kw in node.keywords:
+            if kw.arg in ("default", "choices", "help", "action", "metavar"):
+                try:
+                    rec[kw.arg] = ast.literal_eval(kw.value)
+                except Exception:
+                    if kw.arg == "help" and isinstance(kw.value, ast.JoinedStr):
+                        rec["help"] = "".join(v.value for v in kw.value.values if isinstance(v, ast.Constant))
+            elif kw.arg == "type":
+                rec["type"] = getattr(kw.value, "id", None)
+        out[flags[0]] = rec
+    return out
+
+
+def load_styles():
+    """sounds.json in its three sections (SFX / Music / Modifiers), in file order."""
+    try:
+        with open(os.path.join(REPO, "sounds.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return {"sections": [], "styles": {}}
+    sections, cur = [{"name": "SFX", "keys": []}], None
+    cur = sections[0]
+    for k, v in raw.items():
+        if k == "_music":
+            cur = {"name": "Music", "keys": []}; sections.append(cur)
+        elif k == "_modifiers":
+            cur = {"name": "Modifiers", "keys": []}; sections.append(cur)
+        elif not k.startswith("_"):
+            cur["keys"].append(k)
+    return {"sections": sections, "styles": {k: v for k, v in raw.items() if not k.startswith("_")}}
+
+
+def load_formats():
+    fm = source_constant(os.path.join(REPO, "custom_nodes", "retro_sfx", "nodes.py"), "FORMATS", {}) or {}
+    return [{"name": k, **(v or {})} for k, v in fm.items()] or [{"name": "none"}]
+
+
+def load_meta():
+    sm = os.path.join(REPO, "soundmon.py")
+    spec = cli_spec()
+    meta = {"engines": {k: {"label": v["label"], "gpu": v["gpu"]} for k, v in ENGINES.items()},
+            "styles": load_styles(), "formats": load_formats(), "cli": spec,
+            "keys": source_constant(sm, "KEYS", []),
+            "negatives": {k: source_constant(sm, k, "") for k in ("SFX_NEGATIVE", "MUSIC_NEGATIVE", "SONG_NEGATIVE")},
+            "scales": (spec.get("--scale") or {}).get("choices") or [],
+            "chippy": (spec.get("--chippy") or {}).get("choices") or [],
+            "waves": (spec.get("--blip-wave") or {}).get("choices") or [],
+            "timesigs": (spec.get("--timesig") or {}).get("choices") or [],
+            "moods": [], "archetypes": [], "opl_instruments": [], "voices": {}}
+    for mod, key, fn in (("chip", "moods", lambda m: list(m.MOODS)),
+                         ("chipfx", "archetypes", lambda m: list(m.ARCHETYPES)),
+                         ("opl", "opl_instruments", lambda m: list(m.INSTRUMENTS)),
+                         ("narrate", "voices", lambda m: dict(m.VOICES))):
+        try:
+            meta[key] = fn(load_module(mod))
+        except Exception as e:          # an engine that can't load just has an empty list
+            meta.setdefault("load_errors", {})[mod] = str(e)[:200]
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Render servers (same rules as soundmon / pixelmon-gui)
+# ---------------------------------------------------------------------------
+def _servers_json():
+    try:
+        with open(os.path.join(REPO, "servers.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def known_servers():
+    """servers.json aliases (keys starting with _ are comments) plus the built-in 'local'."""
+    out = {k: v for k, v in _servers_json().items() if not k.startswith("_") and isinstance(v, str)}
+    out.setdefault("local", "http://127.0.0.1:8188")
+    return out
+
+
+def default_server():
+    return re.sub(r"\s+", "", str(_servers_json().get("_default") or "")) or "local"
+
+
+def render_server():
+    """Where GPU renders go: --server / $SOUNDMON_SERVER, else the Setup tab's pick, else servers.json's default."""
+    return SERVER_ARG or load_setup().get("server") or default_server()
+
+
+def server_url(name=None):
+    """The URL of a render server name (a farm list -> its first server)."""
+    name = (name or render_server()).split(",")[0].strip()
+    url = known_servers().get(name, name)
+    if "://" not in url:
+        url = "http://" + url
+    p = urllib.parse.urlparse(url)
+    return f"{p.scheme}://{p.hostname}:{p.port or 8188}" if p.hostname else None
+
+
+def server_up(name=None):
+    url = server_url(name)
+    if not url:
+        return False
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/system_stats", timeout=3):
+            return True
+    except Exception:
+        return False
+
+
+def _combo(info, node, field):
+    try:
+        spec = info[node]["input"]["required"][field]
+    except (KeyError, TypeError):
+        return []
+    if isinstance(spec[0], list):
+        return list(spec[0])
+    if len(spec) > 1 and isinstance(spec[1], dict):
+        return list(spec[1].get("options") or [])
+    return []
+
+
+# What each engine needs on a box. Names come from soundmon.py's defaults.
+NEEDS = {"sa3": "stable_audio_3_medium.safetensors", "ace": "ace_step_1.5_turbo_aio.safetensors",
+         "sao": "stable-audio-open-1.0.safetensors"}
+_MODELS = {}
+
+
+def server_models(name):
+    """{'sa3': bool, 'ace': bool, 'sao': bool, 'qwen': bool, 't5gemma': bool} for one box (cached a minute)."""
+    hit = _MODELS.get(name)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    url, info = server_url(name), {}
+    for node in ("CheckpointLoaderSimple", "CLIPLoader"):
+        try:
+            with urllib.request.urlopen(f"{url}/object_info/{node}", timeout=4) as r:
+                info.update(json.load(r))
+        except Exception:
+            pass
+    if not info:
+        return None
+    ck = _combo(info, "CheckpointLoaderSimple", "ckpt_name")
+    clips = _combo(info, "CLIPLoader", "clip_name")
+    v = {k: f in ck for k, f in NEEDS.items()}
+    v["qwen"] = any("qwen" in c.lower() for c in clips)
+    v["t5gemma"] = any("t5gemma" in c.lower() for c in clips)
+    _MODELS[name] = (time.time(), v)
+    return v
+
+
+SERVER_STATE = {"server": None, "url": None, "up": None, "stuck": None, "restart": None}
+STUCK_AFTER, DOWN_AFTER, RESTART_EVERY = 20, 30, 180
+# errors that leave ComfyUI failing every prompt until it's restarted (seen after Stable Audio
+# jobs swap Qwen / T5Gemma / SA3 through an 8 GB card)
+POISONED = ("object has no attribute 'model_size'", "object has no attribute 'is_dynamic'")
+
+
+def restart_command(name):
+    cmds = _servers_json().get("_restart")
+    return cmds.get(name) if isinstance(cmds, dict) and isinstance(cmds.get(name), str) else None
+
+
+def restart_server(name, why):
+    cmd = restart_command(name)
+    state = {"server": name, "why": why, "at": time.time(), "status": "running", "output": ""}
+    SERVER_STATE["restart"] = state
+    print(f"[soundmon-gui] render server {name} {why}: restarting it ({cmd})", flush=True)
+
+    def run():
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
+            state.update(status="done" if r.returncode == 0 else "failed", output=(r.stdout + r.stderr).strip()[-400:])
+        except Exception as e:
+            state.update(status="failed", output=str(e))
+    threading.Thread(target=run, daemon=True).start()
+
+
+def server_queue(name=None):
+    try:
+        with urllib.request.urlopen(server_url(name).rstrip("/") + "/queue", timeout=3) as r:
+            return json.load(r)
+    except Exception:
+        return None
+
+
+def server_poisoned(name=None):
+    try:
+        with urllib.request.urlopen(server_url(name).rstrip("/") + "/history?max_items=1", timeout=3) as r:
+            hist = json.load(r)
+    except Exception:
+        return None
+    for pid, h in hist.items():
+        for kind, msg in (h.get("status") or {}).get("messages") or []:
+            err = str((msg or {}).get("exception_message") or "") if kind == "execution_error" else ""
+            if any(p in err for p in POISONED):
+                return {"prompt": pid, "error": err.strip()[:120]}
+    return None
+
+
+def watch_server():
+    """Check the render server every few seconds so polls never wait on a dead one; restart it
+    (servers.json "_restart") when it is down, stuck, or poisoned."""
+    head, down_since, last_restart = None, None, {}
+    while True:
+        name = render_server()
+        up = server_up(name)
+        down_since = None if up else (down_since or time.time())
+        stuck = None
+        q = server_queue(name) if up else None
+        if q and not q.get("queue_running") and q.get("queue_pending"):
+            first = min(q["queue_pending"], key=lambda p: p[0])[1]
+            if not head or head[:2] != (name, first):
+                head = (name, first, time.time())
+            elif time.time() - head[2] >= STUCK_AFTER:
+                stuck = {"pending": len(q["queue_pending"]), "since": head[2]}
+        else:
+            head = None
+        poisoned = server_poisoned(name) if up and not stuck else None
+        SERVER_STATE.update(server=name, url=server_url(name), up=up, stuck=stuck or poisoned)
+        why = ("is stuck: prompts waiting, nothing running" if stuck
+               else f"fails every prompt ({poisoned['error']})" if poisoned
+               else f"hasn't answered for {DOWN_AFTER}s" if down_since and time.time() - down_since >= DOWN_AFTER else None)
+        if why and restart_command(name) and time.time() - last_restart.get(name, 0) >= RESTART_EVERY:
+            last_restart[name] = time.time()
+            head = None
+            restart_server(name, why)
+        time.sleep(4)
+
+
+def server_is_up():
+    if SERVER_STATE["server"] == render_server() and SERVER_STATE["up"] is not None:
+        return SERVER_STATE["up"]
+    return server_up()
+
+
+def servers_report():
+    """Every known server with its state and the models soundmon needs (checked in parallel)."""
+    names = sorted(known_servers())
+    out = {n: {"name": n, "url": server_url(n), "up": False, "models": None} for n in names}
+
+    def check(n):
+        out[n]["up"] = server_up(n)
+        if out[n]["up"]:
+            out[n]["models"] = server_models(n)
+    ts = [threading.Thread(target=check, args=(n,), daemon=True) for n in names]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(8)
+    cur = render_server().split(",")
+    for n in names:
+        out[n]["default"] = n == default_server()
+        out[n]["selected"] = n in cur
+        out[n]["restart"] = bool(restart_command(n))
+    return {"servers": list(out.values()), "render": render_server(), "restart": SERVER_STATE["restart"]}
+
+
+# ---------------------------------------------------------------------------
+# Setup (this machine)
+# ---------------------------------------------------------------------------
+def _read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1)
+    os.replace(tmp, path)
+
+
+def load_setup():
+    s = _read_json(SETUP_FILE, {}) if os.path.exists(SETUP_FILE) else {}
+    s.setdefault("server", "")          # render server; "" = servers.json "_default"
+    s.setdefault("audio_apps", [])      # [{name, exec, args}] — "{}" = the file, else appended
+    s.setdefault("folder_apps", [])
+    s.setdefault("game_folders", [])    # [{name, path}] — where Sets export picks
+    return s
+
+
+def _clean_app(a):
+    return {"name": str(a.get("name") or "")[:60], "exec": str(a.get("exec") or "")[:500], "args": str(a.get("args") or "{}")[:300]}
+
+
+def save_setup(body):
+    s = load_setup()
+    for k in ("audio_apps", "folder_apps"):
+        if isinstance(body.get(k), list):
+            s[k] = [_clean_app(a) for a in body[k][:40] if isinstance(a, dict) and (a.get("exec") or "").strip()]
+    if isinstance(body.get("game_folders"), list):
+        s["game_folders"] = [{"name": str(g.get("name") or "")[:60], "path": str(g.get("path") or "")[:500]}
+                             for g in body["game_folders"][:40] if isinstance(g, dict) and str(g.get("path") or "").strip()]
+    if "server" in body:
+        s["server"] = re.sub(r"\s+", "", str(body["server"] or ""))[:300]
+    _write_json(SETUP_FILE, s)
+    return s
+
+
+def home_path(path, must_exist=True):
+    """Expand ~ and confine to the user's home dir."""
+    full = os.path.realpath(os.path.expanduser(str(path or "")))
+    if full != HOME and not full.startswith(HOME + os.sep):
+        raise ValueError("path must be inside your home folder")
+    if must_exist and not os.path.exists(full):
+        raise ValueError(f"not found: {path}")
+    return full
+
+
+def os_opener(is_dir):
+    if IS_MAC:
+        return {"name": "Finder" if is_dir else "system default", "exec": "open", "args": "{}"}
+    if IS_WIN:
+        return {"name": "Explorer" if is_dir else "system default", "exec": "explorer", "args": "{}"}
+    return {"name": "file manager" if is_dir else "system default", "exec": "xdg-open", "args": "{}"}
+
+
+def launch(app, path, cwd=None):
+    """Start app on path. args template: '{}' marks the path, else it's appended. Never waits."""
+    exe = os.path.expanduser(app["exec"])
+    try:
+        args = shlex.split(app.get("args") or "{}", posix=not IS_WIN)
+    except ValueError as e:
+        raise ValueError(f"bad arguments for {app.get('name')}: {e}")
+    args = [a.replace("{}", path) for a in args] if any("{}" in a for a in args) else args + [path]
+    if os.sep in exe and not os.path.isfile(exe):
+        raise ValueError(f"{app.get('name') or exe}: program not found at {exe} — fix it in the Setup tab")
+    if os.sep not in exe and not shutil.which(exe):
+        raise ValueError(f"{app.get('name') or exe}: '{exe}' isn't installed or isn't on PATH")
+    subprocess.Popen([exe] + args, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     stdin=subprocess.DEVNULL, start_new_session=True)
+    return exe
+
+
+# ---------------------------------------------------------------------------
+# Form -> soundmon argv
+# ---------------------------------------------------------------------------
+def shq(s):
+    """Shell-quote for display/copy: bare when safe, double quotes for text with apostrophes."""
+    s = str(s)
+    if s and re.fullmatch(r"[\w@%+=:,./-]+", s):
+        return s
+    if "'" not in s:
+        return "'" + s + "'"
+    if not re.search(r'[$`"\\!]', s):
+        return '"' + s + '"'
+    return shlex.quote(s)
+
+
+def shjoin(argv):
+    return " ".join(shq(a) for a in argv)
+
+
+def safe_name(s, maxlen=64):
+    return re.sub(r"[^\w.-]+", "-", str(s)).strip("-.")[:maxlen]
+
+
+def input_path(name):
+    """A file dropped on the form (MIDI, reference audio, OPL bank) -> its path in INPUTS."""
+    full = os.path.realpath(os.path.join(INPUTS, os.path.basename(str(name or ""))))
+    if not full.startswith(os.path.realpath(INPUTS) + os.sep) or not os.path.isfile(full):
+        raise ValueError(f"input file not found: {name} — drop it on the form again")
+    return full
+
+
+# Advanced tab: key -> (flag, kind, extra). Blank / missing = soundmon's own default.
+ADV = {
+    "engine":         ("--engine", "choice", ["sa3", "sao"]),
+    "sa3_size":       ("--sa3-size", "choice", ["medium", "small"]),
+    "steps":          ("--steps", "int", (1, 200)),
+    "cfg":            ("--cfg", "float", (0, 30)),
+    "fast":           ("--fast", "flag", None),
+    "sampler":        ("--sampler", "name", None),
+    "scheduler":      ("--scheduler", "name", None),
+    "base":           ("--base", "name", None),
+    "text_encoder":   ("--text-encoder", "name", None),
+    "negative":       ("--negative", "text", 600),
+    "reprompt_model": ("--reprompt-model", "name", None),
+    "reprompt_temp":  ("--reprompt-temp", "float", (0, 2)),
+    "llm_cfg":        ("--llm-cfg", "float", (0, 20)),
+    "temperature":    ("--temperature", "float", (0, 2)),
+    "top_p":          ("--top-p", "float", (0, 1)),
+    "top_k":          ("--top-k", "int", (0, 500)),
+    "min_p":          ("--min-p", "float", (0, 1)),
+    "no_audio_codes": ("--no-audio-codes", "flag", None),
+    "song_base":      ("--song-base", "name", None),
+    "trim":           (None, "choice", ["trim", "no-trim"]),
+    "max_seconds":    ("--max-seconds", "float", (0, 1000)),
+    "threshold_db":   ("--threshold-db", "float", (-120, 0)),
+    "normalize_db":   ("--normalize-db", "float", (-60, 0)),
+    "fade_ms":        ("--fade-ms", "float", (0, 5000)),
+    "loop_crossfade": ("--loop-crossfade", "float", (0, 30)),
+    "true_peak":      ("--true-peak", "float", (-20, 0)),
+    "ogg_quality":    ("--ogg-quality", "int", (0, 10)),
+    "keep_wav":       ("--keep-wav", "flag", None),
+    "midi_start":     ("--midi-start", "float", (0, 30)),
+    "transpose":      ("--transpose", "int", (-48, 48)),
+}
+
+
+def adv_argv(adv):
+    out = []
+    for k, v in (adv or {}).items():
+        if k not in ADV or v in (None, "", False):
+            continue
+        flag, kind, extra = ADV[k]
+        if kind == "flag":
+            out.append(flag)
+        elif kind == "choice":
+            if str(v) not in extra:
+                raise ValueError(f"advanced: {k} must be one of {', '.join(extra)}")
+            out += [f"--{v}"] if flag is None else [flag, str(v)]
+        elif kind in ("int", "float"):
+            try:
+                x = int(v) if kind == "int" else float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"advanced: {k} must be a number")
+            if not extra[0] <= x <= extra[1]:
+                raise ValueError(f"advanced: {k} must be {extra[0]}..{extra[1]}")
+            out += [flag, f"{x:g}" if kind == "float" else str(x)]
+        elif kind == "name":
+            s = str(v).strip()
+            if not re.fullmatch(r"[\w.\-/ ]{1,160}", s):
+                raise ValueError(f"advanced: {k} has characters a model name can't")
+            out += [flag, s]
+        elif kind == "text":
+            out += [flag, str(v).strip()[:extra]]
+    return out
+
+
+def is_manifest(text):
+    """More than one line, or `key | text` rows: one file per line."""
+    lines = [ln for ln in str(text or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    return len(lines) > 1 or any("|" in ln for ln in lines)
+
+
+def build_argv(p, meta, jdir=None):
+    """Validated form params -> (argv for bin/soundmon, files to write into the job folder, takes expected).
+    jdir None = preview only (the command shown under RENDER)."""
+    eng = p.get("engine") or "sfx"
+    if eng not in ENGINES:
+        raise ValueError(f"unknown engine {eng!r}")
+    E, argv, files = ENGINES[eng], [SOUNDMON], {}
+    prompt = str(p.get("prompt") or "").strip()
+    if len(prompt) > 20000:
+        raise ValueError("that text is too long (20,000 characters max)")
+
+    def num(key, typ, lo, hi, default=None):
+        v = p.get(key, default)
+        if v in (None, ""):
+            return default
+        try:
+            v = typ(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number")
+        if not lo <= v <= hi:
+            raise ValueError(f"{key} must be between {lo:g} and {hi:g}")
+        return v
+
+    def choice(key, options, default=None):
+        v = p.get(key, default)
+        if v in (None, ""):
+            return default
+        if v not in options:
+            raise ValueError(f"{key}: {v!r} isn't one of {', '.join(map(str, options[:12]))}…")
+        return v
+
+    def jfile(name, text):
+        files[name] = text
+        return os.path.join(jdir, name) if jdir else name
+
+    takes = 1
+    if eng in ("blip", "narrate"):
+        if not prompt:
+            raise ValueError("type a line to " + ("speak" if eng == "narrate" else "blip") + ", or paste `key | text` lines")
+        argv += E["flags"]
+        if is_manifest(prompt):
+            argv += ["--narrate-file" if eng == "narrate" else "--blip-file", jfile("lines.txt", prompt + "\n")]
+            takes = len([ln for ln in prompt.splitlines() if ln.strip() and not ln.strip().startswith("#")])
+        else:
+            argv.insert(1, prompt)
+        if eng == "narrate" or p.get("blip_style") == "voice":
+            v = choice("voice", list(meta["voices"]) or ["bm_george"])
+            if v:
+                argv += ["--voice", v]
+        if eng == "narrate":
+            sp, pt = num("speed", float, 0.5, 2.0), num("pitch", float, -12, 12)
+            if sp is not None and sp != 1.0:
+                argv += ["--speed", f"{sp:g}"]
+            if pt:
+                argv += ["--pitch", f"{pt:g}"]
+        else:
+            st = choice("blip_style", ["synth", "voice"])
+            if st and st != "synth":
+                argv += ["--blip-style", st]
+            w = choice("blip_wave", meta["waves"] or ["square"])
+            if w and w != "square":
+                argv += ["--blip-wave", w]
+            for key, flag, typ, lo, hi in (("blip_rate", "--blip-rate", float, 1, 60), ("blip_pitch", "--blip-pitch", float, -24, 24),
+                                           ("blip_jitter", "--blip-jitter", float, 0, 12), ("blip_duty", "--blip-duty", float, 0.05, 0.95),
+                                           ("blip_speed", "--blip-speed", float, 0.5, 6)):
+                v = num(key, typ, lo, hi)
+                if v is not None:
+                    argv += [flag, f"{v:g}"]
+    else:
+        if eng == "fx":
+            argv += ["--oplfx" if p.get("fx_kind") == "fm" else "--chipfx"]
+            a = choice("archetype", meta["archetypes"] or [])
+            if a:
+                argv += ["--fx-archetype", a]
+        else:
+            argv += E["flags"]
+        has_src = eng in ("chip", "opl") and (p.get("from_midi") or p.get("from_audio"))
+        if not prompt and not has_src:
+            raise ValueError("describe the sound first" if eng in ("sfx", "fx") else
+                             "describe the piece, or give it a MIDI / audio file to follow" if eng in ("chip", "opl") else
+                             "describe the music first" if eng == "music" else "give the song some tags")
+        if prompt:
+            if "\n" in prompt:
+                raise ValueError("one description per render — use a Set for a list of sounds")
+            argv.insert(1, prompt)
+        lim = {"sfx": (0.03, 120), "music": (1, 120), "song": (1, 1000), "chip": (2, 600), "opl": (2, 600), "fx": (0.03, 10)}[eng]
+        if (p.get("adv") or {}).get("engine") == "sao" and eng in ("sfx", "music"):
+            lim = (lim[0], 47)
+        secs = num("seconds", float, *lim)
+        if secs is not None:
+            argv += ["--seconds", f"{secs:g}"]
+        takes = num("n", int, 1, 200, 1)
+        if takes > 1:
+            argv += ["-n", str(takes)]
+        if E["gpu"]:
+            styles = [s for s in (p.get("styles") or []) if s]
+            bad = [s for s in styles if s not in meta["styles"]["styles"]]
+            if bad:
+                raise ValueError(f"unknown style guide(s): {', '.join(bad)}")
+            if styles:
+                argv += ["--style", ",".join(styles)]
+            if eng in ("sfx", "music") and p.get("reprompt") is False:
+                argv.append("--no-reprompt")
+            if eng == "music" and p.get("loop"):
+                argv.append("--loop")
+        if eng == "song":
+            lyr = str(p.get("lyrics") or "").strip()
+            if len(lyr) > 20000:
+                raise ValueError("lyrics are too long (20,000 characters max)")
+            if lyr:
+                argv += ["--lyrics-file", jfile("lyrics.txt", lyr + "\n")]
+            ts = choice("timesig", [str(t) for t in meta["timesigs"]] or ["4"], None)
+            if ts and ts != "4":
+                argv += ["--timesig", ts]
+            lang = str(p.get("lang") or "").strip()
+            if lang and lang != "en":
+                if not re.fullmatch(r"[a-z]{2}", lang):
+                    raise ValueError("language must be a two-letter code like en")
+                argv += ["--lang", lang]
+        if eng in ("song", "chip", "opl"):
+            bpm = num("bpm", float, 10, 300)
+            if bpm is not None:
+                argv += ["--bpm", f"{bpm:g}"]
+            key = choice("key", meta["keys"] or ["C minor"])
+            if key:
+                argv += ["--key", key]
+        if eng in ("chip", "opl"):
+            mood = choice("mood", ["auto"] + meta["moods"])
+            if mood and mood != "auto":
+                argv += ["--mood", mood]
+            sc = choice("scale", meta["scales"])
+            if sc:
+                argv += ["--scale", sc]
+            ch = choice("chippy", meta["chippy"])
+            if ch and ch != "off":
+                argv += ["--chippy", ch]
+            arp = num("arp", int, 0, 16)
+            if arp:
+                argv += ["--arp", str(arp)]
+            for key, flag in (("from_midi", "--from-midi"), ("from_audio", "--from-audio")):
+                if p.get(key):
+                    src = input_path(p[key])
+                    argv += [flag, src]
+            if eng == "chip" and p.get("write_mod"):
+                argv.append("--write-mod")
+            if eng == "opl" and p.get("write_rad"):
+                argv.append("--write-rad")
+            if p.get("write_midi") and not p.get("from_midi"):
+                argv.append("--write-midi")
+        if eng == "opl":
+            for key, flag in (("opl_lead", "--opl-lead"), ("opl_arp", "--opl-arp"), ("opl_bass", "--opl-bass")):
+                v = choice(key, meta["opl_instruments"])
+                if v:
+                    argv += [flag, v]
+            if p.get("opl_bank"):
+                argv += ["--opl-bank", input_path(p["opl_bank"])]
+        if E["gpu"]:
+            srv = [s.strip() for s in (p.get("servers") or []) if str(s).strip()]
+            for s in srv:
+                if not re.fullmatch(r"[\w.:/\-\[\]]{1,200}", s):
+                    raise ValueError(f"bad render server {s!r}")
+            argv += ["--server", ",".join(srv) if srv else render_server()]
+
+    name = str(p.get("name") or "").strip()
+    if name:
+        if not re.fullmatch(r"[\w.\- ]{1,64}", name):
+            raise ValueError("name: letters, digits, spaces, - _ and . only (64 max)")
+        argv += ["--name", name]
+    seed = num("seed", int, -1, 2**63 - 1)
+    if seed is not None and seed >= 0:
+        argv += ["--seed", str(seed)]
+    fmt = choice("format", [f["name"] for f in meta["formats"]])
+    if fmt and fmt != "none":
+        argv += ["--format", fmt]
+    bits = choice("bits", ["8", "16", "24"], None) if str(p.get("bits") or "") else None
+    if bits and bits != "16":
+        argv += ["--bits", bits]
+    lufs = str(p.get("lufs") if p.get("lufs") is not None else "").strip()
+    if lufs:
+        if lufs != "off":
+            try:
+                if not -40 <= float(lufs) <= 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError("loudness must be 'off' or -40..0 LUFS")
+        if lufs != "-16":
+            argv += ["--lufs", lufs]
+    enc = choice("encode", list(ENCODES), "wav")
+    if enc in ("mp3", "opus") and not E["gpu"]:
+        raise ValueError(f"{enc.upper()} is only made by the GPU engines — pick WAV, FLAC or OGG")
+    argv += ENCODES[enc]
+    argv += adv_argv(p.get("adv"))
+    argv.append("--no-open")
+    return argv, files, takes
+
+
+def command_text(argv):
+    return shjoin(["soundmon"] + argv[1:])
+
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
+def _seed_of(fname):
+    m = re.search(r"_s(\d+)(?:_\d+_)?\.", fname)
+    return int(m.group(1)) if m else None
+
+
+def scan_outputs(d):
+    """The sounds a job folder holds, newest-run order, each with its seed and any tracker / MIDI score."""
+    found = []
+    for f in sorted(glob.glob(os.path.join(d, "**", "*"), recursive=True)):
+        rel = os.path.relpath(f, d)
+        if not os.path.isfile(f) or rel.startswith(("takes" + os.sep, "_")):
+            continue
+        if f.lower().endswith(AUDIO_EXT) and not os.path.basename(f).startswith("input-"):
+            found.append(rel)
+    out = []
+    for rel in found:
+        stem = os.path.splitext(rel)[0]
+        o = {"file": rel, "seed": _seed_of(os.path.basename(rel)), "bytes": os.path.getsize(os.path.join(d, rel))}
+        scores = [os.path.basename(stem) + e for e in SCORE_EXT
+                  if os.path.isfile(os.path.join(d, os.path.dirname(rel), os.path.basename(stem) + e))]
+        if scores:
+            o["scores"] = [os.path.join(os.path.dirname(rel), s) for s in scores]
+        out.append(o)
+    return out
+
+
+class JobQueue:
+    def __init__(self, gallery):
+        self.gallery = gallery
+        self.jobs, self.order = {}, []
+        self.q = queue.Queue()
+        self.lock = threading.Lock()
+        self.proc, self.current = None, None
+        self.made = 0                       # sounds made this session (status bar)
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def add(self, params, group=None, label=None):
+        meta = load_meta()
+        ref = params.get("set")
+        if ref is not None:                 # a Sets render: which set and key the takes belong to
+            if not (isinstance(ref, dict) and re.fullmatch(r"[\w-]{1,64}", str(ref.get("id") or ""))
+                    and setsmod.KEY_RE.fullmatch(str(ref.get("key") or ""))):
+                raise ValueError("bad set reference")
+            params["set"] = {"id": ref["id"], "key": ref["key"]}
+        build_argv(params, meta)            # validate before touching disk
+        jid = time.strftime("%Y%m%d-%H%M%S-") + f"{random.randrange(16**4):04x}"
+        jdir = os.path.join(self.gallery, jid)
+        os.makedirs(jdir, exist_ok=True)
+        for key in ("from_midi", "from_audio", "opl_bank"):        # the job keeps its own copy: reproducible later
+            if params.get(key):
+                shutil.copy2(input_path(params[key]), os.path.join(jdir, "input-" + os.path.basename(params[key])))
+        argv, files, takes = build_argv(params, meta, jdir)
+        for key in ("from_midi", "from_audio", "opl_bank"):
+            if params.get(key):
+                src = input_path(params[key])
+                argv = [os.path.join(jdir, "input-" + os.path.basename(src)) if a == src else a for a in argv]
+        for name, text in files.items():
+            with open(os.path.join(jdir, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        job = {"id": jid, "params": params, "argv": argv, "command": command_text(argv),
+               "engine": params.get("engine") or "sfx", "status": "queued", "log": [], "outputs": [],
+               "done": 0, "total": takes, "group": group, "label": label, "ratings": {},
+               "created": time.time(), "started": None, "finished": None, "dir": jid}
+        with self.lock:
+            self.jobs[jid] = job
+            self.order.append(jid)
+        self._save(job)
+        self.q.put(jid)
+        return job
+
+    def gallery_path(self, d, f):
+        full = os.path.realpath(os.path.join(self.gallery, str(d or ""), str(f or "")))
+        if not full.startswith(os.path.realpath(self.gallery) + os.sep) or not os.path.isfile(full):
+            raise ValueError("that sound isn't in the gallery")
+        return full
+
+    def cancel(self, jid):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                return False
+            if job["status"] == "queued":
+                job["status"] = "cancelled"
+            elif job["status"] == "running" and self.current == jid and self.proc:
+                job["status"] = "cancelled"
+                self.proc.terminate()
+            return True
+
+    def clear(self):
+        """Clear the Queue tab: cancel waiting jobs, forget finished ones (their files stay in the gallery)."""
+        cancelled = removed = 0
+        with self.lock:
+            for jid in list(self.order):
+                job = self.jobs[jid]
+                if job["status"] == "queued":
+                    job["status"] = "cancelled"
+                    cancelled += 1
+                elif job["status"] == "running":
+                    continue
+                self.order.remove(jid)
+                del self.jobs[jid]
+                removed += 1
+        return {"cancelled": cancelled, "removed": removed}
+
+    def abort(self):
+        """⛔ CANCEL AND ABORT: cancel every waiting job, stop the running one, then empty the render
+        server's ComfyUI queue and interrupt what it's sampling (every server of a farm list)."""
+        servers = set(render_server().split(","))
+        proc, cancelled = None, 0
+        with self.lock:
+            for jid in self.order:
+                job = self.jobs[jid]
+                if job["status"] == "queued":
+                    job["status"] = "cancelled"
+                    cancelled += 1
+                elif job["status"] == "running":
+                    argv = job["argv"]
+                    if "--server" in argv:
+                        servers.update(argv[argv.index("--server") + 1].split(","))
+                    if self.current == jid and self.proc:
+                        job["status"] = "cancelled"
+                        proc = self.proc
+                        proc.terminate()
+                        cancelled += 1
+        if proc:                                         # let soundmon exit first, so it can't send one more prompt
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        comfy = {}
+        for name in sorted(s.strip() for s in servers if s.strip()):
+            url = server_url(name)
+            if not url or url in comfy.values():
+                continue
+            try:
+                for path, body in (("/queue", {"clear": True}), ("/interrupt", {})):
+                    req = urllib.request.Request(url + path, data=json.dumps(body).encode(), method="POST",
+                                                 headers={"Content-Type": "application/json"})
+                    urllib.request.urlopen(req, timeout=4).close()
+                comfy[name] = url
+            except Exception as e:
+                comfy[name] = f"unreachable ({e})"
+        return {"cancelled": cancelled, "servers": comfy}
+
+    def snapshot(self):
+        with self.lock:
+            return [dict(self.jobs[j], log=self.jobs[j]["log"][-40:]) for j in self.order[-60:]]
+
+    def _save(self, job):
+        d = os.path.join(self.gallery, job["dir"])
+        os.makedirs(d, exist_ok=True)
+        _write_json(os.path.join(d, "job.json"), {k: v for k, v in job.items() if k != "log"})
+        with open(os.path.join(d, "log.txt"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(job["log"]) + "\n")
+
+    def _worker(self):
+        while True:
+            jid = self.q.get()
+            with self.lock:
+                job = self.jobs.get(jid)
+                if not job or job["status"] == "cancelled":
+                    continue
+                job["status"], job["started"] = "running", time.time()
+                self.current = jid
+            d = os.path.join(self.gallery, job["dir"])
+            self._save(job)
+            argv = job["argv"] + ["--output-to", d]
+            rc = -1
+            try:
+                self.proc = subprocess.Popen(argv, cwd=d, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                             text=True, bufsize=1, stdin=subprocess.DEVNULL,
+                                             env=dict(os.environ, NO_COLOR="1", PYTHONUNBUFFERED="1"))
+                for line in self.proc.stdout:
+                    line = ANSI.sub("", line.rstrip())
+                    if not line.strip():
+                        continue
+                    with self.lock:
+                        job["log"].append(line)
+                        m = DONE_LINE.search(line)
+                        if m:
+                            job["done"] = int(m.group(1))
+                            job["total"] = max(job["total"], int(m.group(2)))
+                rc = self.proc.wait()
+            except Exception as e:
+                job["log"].append(f"GUI error: {e}")
+            with self.lock:
+                outs = scan_outputs(d)                      # trust the folder over the log
+                seeds = [int(s) for s in SEED.findall("\n".join(ln for ln in job["log"] if "✅" in ln))]
+                for o in outs:                              # files without a seed in the name (blips) keep the log's
+                    if o["seed"] is None and seeds:
+                        o["seed"] = seeds[min(len(seeds) - 1, outs.index(o))]
+                job["outputs"] = outs
+                self.made += len(outs)
+                if job["status"] != "cancelled":
+                    job["status"] = "done" if rc == 0 and outs else "failed"
+                    if job["status"] == "failed":           # the node's own message beats "N jobs failed"
+                        last = next((ln for ln in reversed(job["log"]) if ln.strip()), f"exit {rc}").strip()
+                        why = next((ln.strip() for ln in job["log"]
+                                    if "ComfyUI failed" in ln or re.search(r"failed seed=\d+:", ln)), "")
+                        job["error"] = (why + ("  —  " + last if why and last not in why else "") if why else last)[:600]
+                job["finished"] = time.time()
+                self.current, self.proc = None, None
+            self._save(job)
+
+
+def list_presets():
+    out = []
+    for f in sorted(glob.glob(os.path.join(PRESETS, "*.json"))):
+        p = _read_json(f, None)
+        if p and isinstance(p.get("snapshot"), dict):
+            out.append({"name": p.get("name") or os.path.splitext(os.path.basename(f))[0], "saved": p.get("saved"),
+                        "engine": p["snapshot"].get("engine"), "snapshot": p["snapshot"]})
+    return sorted(out, key=lambda p: p["name"].lower())
+
+
+def save_preset(body):
+    name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:60]
+    if not name:
+        raise ValueError("give the preset a name")
+    snap = body.get("snapshot")
+    if not isinstance(snap, dict) or snap.get("engine") not in ENGINES:
+        raise ValueError("nothing to save")
+    if len(json.dumps(snap)) > 200000:
+        raise ValueError("that preset is too big")
+    _write_json(os.path.join(PRESETS, safe_name(name, 60) + ".json"), {"name": name, "saved": time.time(), "snapshot": snap})
+    return list_presets()
+
+
+def delete_preset(name):
+    f = os.path.join(PRESETS, safe_name(name, 60) + ".json")
+    if not os.path.isfile(f):
+        raise ValueError("no preset by that name")
+    os.remove(f)
+    return list_presets()
+
+
+def gallery_items(gallery, limit=400):
+    items = []
+    for jf in sorted(glob.glob(os.path.join(gallery, "*", "job.json")), reverse=True)[:limit]:
+        job = _read_json(jf, None)
+        if job and job.get("outputs"):
+            items.append(job)
+    return items
+
+
+def rate(gallery, d, f, stars):
+    jf = os.path.join(gallery, safe_name(d, 64), "job.json")
+    job = _read_json(jf, None)
+    if not job:
+        raise ValueError("that job isn't in the gallery")
+    if f not in {o["file"] for o in job.get("outputs") or []}:
+        raise ValueError("that sound isn't in the job")
+    stars = int(stars)
+    if not 0 <= stars <= 5:
+        raise ValueError("stars must be 0..5")
+    job.setdefault("ratings", {})[f] = stars
+    _write_json(jf, job)
+    return job["ratings"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+AUDIO_TYPES = {".wav": "audio/wav", ".flac": "audio/flac", ".ogg": "audio/ogg", ".mp3": "audio/mpeg",
+               ".opus": "audio/ogg", ".mod": "audio/x-mod", ".rad": "application/octet-stream",
+               ".mid": "audio/midi", ".txt": "text/plain; charset=utf-8", ".json": "application/json"}
+
+
+class QuietServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    jobs = None
+    gallery = None
+    sets = None
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _file(self, path, ctype, download=None):
+        """Serve a file, honouring Range so the browser can seek long music."""
+        try:
+            size = os.path.getsize(path)
+            fh = open(path, "rb")
+        except OSError:
+            return self._json({"error": "not found"}, 404)
+        with fh:
+            start, end = 0, size - 1
+            rng = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range") or "")
+            if rng and size:
+                if rng.group(1):
+                    start = int(rng.group(1))
+                    end = min(int(rng.group(2)), size - 1) if rng.group(2) else size - 1
+                else:
+                    start = max(0, size - int(rng.group(2) or 0))
+                if start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+            self.send_response(206 if rng and size else 200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1 if size else 0))
+            if rng and size:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            if download:
+                self.send_header("Content-Disposition", f'attachment; filename="{download}"')
+            self.end_headers()
+            fh.seek(start)
+            left = end - start + 1 if size else 0
+            while left > 0:
+                chunk = fh.read(min(1 << 16, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path in ("/", "/index.html"):
+            return self._file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
+        if u.path == "/api/meta":
+            meta = load_meta()
+            meta.update(server=render_server(), server_up=server_is_up(), known_servers=sorted(known_servers()),
+                        default_server=default_server(), setup=load_setup(), gallery=self.gallery)
+            return self._json(meta)
+        if u.path == "/api/jobs":
+            return self._json({"jobs": self.jobs.snapshot(), "made": self.jobs.made,
+                               "render": {"server": render_server(), "url": server_url(), "up": server_is_up(),
+                                          "stuck": SERVER_STATE["stuck"] if SERVER_STATE["server"] == render_server() else None,
+                                          "restart": SERVER_STATE["restart"]}})
+        if u.path == "/api/servers":
+            return self._json(servers_report())
+        if u.path == "/api/gallery":
+            return self._json({"items": gallery_items(self.gallery)})
+        if u.path == "/api/setup":
+            return self._json(load_setup())
+        if u.path == "/api/sets":
+            return self._json({"sets": self.sets.list()})
+        if u.path == "/api/presets":
+            return self._json({"presets": list_presets()})
+        if u.path in ("/api/set", "/api/set/now"):
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                s = self.sets.load(q.get("id", [""])[0])
+                if u.path == "/api/set/now":             # the file the game plays today, for ▶ NOW
+                    full = self.sets.now_path(s, q.get("key", [""])[0])
+                    ext = os.path.splitext(full)[1].lower()
+                    return self._file(full, AUDIO_TYPES.get(ext) or "application/octet-stream")
+                return self._json({"set": s, "takes": self.sets.takes(s["id"]), "now": self.sets.now_files(s),
+                                   "pending": self.sets.pending(s["id"], self.jobs.snapshot())})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404 if u.path == "/api/set/now" else 400)
+        if u.path.startswith("/files/"):
+            rel = urllib.parse.unquote(u.path[len("/files/"):])
+            full = os.path.realpath(os.path.join(self.gallery, rel))
+            if not full.startswith(os.path.realpath(self.gallery) + os.sep) or not os.path.isfile(full):
+                return self._json({"error": "not found"}, 404)
+            ext = os.path.splitext(full)[1].lower()
+            dl = os.path.basename(full) if "download" in urllib.parse.parse_qs(u.query) else None
+            return self._file(full, AUDIO_TYPES.get(ext) or mimetypes.guess_type(full)[0] or "application/octet-stream", dl)
+        return self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path == "/api/upload":                      # raw bytes; ?filename=
+            return self._upload(urllib.parse.parse_qs(u.query))
+        if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            return self._json({"error": "expected application/json"}, 415)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return self._json({"error": "bad json"}, 400)
+        try:
+            if u.path == "/api/command":                 # the exact command RENDER would run
+                try:                                     # half-typed forms are normal here: answer, don't fail
+                    argv, _, takes = build_argv(body, load_meta())
+                except ValueError as e:
+                    return self._json({"invalid": str(e)})
+                return self._json({"command": command_text(argv), "takes": takes})
+            if u.path == "/api/render":
+                group, label = body.pop("group", None), body.pop("label", None)
+                job = self.jobs.add(body, group=group, label=label)
+                return self._json({"jobs": [job["id"]], "command": job["command"]})
+            if u.path.startswith("/api/cancel/"):
+                return self._json({"ok": self.jobs.cancel(u.path.rsplit("/", 1)[-1])})
+            if u.path == "/api/jobs/clear":
+                return self._json(self.jobs.clear())
+            if u.path == "/api/jobs/abort":
+                return self._json(self.jobs.abort())
+            if u.path == "/api/rate":
+                return self._json({"ratings": rate(self.gallery, body.get("dir"), body.get("file"), body.get("stars", 0))})
+            if u.path == "/api/setup":
+                return self._json(save_setup(body))
+            if u.path == "/api/presets":
+                return self._json({"presets": save_preset(body)})
+            if u.path == "/api/presets/delete":
+                return self._json({"presets": delete_preset(body.get("name"))})
+            if u.path == "/api/voices":
+                # one line in several voices: one narrate job per voice, grouped so the Voices tab can find them
+                line = str(body.get("line") or "").strip()
+                if not line or "\n" in line or "|" in line or len(line) > 400:
+                    raise ValueError("type one line (up to 400 characters) to hear in each voice")
+                meta = load_meta()
+                voices = [v for v in (body.get("voices") or list(meta["voices"])) if v in meta["voices"]]
+                if not voices:
+                    raise ValueError("Kokoro's voice list didn't load (narrate.py) — is soundmon installed?")
+                group = "voices:" + time.strftime("%Y%m%d-%H%M%S")
+                ids = [self.jobs.add({"engine": "narrate", "prompt": line, "voice": v, "name": v, "speed": body.get("speed"),
+                                      "pitch": body.get("pitch")}, group=group, label=v)["id"] for v in voices]
+                return self._json({"group": group, "jobs": ids})
+            if u.path.startswith("/api/sets/"):
+                return self._json(self._sets_post(u.path.rsplit("/", 1)[-1], body))
+            if u.path == "/api/open":
+                # open a sound or a job folder in a program saved in Setup, or the OS default.
+                # Only programs saved in Setup can be launched: the request names one, it can't supply a command.
+                setup, key, t = load_setup(), str(body.get("app") or "os"), body.get("target") or {}
+                is_dir = bool(t.get("folder"))
+                if is_dir:
+                    path = os.path.join(self.gallery, safe_name(t.get("dir"), 64)) if t.get("dir") else self.gallery
+                    if not os.path.isdir(path):
+                        raise ValueError("that folder doesn't exist any more")
+                else:
+                    path = self.jobs.gallery_path(t.get("dir"), t.get("file"))
+                if key == "os":
+                    app = os_opener(is_dir)
+                elif key.startswith(("snd:", "dir:")):
+                    lst = setup["folder_apps" if key.startswith("dir:") else "audio_apps"]
+                    i = int(key[4:]) if key[4:].isdigit() else -1
+                    if not 0 <= i < len(lst):
+                        raise ValueError("that program isn't in the Setup tab any more")
+                    app = lst[i]
+                else:
+                    raise ValueError(f"unknown program {key!r}")
+                launch(app, path)
+                return self._json({"opened": path, "with": app.get("name")})
+        except ValueError as e:
+            return self._json({"error": str(e)}, 400)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+        return self._json({"error": "not found"}, 404)
+
+    def _sets_post(self, act, body):
+        validate = lambda p: build_argv(p, load_meta())     # noqa: E731
+        if act == "create":
+            return {"set": self.sets.create(body, validate)}
+        if act == "update":
+            return {"set": self.sets.update(body, validate)}
+        if act == "mark":
+            return {"set": self.sets.mark(body)}
+        if act == "render":
+            # render takes for some keys ("missing" = every key with no takes and nothing queued)
+            s = self.sets.load(body.get("id"))
+            keys = body.get("keys")
+            if keys == "missing":
+                have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot())
+                keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"])]
+            if not isinstance(keys, list) or not keys:
+                raise ValueError("nothing to render — every key already has takes")
+            if len(keys) > 1000:
+                raise ValueError("at most 1000 keys at once")
+            jobs, voices = [], s["theme"].get("voices") if s["theme"]["engine"] == "narrate" and body.get("seed") is None else None
+            for k in keys:
+                for v in (voices or [None]):
+                    p = self.sets.render_params(s, k, n=body.get("n"), seed=body.get("seed"), voice=v)
+                    jobs.append(self.jobs.add(p, group=f"set:{s['id']}", label=k)["id"])
+            return {"jobs": jobs}
+        if act == "export":
+            s = self.sets.load(body.get("id"))
+            if body.get("preview"):
+                return {"plan": self.sets.export_plan(s), "folder": self.sets.game_dir(s)}
+            return self.sets.export(s, only_changed=not body.get("all"))
+        raise ValueError(f"unknown sets action {act!r}")
+
+    def _upload(self, q):
+        """A MIDI / reference audio / OPL bank / manifest dropped on the form -> INPUTS (never overwrites)."""
+        fname = safe_name((q.get("filename") or ["input.mid"])[0], 96)
+        n = int(self.headers.get("Content-Length") or 0)
+        if not fname.lower().endswith(INPUT_EXT):
+            return self._json({"error": f"not a file soundmon reads: {fname} (MIDI, WAV/FLAC/OGG/MP3, .sbi or .txt)"}, 400)
+        if not 0 < n <= 200 * 1024 * 1024:
+            return self._json({"error": "file must be under 200 MB"}, 400)
+        data = self.rfile.read(n)
+        if fname.lower().endswith((".mid", ".midi")) and data[:4] != b"MThd":
+            return self._json({"error": f"{fname} isn't a MIDI file"}, 400)
+        os.makedirs(INPUTS, exist_ok=True)
+        out = unique_path(INPUTS, fname)
+        with open(out, "wb") as f:
+            f.write(data)
+        res = {"file": os.path.basename(out)}
+        if fname.lower().endswith(".txt"):
+            res["text"] = data.decode("utf-8", "replace")[:200000]
+        return self._json(res)
+
+
+def unique_path(d, fname):
+    """d/fname, or d/fname-1, -2 … so nothing is ever overwritten."""
+    stem, ext = os.path.splitext(fname)
+    out, k = os.path.join(d, fname), 1
+    while os.path.exists(out):
+        out, k = os.path.join(d, f"{stem}-{k}{ext}"), k + 1
+    return out
+
+
+def main():
+    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE, SETS_ROOT, PRESETS
+    ap = argparse.ArgumentParser(prog="soundmon-gui", description="Web GUI for soundmon.")
+    ap.add_argument("--port", type=int, default=8191)
+    ap.add_argument("--server", default=os.environ.get("SOUNDMON_SERVER", ""),
+                    help="render server: a servers.json alias, host[:port] or URL (default: $SOUNDMON_SERVER, "
+                         "else the Setup tab's choice, else servers.json \"_default\", else 'local')")
+    ap.add_argument("--lan", action="store_true", help="listen on all interfaces so other devices on the LAN can use it")
+    ap.add_argument("--gallery", default=os.path.expanduser("~/soundmon-gallery/gui"),
+                    help="where renders + job.json records go (default ~/soundmon-gallery/gui)")
+    args = ap.parse_args()
+    GALLERY_HOME = os.path.dirname(os.path.normpath(os.path.expanduser(args.gallery)))
+    INPUTS = os.path.join(GALLERY_HOME, "inputs")
+    SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
+    SETS_ROOT = os.path.join(GALLERY_HOME, "sets")
+    PRESETS = os.path.join(GALLERY_HOME, "gui-presets")
+    SERVER_ARG = re.sub(r"\s+", "", args.server or "")
+    os.makedirs(args.gallery, exist_ok=True)
+    Handler.gallery = os.path.realpath(os.path.expanduser(args.gallery))
+    Handler.jobs = JobQueue(Handler.gallery)
+    Handler.sets = setsmod.Sets(SETS_ROOT, Handler.gallery, home_path)
+    threading.Thread(target=watch_server, daemon=True).start()
+    host = "0.0.0.0" if args.lan else "127.0.0.1"
+    try:
+        srv = QuietServer((host, args.port), Handler)
+    except OSError as e:
+        if e.errno != 98:                        # EADDRINUSE
+            raise
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{args.port}/api/meta", timeout=2) as r:
+                json.load(r)
+            sys.exit(f"soundmon-gui is already running: http://127.0.0.1:{args.port}\n"
+                     f"  (stop it with:  pkill -f soundmon/gui/server.py   or pick another --port)")
+        except (OSError, ValueError):
+            sys.exit(f"port {args.port} is in use by another program; try  soundmon-gui --port {args.port + 1}")
+    print(f"soundmon-gui on http://{'<this-ip>' if args.lan else '127.0.0.1'}:{args.port}  "
+          f"(GPU renders on '{render_server()}' {server_url() or ''}, gallery {Handler.gallery})  Ctrl-C to quit")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

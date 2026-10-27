@@ -399,6 +399,14 @@ behind the slowest card.
 models but not the 9.3 GB song model is skipped with a message rather than
 failing jobs mid-batch. Extend `server_has_ckpt()` if you add a model.
 
+**A job ComfyUI fails is seen at once.** `/history` only grows `outputs` on
+success; a node that raises leaves `status.status_str == "error"` and nothing
+else, so waiting for outputs alone sat out the full 1800 s timeout. `_job_error()`
+reads the status; `wait()` exits with the node's message and `poll()` raises
+`JobFailed`. On the farm that feeds the circuit breaker (gotcha 16): a box that
+fails twice in a row is dropped, a failed job is requeued once, and idle boxes
+pick up requeued work. selfcheck asserts the status check.
+
 **Capability is not the only way a box is wrong.** A box with every model present
 but ComfyUI running *without* `--force-fp32` passes `server_has_ckpt()` and then
 returns static for every SA3 job — quickly, so dispatch sends it more work. There
@@ -478,24 +486,52 @@ two different compositions. My first FLAC check did that and "failed" on a
   runtime, so `--list-styles` / `--list-formats` / `--list-voices` never drift
   from what actually exists. Keep it that way.
 
+## The GUI (`gui/`, `bin/soundmon-gui`)
+
+A sibling of pixelmon-gui and built the same way: `gui/server.py` is a stdlib
+`ThreadingHTTPServer` (port 8191) that runs **`bin/soundmon` as a subprocess**,
+one job at a time, always with `--no-open --output-to <job folder>`; `gui/index.html`
+is one no-build page. Rules that keep it honest:
+
+- **The server builds the command.** `build_argv()` validates the form and the page
+  shows its output (`/api/command`) under RENDER. There is no JS copy of the argv
+  logic to drift. A new CLI flag needs a line there (or in `ADV` for the Advanced tab).
+- **Lists come from the engines.** Moods, archetypes, OPL instruments and voices are
+  imported fresh from `chip.py` / `chipfx.py` / `opl.py` / `narrate.py`; keys and
+  negatives are evaluated out of `soundmon.py`'s source (`source_constant`), formats out
+  of the node's (importing either pulls in torch). Flag help comes from the
+  `add_argument` calls (`cli_spec`). Keep engine modules stdlib-only at import time.
+- **Progress is the `✅ [i/n]` line** every engine prints; at exit the job folder is
+  trusted over the log (`scan_outputs`). If you change an engine's result line, keep
+  the `[i/n]` and `seed=` parts.
+- **Every job keeps its recipe** in `~/soundmon-gallery/gui/<job>/job.json` (params,
+  argv, command, each take's seed), plus copies of any input MIDI / audio / bank.
+- **Sets (`gui/sets.py`) store no takes.** A set is a frozen manifest snapshot +
+  theme + picks/flags in `~/soundmon-gallery/sets/<id>/set.json`; a render job carries
+  `params.set = {id, key}`, and a key's takes are found by scanning the gallery. Keep
+  it that way: a second copy of the takes would drift. Export only ever writes inside
+  the set's game folder, and copies whatever it replaces to `.soundmon-backup/` first.
+  Blips and narration are deterministic (same text, same sound), so their sets make one
+  take per key, or one per voice, rather than seeds.
+
+## The format lock — the owner's call
+
+`_format_lock()` in `custom_nodes/retro_sfx/nodes.py` is the audio twin of
+pixelmon's palette lock — forcing a waveform through a sample-rate/bit-depth/
+channel ceiling (`amiga`, `sb`, `gameboy`, …). The repo owner wrote it, and its
+two choices decide the tool's character:
+
+- naive stride decimation, **no anti-aliasing**: the aliasing is what an Amiga
+  sounds like; a clean resample throws that away
+- plain quantize, **no dither**: harsh and authentic; dither would smooth the
+  floor a hardware ceiling exists to keep rough
+
+**Do not "improve" either into the polite version unless asked.**
+
 ## Deliberately unimplemented
 
-`_format_lock()` in `custom_nodes/retro_sfx/nodes.py` raises `NotImplementedError`
-**on purpose**. It is the audio twin of pixelmon's palette lock — forcing a
-waveform through a sample-rate/bit-depth/channel ceiling (`amiga`, `sb`,
-`gameboy`, …) — and how it resamples and quantizes is what decides the tool's
-character:
-
-- naive stride decimation *aliases*, which is exactly what an Amiga sounds like;
-  a clean anti-aliased resample throws that character away
-- plain quantize is harsh and authentic; dithering first trades grit for a
-  smoother floor
-- staying at 8363 Hz is honest; coming back up to 44.1 kHz is practical
-
-The repo owner is writing this one. **Do not fill it in unless asked.** Default
-`--format none` works fully, so only the retro formats are gated on it.
-
-`take_warning()` in `record.py` is the same deal, for the same reason. It decides
+`take_warning()` in `record.py` is left to the repo owner on purpose. **Do not
+fill it in unless asked.** It decides
 whether a recorded take looks bad enough to warn about before you accept it. The
 clipping check is implemented because clipping is objectively wrong; everything
 below it is **calibration against a specific mic, room and delivery**, which is

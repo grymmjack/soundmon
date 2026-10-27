@@ -79,27 +79,8 @@ def _fade(wave: torch.Tensor, sr: int, fade_ms: int) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# TODO(grymmjack): the format lock — the heart of the node.
-#
-# Given a waveform at `sr`, produce one that has actually *passed through* a
-# rate/bits/mono ceiling. Roughly 8-10 lines. Three real decisions live here:
-#
-#   1. RESAMPLING. Naive stride-decimation (wave[..., ::factor]) aliases — and
-#      aliasing is exactly what an Amiga sounds like. A proper anti-aliased
-#      resample sounds "correct" and loses the character. This is the same call
-#      pixelmon made with `--filter nearest (crisp) / box (soft)`, where nearest
-#      won because correct-looking wasn't the goal.
-#
-#   2. QUANTIZATION. Plain rounding to 2**bits levels is harsh and authentic.
-#      Adding dither before rounding trades that grit for a smoother noise floor
-#      — the audio twin of pixelmon's `--dither` Floyd-Steinberg flag.
-#
-#   3. WHETHER TO UPSAMPLE BACK. Leaving the file at 8363 Hz is truly authentic
-#      but awkward to load in a modern engine; upsampling back to 44.1 kHz keeps
-#      the crunch you just baked in while staying a normal WAV. (Note the return
-#      signature lets you pick — return whatever rate you decide.)
-#
-# There is no neutral default here; the choice IS the sound of the tool.
+# The format lock — the heart of the node. Its two choices (no anti-aliasing,
+# no dither) are the sound of the tool; the docstring says why.
 # ---------------------------------------------------------------------------
 def _format_lock(wave: torch.Tensor, sr: int, spec: dict) -> tuple:
     """Force `wave` through spec's rate/bits/mono ceiling.
