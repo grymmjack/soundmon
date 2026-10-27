@@ -135,7 +135,7 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | `-n, --number N` | how many to make, each a different seed | `1` |
 | `--seconds N` | length. **Conditions the model** — it shapes the sound, not just its length | `10` |
 | `--engine NAME` | `sa3` (Stable Audio 3) or `sao` (Stable Audio Open 1.0) | `sa3` |
-| `--sa3-size NAME` | `medium` / `small_music` / `small_sfx` / `medium_base` | `medium` |
+| `--sa3-size NAME` | `medium` / `small` — only medium is verified to sound right | `medium` |
 | `--no-reprompt` | skip the Qwen rewrite stage — **usually a mistake**, see gotcha 10 | off |
 | `--style NAMES` | append proven prompt guide(s), comma-separated — `--list-styles` | — |
 | `--format NAME` | hardware format lock (rate + bit depth + channels) — `--list-formats` | `none` |
@@ -749,9 +749,9 @@ soundmon "a laser blast" --format sb --bits 8      # SoundBlaster-era crunch
 soundmon "a coin pickup" --format gameboy --bits 8 # DMG 4-bit
 ```
 
-> ⚠ **`_format_lock()` is currently unimplemented** — see the TODO in
-> `custom_nodes/retro_sfx/nodes.py`. Everything at the default `--format none`
-> works fully; only the retro formats are gated on it.
+The lock decimates without an anti-aliasing filter and quantizes without
+dither, on purpose: the aliasing and the grit are the sound of the hardware.
+Both choices are explained in `_format_lock()` in `custom_nodes/retro_sfx/nodes.py`.
 
 ---
 

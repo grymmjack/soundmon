@@ -149,14 +149,14 @@ def print_help():
         opt("description", "the sound you want (in quotes)"),
         opt("-n, --number N", "how many to make, each a different seed", "1"),
         opt('--batch "a,b,c"', "round-robin subjects → a folder each (N of each)"),
-        opt("--seconds N", "length in seconds (model max 47)", "10"),
+        opt("--seconds N", "length in seconds (SA3 max 120, SAO max 47)", "10"),
         opt("--style NAMES", "append proven style guide(s) — see --list-styles"),
         opt("--music", "music mode: loops/beds/stings (no full songs or vocals)"),
         opt("--format NAME", "hardware format lock — see --list-formats", "none"),
         opt("--bits N", "WAV bit depth: 8 / 16 / 24", "16"),
         opt("--seed N", "lock / repeat a result (re-run a favorite)", "random"),
-        opt("--steps N", "sampling steps (more = better, slower)", "50"),
-        opt("--cfg N", "prompt adherence (higher = stricter)", "5.0"),
+        opt("--steps N", "sampling steps (more = better, slower)", "8 on SA3"),
+        opt("--cfg N", "prompt adherence (higher = stricter)", "1.0 on SA3"),
         opt("--fast", "16 steps: ~3x faster, rougher"),
         opt("--no-trim", "keep the model's leading/trailing silence"),
         opt("--loop", "crossfade tail over head so the track loops seamlessly"),
@@ -192,7 +192,7 @@ def print_help():
         opt("--scheduler NAME", "ksampler scheduler", "exponential"),
         opt("--threshold-db N", "silence floor for trimming", "-45"),
         opt("--engine NAME", "sa3 (full-band, fast) / sao (2024, 16kHz cut)", "sa3"),
-        opt("--sa3-size N", "small (specialist) / medium (generalist)", "small"),
+        opt("--sa3-size N", "medium (the only verified one) / small", "medium"),
         opt("--base FILE", "checkpoint override", "per --engine"),
         opt("--text-encoder FILE", "T5 text encoder", "t5_base"),
         opt("--no-open", "don't auto-play the result"),
@@ -446,23 +446,57 @@ def submit(graph, server=None):
         sys.exit("Couldn't reach ComfyUI at " + server + " — is the server running?")
 
 
+class JobFailed(Exception):
+    """ComfyUI finished a job without audio: a node raised, or nothing was saved."""
+
+
+def _job_error(entry):
+    """The reason a /history entry failed, or None while it is still fine.
+
+    /history only grows an "outputs" dict on success. A job that raises inside a
+    node (a missing model in CLIPLoader, say) gets status_str "error" and NO
+    outputs, so waiting for outputs alone waits out the full timeout: 30 minutes
+    of a dead run that looks busy. Read the status too.
+    """
+    st = entry.get("status") or {}
+    if st.get("status_str") == "error":
+        for kind, data in st.get("messages") or []:
+            if kind == "execution_error" and isinstance(data, dict):
+                node = data.get("node_type") or f"node {data.get('node_id', '?')}"
+                msg = " ".join(str(data.get("exception_message") or "").split())
+                return f"{node}: {msg}"[:600] if msg else node
+        return "ComfyUI reported an error (no details)"
+    if st.get("completed") and not entry.get("outputs"):
+        return "the job finished but saved no audio"
+    return None
+
+
 def wait(pid, server=None, timeout=1800):
     server = server or SERVER
     for _ in range(timeout):
         with urllib.request.urlopen(f"{server}/history/{pid}", timeout=30) as r:
             hist = json.loads(r.read())
-        if pid in hist and hist[pid].get("outputs"):
-            return hist[pid]["outputs"]
+        if pid in hist:
+            if hist[pid].get("outputs"):
+                return hist[pid]["outputs"]
+            err = _job_error(hist[pid])
+            if err:
+                sys.exit(f"ComfyUI failed the job on {_short(server)} in {err}")
         time.sleep(1)
     sys.exit("Timed out waiting for the sound.")
 
 
 def poll(pid, server):
-    """One non-blocking /history check; returns the outputs dict, or None if not ready."""
+    """One non-blocking /history check; returns the outputs dict, or None if not ready.
+    Raises JobFailed when ComfyUI gave up on the job."""
     with urllib.request.urlopen(f"{server}/history/{pid}", timeout=30) as r:
         hist = json.loads(r.read())
-    if pid in hist and hist[pid].get("outputs"):
-        return hist[pid]["outputs"]
+    if pid in hist:
+        if hist[pid].get("outputs"):
+            return hist[pid]["outputs"]
+        err = _job_error(hist[pid])
+        if err:
+            raise JobFailed(err)
     return None
 
 
@@ -835,6 +869,9 @@ def run_farm(a, work):
     inflight = {}               # server -> (subject, seed, dest, pid)
     total = len(work)
     done = 0
+    failed = 0
+    fails = {}                  # server -> consecutive failed jobs
+    tries = {}                  # (subject, seed) -> failed attempts
 
     def launch(srv):
         """Submit the next pending job to srv. False = server unusable (drop it)."""
@@ -858,6 +895,23 @@ def run_farm(a, work):
         for srv, (subj, seed, d, pid) in list(inflight.items()):
             try:
                 outs = poll(pid, srv)
+            except JobFailed as e:
+                # Circuit breaker (AGENTS gotcha 16): a box that fails fast is free
+                # again first, so dynamic dispatch would hand it most of the queue.
+                del inflight[srv]
+                advanced = True
+                fails[srv] = fails.get(srv, 0) + 1
+                tries[(subj, seed)] = tries.get((subj, seed), 0) + 1
+                print(f"   ⚠ {_short(srv)} failed seed={seed}: {e}")
+                if tries[(subj, seed)] >= 2:
+                    print(f"   ✖ seed={seed} failed twice — giving up on it")
+                    failed += 1
+                else:
+                    pending.append((subj, seed, d))
+                if fails[srv] >= 2:
+                    print(f"   ⚠ dropping {_short(srv)} after {fails[srv]} failures in a row")
+                    live.remove(srv)
+                continue
             except Exception:
                 print(f"   ⚠ {_short(srv)} unreachable — requeueing its job")
                 pending.append((subj, seed, d))
@@ -878,16 +932,23 @@ def run_farm(a, work):
                 files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
             files = encode_all(files, a)
             done += 1
+            fails[srv] = 0
             sj = f"{subj}  " if a.batch else ""
             print(f"   ✅ [{done}/{total}] {_short(srv):<20} {sj}seed={seed}  ->  "
                   f"{files[0] if files else '(no file)'}")
             del inflight[srv]
             launch(srv)          # feed the now-free GPU its next job
+        # Requeued work must reach a box that already went idle, or it is lost.
+        for srv in list(live):
+            if pending and srv not in inflight and launch(srv) is False:
+                live.remove(srv)
         if not advanced:
             time.sleep(1)
 
     if pending:
         print(f"   ⚠ {len(pending)} job(s) left undone (all GPUs dropped).")
+    if failed or pending:
+        sys.exit(f"render farm: {failed + len(pending)} of {total} job(s) produced no audio.")
 
 
 def main():
@@ -964,7 +1025,7 @@ def main():
                         "become fast arpeggios, leaps get pitch slides, and at "
                         "'max' a subtle tracker-style echo. off = exact polyphony.")
     p.add_argument("--arp", "--chip-arp", dest="chip_arp", type=int, default=0, metavar="N",
-                   help="arpeggio speed in 16ths — 1 is the classic buzzy chord (default: 1)")
+                   help="arpeggio speed in 16ths — 1 is the classic buzzy chord (default: 0, the mood chooses)")
     # --- opl mode: real AdLib / Sound Blaster FM via the Nuked OPL3 core ---
     p.add_argument("--opl", action="store_true",
                    help="ADLIB/OPL3 mode — drive a cycle-accurate Nuked OPL3 core. "

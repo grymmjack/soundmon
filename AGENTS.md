@@ -478,24 +478,24 @@ two different compositions. My first FLAC check did that and "failed" on a
   runtime, so `--list-styles` / `--list-formats` / `--list-voices` never drift
   from what actually exists. Keep it that way.
 
+## The format lock — the owner's call
+
+`_format_lock()` in `custom_nodes/retro_sfx/nodes.py` is the audio twin of
+pixelmon's palette lock — forcing a waveform through a sample-rate/bit-depth/
+channel ceiling (`amiga`, `sb`, `gameboy`, …). The repo owner wrote it, and its
+two choices decide the tool's character:
+
+- naive stride decimation, **no anti-aliasing**: the aliasing is what an Amiga
+  sounds like; a clean resample throws that away
+- plain quantize, **no dither**: harsh and authentic; dither would smooth the
+  floor a hardware ceiling exists to keep rough
+
+**Do not "improve" either into the polite version unless asked.**
+
 ## Deliberately unimplemented
 
-`_format_lock()` in `custom_nodes/retro_sfx/nodes.py` raises `NotImplementedError`
-**on purpose**. It is the audio twin of pixelmon's palette lock — forcing a
-waveform through a sample-rate/bit-depth/channel ceiling (`amiga`, `sb`,
-`gameboy`, …) — and how it resamples and quantizes is what decides the tool's
-character:
-
-- naive stride decimation *aliases*, which is exactly what an Amiga sounds like;
-  a clean anti-aliased resample throws that character away
-- plain quantize is harsh and authentic; dithering first trades grit for a
-  smoother floor
-- staying at 8363 Hz is honest; coming back up to 44.1 kHz is practical
-
-The repo owner is writing this one. **Do not fill it in unless asked.** Default
-`--format none` works fully, so only the retro formats are gated on it.
-
-`take_warning()` in `record.py` is the same deal, for the same reason. It decides
+`take_warning()` in `record.py` is left to the repo owner on purpose. **Do not
+fill it in unless asked.** It decides
 whether a recorded take looks bad enough to warn about before you accept it. The
 clipping check is implemented because clipping is objectively wrong; everything
 below it is **calibration against a specific mic, room and delivery**, which is
