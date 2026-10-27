@@ -34,6 +34,9 @@ import time
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import sets as setsmod                          # noqa: E402  (gui/sets.py)
+
 HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(HERE)
 SOUNDMON = os.path.join(REPO, "bin", "soundmon")
@@ -41,6 +44,8 @@ SERVER_ARG = ""          # --server / $SOUNDMON_SERVER: overrides the Setup tab'
 GALLERY_HOME = os.path.expanduser("~/soundmon-gallery")
 INPUTS = os.path.join(GALLERY_HOME, "inputs")         # MIDI / audio / banks dropped on the form
 SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
+SETS_ROOT = os.path.join(GALLERY_HOME, "sets")         # one folder per sound set (gui/sets.py)
+PRESETS = os.path.join(GALLERY_HOME, "gui-presets")    # saved form snapshots, one .json each
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 DONE_LINE = re.compile(r"✅\s*\[(\d+)/(\d+)\]")
 SEED = re.compile(r"seed=(\d+)")
@@ -789,6 +794,12 @@ class JobQueue:
 
     def add(self, params, group=None, label=None):
         meta = load_meta()
+        ref = params.get("set")
+        if ref is not None:                 # a Sets render: which set and key the takes belong to
+            if not (isinstance(ref, dict) and re.fullmatch(r"[\w-]{1,64}", str(ref.get("id") or ""))
+                    and setsmod.KEY_RE.fullmatch(str(ref.get("key") or ""))):
+                raise ValueError("bad set reference")
+            params["set"] = {"id": ref["id"], "key": ref["key"]}
         build_argv(params, meta)            # validate before touching disk
         jid = time.strftime("%Y%m%d-%H%M%S-") + f"{random.randrange(16**4):04x}"
         jdir = os.path.join(self.gallery, jid)
@@ -950,6 +961,37 @@ class JobQueue:
             self._save(job)
 
 
+def list_presets():
+    out = []
+    for f in sorted(glob.glob(os.path.join(PRESETS, "*.json"))):
+        p = _read_json(f, None)
+        if p and isinstance(p.get("snapshot"), dict):
+            out.append({"name": p.get("name") or os.path.splitext(os.path.basename(f))[0], "saved": p.get("saved"),
+                        "engine": p["snapshot"].get("engine"), "snapshot": p["snapshot"]})
+    return sorted(out, key=lambda p: p["name"].lower())
+
+
+def save_preset(body):
+    name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:60]
+    if not name:
+        raise ValueError("give the preset a name")
+    snap = body.get("snapshot")
+    if not isinstance(snap, dict) or snap.get("engine") not in ENGINES:
+        raise ValueError("nothing to save")
+    if len(json.dumps(snap)) > 200000:
+        raise ValueError("that preset is too big")
+    _write_json(os.path.join(PRESETS, safe_name(name, 60) + ".json"), {"name": name, "saved": time.time(), "snapshot": snap})
+    return list_presets()
+
+
+def delete_preset(name):
+    f = os.path.join(PRESETS, safe_name(name, 60) + ".json")
+    if not os.path.isfile(f):
+        raise ValueError("no preset by that name")
+    os.remove(f)
+    return list_presets()
+
+
 def gallery_items(gallery, limit=400):
     items = []
     for jf in sorted(glob.glob(os.path.join(gallery, "*", "job.json")), reverse=True)[:limit]:
@@ -994,6 +1036,7 @@ class QuietServer(http.server.ThreadingHTTPServer):
 class Handler(http.server.BaseHTTPRequestHandler):
     jobs = None
     gallery = None
+    sets = None
 
     def log_message(self, fmt, *args):
         pass
@@ -1066,6 +1109,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"items": gallery_items(self.gallery)})
         if u.path == "/api/setup":
             return self._json(load_setup())
+        if u.path == "/api/sets":
+            return self._json({"sets": self.sets.list()})
+        if u.path == "/api/presets":
+            return self._json({"presets": list_presets()})
+        if u.path in ("/api/set", "/api/set/now"):
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                s = self.sets.load(q.get("id", [""])[0])
+                if u.path == "/api/set/now":             # the file the game plays today, for ▶ NOW
+                    full = self.sets.now_path(s, q.get("key", [""])[0])
+                    ext = os.path.splitext(full)[1].lower()
+                    return self._file(full, AUDIO_TYPES.get(ext) or "application/octet-stream")
+                return self._json({"set": s, "takes": self.sets.takes(s["id"]), "now": self.sets.now_files(s),
+                                   "pending": self.sets.pending(s["id"], self.jobs.snapshot())})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404 if u.path == "/api/set/now" else 400)
         if u.path.startswith("/files/"):
             rel = urllib.parse.unquote(u.path[len("/files/"):])
             full = os.path.realpath(os.path.join(self.gallery, rel))
@@ -1108,6 +1167,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"ratings": rate(self.gallery, body.get("dir"), body.get("file"), body.get("stars", 0))})
             if u.path == "/api/setup":
                 return self._json(save_setup(body))
+            if u.path == "/api/presets":
+                return self._json({"presets": save_preset(body)})
+            if u.path == "/api/presets/delete":
+                return self._json({"presets": delete_preset(body.get("name"))})
+            if u.path == "/api/voices":
+                # one line in several voices: one narrate job per voice, grouped so the Voices tab can find them
+                line = str(body.get("line") or "").strip()
+                if not line or "\n" in line or "|" in line or len(line) > 400:
+                    raise ValueError("type one line (up to 400 characters) to hear in each voice")
+                meta = load_meta()
+                voices = [v for v in (body.get("voices") or list(meta["voices"])) if v in meta["voices"]]
+                if not voices:
+                    raise ValueError("Kokoro's voice list didn't load (narrate.py) — is soundmon installed?")
+                group = "voices:" + time.strftime("%Y%m%d-%H%M%S")
+                ids = [self.jobs.add({"engine": "narrate", "prompt": line, "voice": v, "name": v, "speed": body.get("speed"),
+                                      "pitch": body.get("pitch")}, group=group, label=v)["id"] for v in voices]
+                return self._json({"group": group, "jobs": ids})
+            if u.path.startswith("/api/sets/"):
+                return self._json(self._sets_post(u.path.rsplit("/", 1)[-1], body))
             if u.path == "/api/open":
                 # open a sound or a job folder in a program saved in Setup, or the OS default.
                 # Only programs saved in Setup can be launched: the request names one, it can't supply a command.
@@ -1138,6 +1216,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._json({"error": f"{type(e).__name__}: {e}"}, 500)
         return self._json({"error": "not found"}, 404)
+
+    def _sets_post(self, act, body):
+        validate = lambda p: build_argv(p, load_meta())     # noqa: E731
+        if act == "create":
+            return {"set": self.sets.create(body, validate)}
+        if act == "update":
+            return {"set": self.sets.update(body, validate)}
+        if act == "mark":
+            return {"set": self.sets.mark(body)}
+        if act == "render":
+            # render takes for some keys ("missing" = every key with no takes and nothing queued)
+            s = self.sets.load(body.get("id"))
+            keys = body.get("keys")
+            if keys == "missing":
+                have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot())
+                keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"])]
+            if not isinstance(keys, list) or not keys:
+                raise ValueError("nothing to render — every key already has takes")
+            if len(keys) > 1000:
+                raise ValueError("at most 1000 keys at once")
+            jobs, voices = [], s["theme"].get("voices") if s["theme"]["engine"] == "narrate" and body.get("seed") is None else None
+            for k in keys:
+                for v in (voices or [None]):
+                    p = self.sets.render_params(s, k, n=body.get("n"), seed=body.get("seed"), voice=v)
+                    jobs.append(self.jobs.add(p, group=f"set:{s['id']}", label=k)["id"])
+            return {"jobs": jobs}
+        if act == "export":
+            s = self.sets.load(body.get("id"))
+            if body.get("preview"):
+                return {"plan": self.sets.export_plan(s), "folder": self.sets.game_dir(s)}
+            return self.sets.export(s, only_changed=not body.get("all"))
+        raise ValueError(f"unknown sets action {act!r}")
 
     def _upload(self, q):
         """A MIDI / reference audio / OPL bank / manifest dropped on the form -> INPUTS (never overwrites)."""
@@ -1170,7 +1280,7 @@ def unique_path(d, fname):
 
 
 def main():
-    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE
+    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE, SETS_ROOT, PRESETS
     ap = argparse.ArgumentParser(prog="soundmon-gui", description="Web GUI for soundmon.")
     ap.add_argument("--port", type=int, default=8191)
     ap.add_argument("--server", default=os.environ.get("SOUNDMON_SERVER", ""),
@@ -1183,10 +1293,13 @@ def main():
     GALLERY_HOME = os.path.dirname(os.path.normpath(os.path.expanduser(args.gallery)))
     INPUTS = os.path.join(GALLERY_HOME, "inputs")
     SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
+    SETS_ROOT = os.path.join(GALLERY_HOME, "sets")
+    PRESETS = os.path.join(GALLERY_HOME, "gui-presets")
     SERVER_ARG = re.sub(r"\s+", "", args.server or "")
     os.makedirs(args.gallery, exist_ok=True)
     Handler.gallery = os.path.realpath(os.path.expanduser(args.gallery))
     Handler.jobs = JobQueue(Handler.gallery)
+    Handler.sets = setsmod.Sets(SETS_ROOT, Handler.gallery, home_path)
     threading.Thread(target=watch_server, daemon=True).start()
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     try:

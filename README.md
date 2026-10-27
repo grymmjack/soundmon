@@ -728,6 +728,25 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   renders that exact take again (same seed). Each job lives in
   `~/soundmon-gallery/gui/<job>/` with a `job.json` recording the settings, the command
   and every seed, so nothing depends on ComfyUI's history.
+- **Sets** are for a game's whole sound list, the job neon-caster's Sound Picker and
+  qb64-dungeon's `generate-from-manifest.sh` each did by hand:
+  1. Paste or drop the list: `key | text`, `key | seconds | prompt`, a tracks.txt line
+     (`name | secs | bpm | key | mood`) or plain words, with `[Group]` lines to group them.
+  2. The form's current settings become the set's **theme**: every key renders with
+     them, N takes per key (narration: one take per voice you pick).
+  3. Each key gets a strip of takes beside **▶ NOW**, the file the game plays today.
+     Hear them (keys `1`–`0`, `N`), **PICK** one or **Keep old**, flag bad ones, and
+     re-roll or edit a key's prompt.
+  4. **Export picks** writes `<key>.<ext>` into the game folder (converting to WAV /
+     FLAC / OGG, a sample rate or mono if asked). Anything it replaces is copied to
+     `.soundmon-backup/<date>/` first. It warns when a key also exists in another
+     format, because the game may play that one instead.
+
+  Takes are just gallery jobs tagged with the set and key, so a set survives
+  restarts and every take keeps its seed and command.
+- **Voices** speaks one of your lines in every Kokoro voice, so you can compare them;
+  **Use** puts one in the Narrate form.
+- **Presets** (top of the form) save and load the form's settings by name.
 - **Advanced** exposes the rest (sampler, reprompt, ACE-Step's LLM, trim/normalize/fade,
   OGG quality, MIDI start). Blank means soundmon's own default.
 - **Setup** lists every `servers.json` box with its state and whether it has the models
@@ -905,6 +924,7 @@ soundmon/
 ├── bin/soundmon-gui           the web front end (gui/server.py on port 8191)
 ├── gui/
 │   ├── server.py              stdlib server: job queue, gallery, setup — runs bin/soundmon
+│   ├── sets.py                Sets: manifest → takes per key → picks → export into a game
 │   └── index.html             the page (no build step, no CDN)
 ├── tools/
 │   ├── spectral-check.py      measure spectral cutoff — catches hollow output

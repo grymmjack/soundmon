@@ -146,6 +146,57 @@ tr:last-child td { border-bottom: 0; }
 .apps { display: grid; gap: 6px; }
 .app3 { display: grid; grid-template-columns: 110px minmax(0, 1fr) 90px auto; gap: 6px; }
 
+/* ---- sets ---- */
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { font: 12px var(--mono); border: 1px solid var(--line); border-radius: 12px; padding: 2px 9px; color: var(--dim); background: var(--panel); }
+.pill b { color: var(--text); font-weight: 500; }
+.pill.ok b { color: var(--ok); } .pill.warn b { color: var(--warn); } .pill.bad b { color: var(--bad); } .pill.pk b { color: var(--accent2); }
+.theme { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px 14px; font-size: 12.5px; }
+.theme div { display: grid; gap: 1px; min-width: 0; }
+.theme span { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.theme code { font-size: 12px; overflow-wrap: anywhere; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.filters input { flex: 1 1 180px; width: auto; }
+.group h3 { margin: 8px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); display: flex; gap: 8px; align-items: center; font-weight: 500; }
+.group h3::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.krow { display: grid; grid-template-columns: 170px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 4px; background: var(--panel); margin-bottom: 4px; }
+.krow.sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.krow.picked:not(.sel) { box-shadow: inset 3px 0 0 var(--accent2); }
+.krow .k { font: 600 13px var(--mono); overflow-wrap: anywhere; cursor: pointer; grid-row: 1 / span 2; }
+.krow .k small { display: block; font-weight: 400; color: var(--dim); font-size: 11px; }
+.krow .p { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.takes { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+.tk { font: 11.5px var(--mono); min-width: 27px; padding: 3px 4px; text-transform: none; letter-spacing: 0; position: relative; }
+.tk.heard { border-color: var(--accent); color: var(--accent); }
+.tk.chosen { background: var(--accent2); border-color: var(--accent2); color: var(--on-pick); }
+.tk.flag::after { content: ""; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
+.tk.now { color: var(--dim); }
+.tk.now.chosen { color: var(--on-pick); }
+.vsep { width: 1px; height: 20px; background: var(--line); margin-inline: 3px; }
+.kact { display: flex; gap: 4px; align-items: center; grid-column: 3; grid-row: 1 / span 2; justify-self: end; flex-wrap: wrap; justify-content: end; }
+.kact .pick { font-weight: 700; }
+.kact .pick.done { background: var(--accent2); border-color: var(--accent2); color: var(--on-pick); }
+.miss { font: 12px var(--mono); color: var(--warn); }
+.detail { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 10px 14px; border-top: 1px dashed var(--line); padding-top: 9px; margin-top: 4px; }
+.wv { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+.wv span { font: 10.5px var(--mono); color: var(--dim); text-align: right; text-transform: uppercase; }
+.wv canvas { width: 100%; height: 46px; display: block; background: var(--bg); border-radius: 3px; border: 1px solid var(--line); cursor: pointer; }
+.recipe { font: 11.5px/1.55 var(--mono); color: var(--dim); display: grid; gap: 6px; align-content: start; min-width: 0; overflow-wrap: anywhere; }
+.recipe b { color: var(--text); font-weight: 400; }
+.exportbar { position: sticky; bottom: 0; z-index: 2; background: #17171e; border: 1px solid var(--accent2); border-radius: var(--radius);
+  padding: 9px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; box-shadow: 0 -8px 20px rgba(0,0,0,.45); }
+.exportbar .t { font-size: 12.5px; min-width: 0; overflow-wrap: anywhere; }
+.exportbar .t b { color: var(--accent2); }
+.exportbar .w { color: var(--warn); font-size: 12px; }
+.exportbar .go { background: var(--accent2); color: var(--on-pick); border-color: var(--accent2); font-weight: 700; }
+.plan { grid-column: 1 / -1; max-height: 260px; overflow: auto; }
+.keys { font: 11px var(--mono); color: var(--dim); }
+.keys kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; color: var(--text); }
+.editor { display: grid; gap: 10px; }
+.editor textarea { font: 12.5px/1.5 var(--mono); }
+@media (max-width: 760px) { .krow { grid-template-columns: 1fr; } .krow .k, .kact { grid-row: auto; grid-column: 1; justify-self: start; } .detail { grid-template-columns: 1fr; } }
+
 /* ---- status bar ---- */
 .sb { position: fixed; left: 0; right: 0; bottom: 0; height: 30px; background: #0d0d11; border-top: 1px solid var(--line); display: flex; gap: 14px; align-items: center;
   padding: 0 10px; font-size: 12px; color: var(--dim); white-space: nowrap; overflow-x: auto; z-index: 10; }
@@ -167,6 +218,11 @@ tr:last-child td { border-bottom: 0; }
     <span class="srv" id="srvPill" title="GPU render server — change it in Setup"><span class="dot" id="srvDot"></span><span id="srvName">…</span></span>
     <span class="sp"></span>
     <button type="button" id="resetBtn" title="put this engine's fields back to soundmon's defaults">↺ Reset</button>
+  </div>
+
+  <div class="presetbar" style="display:flex;gap:6px">
+    <select id="preset" aria-label="Presets" style="flex:1"><option value="">— presets —</option></select>
+    <button type="button" id="presetLoad">Load</button><button type="button" id="presetSave">Save…</button><button type="button" id="presetDel" title="delete this preset">✕</button>
   </div>
 
   <fieldset>
@@ -303,6 +359,49 @@ tr:last-child td { border-bottom: 0; }
 <main class="main">
   <div class="tabs" role="tablist" id="tabs"></div>
   <div class="panes">
+  <section class="pane" id="p-sets" hidden>
+    <div class="paneh">
+      <select id="setSel" aria-label="Sound set" style="width:auto;max-width:420px"></select>
+      <span class="sp"></span>
+      <button type="button" id="setEditBtn">✎ Edit set</button><button type="button" id="setNewBtn">＋ New set</button>
+    </div>
+    <div class="card editor" id="setEditor" hidden>
+      <div class="paneh"><h2 id="edTitle">New set</h2><span class="sp"></span><button type="button" id="edCancel">Cancel</button></div>
+      <div class="row" style="--c:2">
+        <label class="f">Name<input id="edName" maxlength="80" placeholder="neon-caster sfx"></label>
+        <label class="f">Game folder <span>(where picks are exported; inside your home folder)</span><input id="edFolder" placeholder="~/git/my-game/sfx"></label>
+      </div>
+      <label class="f">The list of sounds <span>— paste it, or drop a .txt here. One per line: <code>key | text</code>, <code>key | seconds | prompt</code>, <code>name | secs | bpm | key | mood</code>, or plain words. <code>[Group]</code> lines group the rows; <code>#</code> lines are skipped.</span>
+        <textarea id="edManifest" rows="9" placeholder="[Weapons]&#10;shoot | 1 | short punchy neon blaster shot, synthetic laser crack&#10;rail | 2 | electric railgun discharge, rising whine, heavy crack&#10;[Doors]&#10;door | 2 | sliding sci-fi door, pneumatic hiss and thunk"></textarea></label>
+      <div class="card" style="background:var(--bg)"><h3>Theme — every key renders with these settings</h3>
+        <div class="hint" id="edTheme"></div>
+        <div class="btnrow" style="margin-top:6px"><button type="button" id="edFromForm">Use the form's current settings</button><button type="button" id="edToForm">Put the theme in the form</button></div></div>
+      <div class="row" style="--c:4">
+        <label class="f">Takes per key <span>(each a different seed)</span><input id="edTakes" type="number" min="1" max="50" value="10"></label>
+        <label class="f">Export as<select id="edEnc"><option value="wav">WAV</option><option value="flac">FLAC</option><option value="ogg">OGG</option><option value="same">the take's own format</option></select></label>
+        <label class="f">Export rate <span>(blank = as made)</span><input id="edRate" type="number" placeholder="as made"></label>
+        <label class="f">&nbsp;<span class="c" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="edMono"> mono</span></label>
+      </div>
+      <div id="edVoicesWrap" hidden><div class="hint">Narration takes are voices: each line is spoken once per voice you pick here (none = the theme's voice).</div><div class="chips" id="edVoices"></div></div>
+      <div><button type="button" class="render" id="edSave" style="width:auto;padding:7px 18px">Create set</button> <span class="toast" id="edToast"></span></div>
+    </div>
+    <div id="setBody"></div>
+  </section>
+
+  <section class="pane" id="p-voices" hidden>
+    <div class="paneh"><h2>Voices</h2><span class="dim">Kokoro · runs on this machine</span></div>
+    <p class="lede">Hear one of your own lines in every voice before committing a set to one. Each voice renders as its own small job; <b>Use</b> puts it in the Narrate form.</p>
+    <div class="card" style="display:grid;gap:8px">
+      <label class="f">Line<input id="vLine" maxlength="400" value="Welcome, traveller. The dungeon below has been waiting for you."></label>
+      <div class="row" style="--c:3">
+        <label class="f">Speed <span class="mono" id="vSpeedV">1.00×</span><input type="range" id="vSpeed" min="0.5" max="1.5" step="0.01" value="1"></label>
+        <label class="f">Pitch <span class="mono" id="vPitchV">0 st</span><input type="range" id="vPitch" min="-12" max="12" step="1" value="0"></label>
+        <label class="f">&nbsp;<button type="button" id="vGo">▶ Speak it in every voice</button></label>
+      </div>
+    </div>
+    <div class="cols2" id="voiceGroups"></div>
+  </section>
+
   <section class="pane" id="p-queue" hidden>
     <div class="paneh"><h2>Queue</h2><span class="sp"></span><button type="button" id="clearQueue">✕ Clear finished</button></div>
     <div id="jobList"></div>
@@ -489,7 +588,11 @@ async function updateCommand() {
     $("cli").textContent = r.command; $("cli").classList.remove("err"); lastTakes = r.takes;
     $("renderBtn").textContent = r.takes > 1 ? `RENDER ${r.takes} ${["blip", "narrate"].includes(eng) ? "LINES" : "TAKES"}` : "RENDER";
     $("renderBtn").disabled = false;
-  } catch (e) { $("cli").textContent = e.message; $("cli").classList.add("err"); $("renderBtn").disabled = true; $("renderBtn").textContent = "RENDER"; }
+  } catch (e) {               // an empty form is a starting point, not an error
+    const empty = !String(p.prompt || "").trim() && !p.from_midi && !p.from_audio;
+    $("cli").textContent = empty ? "the command appears here as you fill in the form" : e.message;
+    $("cli").classList.toggle("err", !empty); $("renderBtn").disabled = true; $("renderBtn").textContent = "RENDER";
+  }
 }
 $("form").addEventListener("input", e => { if (e.target.id === "speed" || e.target.id === "pitch") writeForm(); readForm(); queueCommand(); });
 $("form").addEventListener("change", () => { readForm(); queueCommand(); });
@@ -537,7 +640,7 @@ $("prompt").addEventListener("drop", async e => {                    // a .txt m
 });
 
 /* ================= tabs ================= */
-const TABS = [["queue", "Queue"], ["gallery", "Gallery"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
+const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
 let tab = store.get("tab", "gallery");
 function showTab(t) {
   if (!TABS.some(x => x[0] === t)) t = "gallery";
@@ -547,6 +650,8 @@ function showTab(t) {
     html: esc(l) + (k === "queue" && busy ? `<span class="n">${busy}</span>` : k === "adv" && advCountN() ? `<span class="n">${advCountN()}</span>` : "") })));
   TABS.forEach(([k]) => $("p-" + k).hidden = k !== t);
   if (t === "gallery") loadGallery();
+  if (t === "sets") loadSets();
+  if (t === "voices") drawVoices();
   if (t === "setup") loadServers();
   if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
 }
@@ -602,6 +707,8 @@ async function poll() {
     const r = await api("/api/jobs"); JOBS = r.jobs; MADE = r.made;
     const busy = JOBS.some(j => j.status === "queued" || j.status === "running");
     drawQueue(); statusBar(r.render, busy);
+    setsOnPoll();
+    if (tab === "voices") drawVoices();
     if (wasBusy && !busy && tab === "gallery") loadGallery();
     if (wasBusy !== busy) showTab(tab);
     wasBusy = busy;
@@ -717,6 +824,283 @@ function loadSettings(p, seed) {
   showEngine(); toast(seed != null ? `Loaded the settings of seed ${seed}` : "Loaded those settings");
 }
 
+/* ================= sets ================= */
+let SETQ = "", SET_CMD = "";
+const FIXED = ["blip", "narrate"];                   // same text in, same sound out: takes are voices, not seeds
+let SETS = [], SET = null, setId = store.get("set", ""), selKey = null, setFilt = "all", setSig = "";
+const heard = {};                                      // key -> take heard last (not saved)
+async function loadSets(keepSel) {
+  try {
+    SETS = (await api("/api/sets")).sets;
+    if (!SETS.some(s => s.id === setId)) setId = SETS[0]?.id || "";
+    $("setSel").replaceChildren(...(SETS.length ? SETS.map(s => el("option", { value: s.id, text: `${s.name} · ${s.keys} keys · ${(ENG[s.engine] || {}).name || s.engine}`, selected: s.id === setId }))
+      : [el("option", { value: "", text: "no sets yet" })]));
+    $("setEditBtn").disabled = !setId;
+    if (!setId) { SET = null; drawSet(); if (!SETS.length && $("setEditor").hidden) openEditor(true); return; }
+    await loadSet(keepSel);
+  } catch (e) { $("setBody").replaceChildren(el("div", { class: "empty", text: e.message })); }
+}
+async function loadSet(keepSel) {
+  SET = await api("/api/set?id=" + encodeURIComponent(setId));
+  SET_CMD = await themeText({ engine: SET.set.theme.engine, params: SET.set.theme.params }, SET.set.theme.takes);
+  store.set("set", setId);
+  if (!keepSel || !SET.set.rows.some(r => r.key === selKey)) selKey = (SET.set.rows.find(r => !SET.set.picks[r.key]) || SET.set.rows[0] || {}).key;
+  drawSet();
+}
+$("setSel").addEventListener("change", e => { setId = e.target.value; selKey = null; loadSet(); });
+function setJobSig() { return JSON.stringify(JOBS.filter(j => j.group === "set:" + setId).map(j => [j.id, j.status, j.done])); }
+function setsOnPoll() { if (tab !== "sets" || !setId) return; const s = setJobSig(); if (s !== setSig) { setSig = s; loadSet(true); } }
+const takeUrl = t => fileUrl(t.job, t.file);
+const nowUrl = key => `/api/set/now?id=${encodeURIComponent(setId)}&key=${encodeURIComponent(key)}`;
+const tlabel = (t, i) => t.voice ? t.voice.replace(/^[ab][mf]_/, "") : String(i + 1).padStart(2, "0");
+
+function drawSet() {
+  const host = $("setBody");
+  if (!SET) { host.replaceChildren(el("div", { class: "empty", html: "A <b>set</b> is a list of sounds a game needs. soundmon renders takes for every key, you hear them next to the sound the game has today, pick one per key, and export the picks into the game folder under their keys. Press <b>＋ New set</b> to start." })); return; }
+  const S = SET.set, T = S.theme, takes = SET.takes, now = SET.now, pend = SET.pending, E = ENG[T.engine] || {};
+  const rows = S.rows, n = rows.length;
+  const missing = rows.filter(r => !(takes[r.key] || []).length).length, picked = rows.filter(r => S.picks[r.key]).length;
+  const two = Object.values(now).filter(v => v.length > 1).length, nTakes = Object.values(takes).reduce((a, v) => a + v.length, 0);
+  const busy = Object.values(pend).reduce((a, v) => a + v, 0);
+  const pills = el("div", { class: "pills", html: `<span class="pill"><b>${n}</b> keys</span><span class="pill"><b>${nTakes}</b> takes</span><span class="pill pk"><b>${picked}</b> picked</span>`
+    + `<span class="pill warn"><b>${n - picked - missing}</b> to pick</span><span class="pill bad"><b>${missing}</b> without takes</span>`
+    + (busy ? `<span class="pill ok"><b>${busy}</b> rendering</span>` : "") + (Object.keys(S.flags).length ? `<span class="pill bad"><b>${Object.keys(S.flags).length}</b> flagged</span>` : "")
+    + (two ? `<span class="pill warn"><b>${two}</b> in two formats in the game</span>` : "") });
+  const ex = T.export, th = [["Engine", `${E.icon || ""} ${E.name || T.engine}`], ["Takes per key", T.engine === "narrate" && T.voices.length ? T.voices.join(", ") : T.takes],
+    ["Game folder", T.game_folder || "— none (set one to export)"], ["Exports as", `<key>.${ex.encode === "same" ? "<as made>" : ex.encode}${ex.rate ? " · " + ex.rate + " Hz" : ""}${ex.mono ? " · mono" : ""}`],
+    ["Theme command", SET_CMD || "…"]];
+  const theme = el("div", { class: "card theme" }, ...th.map(([a, b]) => el("div", {}, el("span", { text: a }), el("code", { text: String(b) }))));
+  const F = [["all", "All"], ["topick", "To pick"], ["picked", "Picked"], ["missing", "Without takes"], ["flagged", "Flagged"]];
+  const q = el("input", { type: "search", id: "setQ", placeholder: "find a key or words in its prompt", "aria-label": "Find a key", value: SETQ });
+  q.addEventListener("input", () => { SETQ = q.value; drawRows(); });
+  const filters = el("div", { class: "filters" }, el("div", { class: "chips" }, ...F.map(([k, l]) => el("button", { type: "button", class: "chip", "aria-pressed": String(setFilt === k), text: l, onclick: () => { setFilt = k; drawSet(); } }))), q,
+    el("button", { type: "button", text: `Render ${missing} without takes`, disabled: !missing, onclick: () => renderKeys("missing") }));
+  const list = el("div", { id: "setRows" });
+  const keys = el("div", { class: "keys", html: "<kbd>1</kbd>–<kbd>0</kbd> hear takes · <kbd>N</kbd> hear the game's current file · <kbd>P</kbd> pick what you heard · <kbd>F</kbd> flag it · <kbd>J</kbd>/<kbd>K</kbd> next / previous key · <kbd>Space</kbd> stop" });
+  host.replaceChildren(pills, theme, filters, list, keys, exportBar());
+  drawRows();
+}
+function visibleRows() {
+  const S = SET.set, takes = SET.takes, q = SETQ.trim().toLowerCase();
+  return S.rows.filter(r => {
+    if (q && !(r.key + " " + r.prompt).toLowerCase().includes(q)) return false;
+    const has = (takes[r.key] || []).length, p = S.picks[r.key];
+    return setFilt === "all" || (setFilt === "missing" && !has) || (setFilt === "picked" && p) || (setFilt === "topick" && has && !p) || (setFilt === "flagged" && S.flags[r.key]);
+  });
+}
+function drawRows() {
+  const host = $("setRows"); if (!host) return;
+  const vis = visibleRows(), groups = [];
+  for (const r of vis) { if (!groups.length || groups[groups.length - 1][0] !== r.group) groups.push([r.group, []]); groups[groups.length - 1][1].push(r); }
+  host.replaceChildren(...(vis.length ? groups.map(([g, rs]) => el("div", { class: "group" }, g ? el("h3", { text: g }) : null, ...rs.map(keyRow)))
+    : [el("div", { class: "empty", text: "No keys match. Clear the search or pick another filter." })]));
+}
+function keyRow(r) {
+  const S = SET.set, k = r.key, takes = SET.takes[k] || [], pick = S.picks[k], h = heard[k], flags = new Set(S.flags[k] || []), isSel = k === selKey;
+  const nowFiles = SET.now[k] || [], pend = SET.pending[k] || 0;
+  const row = el("div", { class: "krow" + (isSel ? " sel" : "") + (pick ? " picked" : "") });
+  const sub = [r.seconds && !["narrate", "blip"].includes(S.theme.engine) ? r.seconds + " s" : null, nowFiles.length > 1 ? "⚠ " + nowFiles.map(f => f.split(".").pop()).join(" + ") : null, flags.size ? "flagged" : null, S.notes[k] ? "note" : null].filter(Boolean).join(" · ");
+  row.append(el("div", { class: "k", onclick: () => select(k), html: `${esc(k)}<small>${esc(sub)}</small>` }));
+  row.append(el("div", { class: "p", text: r.prompt, title: r.prompt, onclick: () => select(k) }));
+  const strip = el("div", { class: "takes" });
+  strip.append(el("button", { type: "button", class: "tk now" + (pick === "now" ? " chosen" : ""), text: "▶ NOW", disabled: !nowFiles.length, title: nowFiles.length ? "the file the game plays today: " + nowFiles[0] : "the game has no file for this key yet",
+    onclick: () => { select(k, true); play(nowUrl(k), k + " · in the game now"); } }), el("span", { class: "vsep" }));
+  if (!takes.length) strip.append(el("span", { class: "miss", text: pend ? `rendering ${pend}…` : "no takes yet" }));
+  takes.forEach((t, i) => {
+    const cls = ["tk"]; if (pick === t.take) cls.push("chosen"); else if (h === t.take) cls.push("heard"); if (flags.has(t.take)) cls.push("flag");
+    strip.append(el("button", { type: "button", class: cls.join(" "), text: tlabel(t, i), title: `take ${i + 1} · seed ${t.seed ?? "?"}`, onclick: () => hear(k, i) }));
+  });
+  if (takes.length && pend) strip.append(el("span", { class: "miss", text: `+${pend} rendering…` }));
+  row.append(strip);
+  const took = pick && pick !== "now" && (!h || h === pick);
+  const ti = took ? takes.findIndex(t => t.take === pick) : h ? takes.findIndex(t => t.take === h) : -1;
+  const act = el("div", { class: "kact" },
+    el("button", { type: "button", class: "pick" + (took || pick === "now" ? " done" : ""), disabled: !h && !pick,
+      text: took ? "PICKED " + tlabel(takes[ti] || {}, ti) : h ? "PICK " + tlabel(takes[ti] || {}, ti) : pick === "now" ? "KEEPING OLD" : "PICK",
+      onclick: () => h ? mark(k, "pick", h) : pick ? mark(k, "pick", null) : null }),
+    el("button", { type: "button", text: "Keep old", disabled: !nowFiles.length || pick === "now", title: "keep the file the game has today", onclick: () => mark(k, "pick", "now") }),
+    el("button", { type: "button", text: !takes.length ? "Render" : FIXED.includes(SET.set.theme.engine) ? "Re-render" : "＋" + SET.set.theme.takes,
+      title: FIXED.includes(SET.set.theme.engine) ? "render this key again (after editing its line)" : "render more takes for this key", onclick: () => renderKeys([k]) }));
+  row.append(act);
+  if (isSel && takes.length) row.append(detail(r, takes));
+  return row;
+}
+function detail(r, takes) {
+  const S = SET.set, k = r.key, cur = heard[k] || (S.picks[k] && S.picks[k] !== "now" ? S.picks[k] : takes[0].take), i = Math.max(0, takes.findIndex(t => t.take === cur)), t = takes[i];
+  const cvA = el("canvas", { title: "play / stop" }), cvB = el("canvas", { title: "play / stop" }), hasNow = (SET.now[k] || []).length;
+  cvA.onclick = () => play(takeUrl(t), `${k} · take ${tlabel(t, i)}`); cvB.onclick = () => hasNow && play(nowUrl(k), k + " · in the game now");
+  const left = el("div", { style: "display:grid;gap:6px;min-width:0" }, el("div", { class: "wv" }, el("span", { text: "take " + tlabel(t, i) }), cvA), hasNow ? el("div", { class: "wv" }, el("span", { text: "now" }), cvB) : null);
+  peaksFor(takeUrl(t)).then(w => drawPeaks(cvA, w)); if (hasNow) peaksFor(nowUrl(k)).then(w => drawPeaks(cvB, w));
+  const flagged = (S.flags[k] || []).includes(t.take);
+  const promptIn = el("input", { value: r.prompt, "aria-label": "Prompt for " + k });
+  const rc = el("div", { class: "recipe" },
+    el("div", { html: `<b>${esc(k)}</b> · take ${esc(tlabel(t, i))} · seed <b>${esc(t.seed ?? "?")}</b>` }),
+    el("div", { text: t.command || "" }),
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "▶ A/B", disabled: !hasNow, title: "this take, then the game's current file", onclick: () => { play(takeUrl(t), `${k} · A: take ${tlabel(t, i)}`); player.addEventListener("ended", () => play(nowUrl(k), k + " · B: in the game now"), { once: true }); } }),
+      el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", disabled: t.seed == null, onclick: () => renderKeys([k], { seed: t.seed }) }),
+      el("button", { type: "button", text: flagged ? "Unflag" : "Flag", onclick: () => mark(k, flagged ? "unflag" : "flag", t.take) }),
+      el("button", { type: "button", text: "Copy CLI", onclick: e => copyText((t.command || "") + (t.seed != null && !/--seed/.test(t.command || "") ? " --seed " + t.seed : ""), e.target) }),
+      el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) })),
+    el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
+      try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
+  return el("div", { class: "detail" }, left, rc);
+}
+function select(k, quiet) { if (selKey !== k) { selKey = k; drawRows(); } }
+function hear(k, i) {
+  const takes = SET.takes[k] || [], t = takes[i]; if (!t) return;
+  selKey = k; heard[k] = t.take; drawRows();
+  play(takeUrl(t), `${k} · take ${tlabel(t, i)}`);
+}
+async function mark(k, action, take) {
+  try { SET.set = (await api("/api/sets/mark", { id: setId, key: k, action, take })).set; if (action === "pick") delete heard[k]; drawSet(); }
+  catch (e) { toast(e.message, true); }
+}
+async function renderKeys(keys, extra = {}) {
+  try { const r = await api("/api/sets/render", { id: setId, keys, ...extra }); toast(`Queued ${r.jobs.length} render${r.jobs.length > 1 ? "s" : ""}`); pollSoon(); setTimeout(() => loadSet(true), 600); }
+  catch (e) { toast(e.message, true); }
+}
+document.addEventListener("keydown", e => {
+  if (tab !== "sets" || !SET || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+  const vis = visibleRows(), idx = vis.findIndex(r => r.key === selKey), k = selKey;
+  if (/^[0-9]$/.test(e.key) && k) { hear(k, e.key === "0" ? 9 : +e.key - 1); }
+  else if (e.key === "n" && k && (SET.now[k] || []).length) play(nowUrl(k), k + " · in the game now");
+  else if (e.key === "p" && heard[k]) mark(k, "pick", heard[k]);
+  else if (e.key === "f" && heard[k]) mark(k, "flag", heard[k]);
+  else if (e.key === "j" && idx < vis.length - 1) { selKey = vis[idx + 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
+  else if (e.key === "k" && idx > 0) { selKey = vis[idx - 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
+  else return;
+  e.preventDefault();
+});
+function exportBar() {
+  const S = SET.set, T = S.theme, picks = S.rows.filter(r => S.picks[r.key] && S.picks[r.key] !== "now").length;
+  const two = Object.entries(SET.now).filter(([, v]) => v.length > 1).map(([k]) => k);
+  const ext = T.export.encode === "same" ? "<as made>" : T.export.encode;
+  const plan = el("div", { class: "plan", hidden: true });
+  const bar = el("div", { class: "exportbar" },
+    el("div", { class: "t", html: T.game_folder ? `Export <b>${picks} pick${picks === 1 ? "" : "s"}</b> → <code>${esc(T.game_folder)}</code> as <code>${esc("<key>." + ext)}</code> · anything replaced is copied to <code>.soundmon-backup/</code> first`
+      + (two.length ? `<div class="w">⚠ ${two.length} key${two.length > 1 ? "s" : ""} (${esc(two.slice(0, 4).join(", "))}${two.length > 4 ? "…" : ""}) exist in two formats in the game folder; the game may keep playing the other one.</div>` : "")
+      : "Set a <b>game folder</b> in ✎ Edit set to export picks into the game." }),
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "Preview", disabled: !T.game_folder || !picks, onclick: async () => {
+        try { const r = await api("/api/sets/export", { id: setId, preview: true }); plan.hidden = false;
+          plan.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Key</th><th>Becomes</th><th>Change</th><th>Also in the game</th></tr></thead><tbody>${r.plan.map(p =>
+            `<tr><td class="mono">${esc(p.key)}</td><td class="mono">${esc(p.to)}</td><td>${p.unchanged ? '<span class="dim">already exported</span>' : p.replaces ? '<span class="badge warn">replaces (backed up)</span>' : '<span class="badge ok">new file</span>'}${p.convert ? ' <span class="badge">converted</span>' : ""}</td><td class="mono" style="color:var(--warn)">${esc(p.other_formats.join(", "))}</td></tr>`).join("")}</tbody></table></div>`;
+        } catch (e) { toast(e.message, true); } } }),
+      el("button", { type: "button", class: "go", text: "Export picks", disabled: !T.game_folder || !picks, onclick: async e => {
+        e.target.disabled = true;
+        try { const r = await api("/api/sets/export", { id: setId }); toast(`Exported ${r.exported.length}` + (r.skipped ? `, ${r.skipped} unchanged` : "") + (r.errors.length ? `; ${r.errors.length} failed: ${r.errors[0].key}: ${r.errors[0].error}` : "") + (r.backup ? ` · backup in ${r.backup}` : ""), !!r.errors.length); loadSet(true); }
+        catch (err) { toast(err.message, true); } finally { e.target.disabled = false; } } })),
+    plan);
+  return bar;
+}
+
+/* ---- new / edit set ---- */
+let ED = null;                                          // the theme being edited
+function themeFromForm() { const p = params(); delete p.prompt; delete p.seed; delete p.n; delete p.name; return { engine: eng, params: p }; }
+async function themeText(th, n) {
+  try { const r = await api("/api/command", { ...th.params, engine: th.engine, prompt: "PROMPT", name: "KEY", n: n || 1 }); return r.invalid ? "⚠ " + r.invalid : r.command; } catch (e) { return "⚠ " + e.message; }
+}
+async function showTheme() {
+  $("edTheme").textContent = `${(ENG[ED.engine] || {}).icon || ""} ${(ENG[ED.engine] || {}).name || ED.engine}: ` + await themeText(ED, +$("edTakes").value);
+  $("edVoicesWrap").hidden = ED.engine !== "narrate";
+  $("edTakes").closest("label").hidden = FIXED.includes(ED.engine);
+  if (ED.engine === "narrate") $("edVoices").replaceChildren(...Object.keys(META.voices).map(v => el("button", { type: "button", class: "chip", "aria-pressed": String((ED.voices || []).includes(v)), text: v,
+    onclick: () => { const s = new Set(ED.voices || []); s.has(v) ? s.delete(v) : s.add(v); ED.voices = [...s]; showTheme(); } })));
+}
+function openEditor(isNew) {
+  $("setEditor").hidden = false;
+  const S = !isNew && SET ? SET.set : null;
+  $("edTitle").textContent = S ? "Edit " + S.name : "New set";
+  $("edSave").textContent = S ? "Save set" : "Create set";
+  $("edName").value = S ? S.name : "";
+  $("edFolder").value = S ? S.theme.game_folder : "";
+  $("edManifest").value = S ? S.rows.map(r => {
+    const ex = r.extra || {};
+    if (ex.bpm) return `${r.key} | ${r.seconds} | ${ex.bpm} | ${ex.key} | ${ex.mood}`;
+    return r.seconds != null ? `${r.key} | ${r.seconds}${ex.loop ? "s loop" : ""} | ${r.prompt}` : `${r.key} | ${r.prompt}`;
+  }).reduce((a, line, i) => { const g = S.rows[i].group, prev = i ? S.rows[i - 1].group : null; if (g && g !== prev && !S.rows[i].key.startsWith(g + ".") && !S.rows[i].key.startsWith(g + "/")) a.push(`[${g}]`); a.push(line); return a; }, []).join("\n") : "";
+  $("edTakes").value = S ? S.theme.takes : (eng === "narrate" ? 1 : 10);
+  $("edEnc").value = S ? S.theme.export.encode : "wav"; $("edRate").value = S && S.theme.export.rate ? S.theme.export.rate : ""; $("edMono").checked = S ? S.theme.export.mono : false;
+  ED = S ? { engine: S.theme.engine, params: S.theme.params, voices: S.theme.voices || [] } : { ...themeFromForm(), voices: [] };
+  showTheme();
+  $("setEditor").scrollIntoView({ block: "nearest" });
+}
+$("setNewBtn").addEventListener("click", () => openEditor(true));
+$("setEditBtn").addEventListener("click", () => openEditor(false));
+$("edCancel").addEventListener("click", () => $("setEditor").hidden = true);
+$("edFromForm").addEventListener("click", () => { ED = { ...themeFromForm(), voices: ED?.voices || [] }; showTheme(); });
+$("edToForm").addEventListener("click", () => { loadSettings({ ...ED.params, engine: ED.engine }); });
+$("edTakes").addEventListener("input", () => ED && showTheme());
+$("edManifest").addEventListener("dragover", e => e.preventDefault());
+$("edManifest").addEventListener("drop", async e => {
+  const f = e.dataTransfer.files[0]; if (!f) return; e.preventDefault();
+  try { const j = await upload(f); if (j.text != null) $("edManifest").value = j.text; else $("edToast").textContent = "drop a .txt list"; } catch (err) { $("edToast").textContent = err.message; }
+});
+$("edSave").addEventListener("click", async () => {
+  const S = $("edSave").textContent.startsWith("Save") && SET ? SET.set : null;
+  const theme = { engine: ED.engine, params: ED.params, voices: ED.voices, takes: +$("edTakes").value || 1, game_folder: $("edFolder").value.trim(),
+    export: { encode: $("edEnc").value, rate: +$("edRate").value || 0, mono: $("edMono").checked } };
+  try {
+    const r = S ? await api("/api/sets/update", { id: S.id, name: $("edName").value, theme, manifest: $("edManifest").value })
+                : await api("/api/sets/create", { name: $("edName").value, theme, manifest: $("edManifest").value });
+    setId = r.set.id; $("setEditor").hidden = true; $("edToast").textContent = ""; await loadSets(true);
+    toast(S ? "Set saved" : `Created ${r.set.name} with ${r.set.rows.length} keys. Press "Render … without takes" to start.`);
+  } catch (e) { $("edToast").textContent = e.message; $("edToast").className = "toast err"; }
+});
+
+
+/* ================= voices ================= */
+let vGroup = store.get("vGroup", "");
+const GRADE = d => (String(d).match(/\[([A-D])\]/) || [])[1] || "";
+function drawVoices() {
+  if (!META) return;
+  const outs = {};
+  for (const j of JOBS) if (j.group === vGroup) outs[j.label] = j;
+  const groups = {};
+  for (const [v, d] of Object.entries(META.voices)) { const g = { bm: "British male", bf: "British female", am: "American male", af: "American female" }[v.slice(0, 2)] || "Other"; (groups[g] = groups[g] || []).push([v, d]); }
+  const sig = JSON.stringify([vGroup, Object.values(outs).map(j => [j.status, j.outputs.length])]);
+  if (sig === drawVoices.sig && $("voiceGroups").children.length) return; drawVoices.sig = sig;
+  if (!Object.keys(groups).length) { $("voiceGroups").replaceChildren(el("div", { class: "empty", text: "narrate.py's voice list didn't load: " + (META.load_errors?.narrate || "unknown error") })); return; }
+  $("voiceGroups").replaceChildren(...Object.entries(groups).map(([g, vs]) => el("div", { class: "card" }, el("h3", { text: g }), ...vs.map(([v, d]) => {
+    const j = outs[v], o = j && j.outputs[0], gr = GRADE(d);
+    const state = !j ? "" : o ? "" : j.status === "failed" ? "failed" : j.status === "cancelled" ? "cancelled" : "rendering…";
+    return el("div", { class: "style", style: "grid-template-columns:auto minmax(0,1fr) auto auto" },
+      el("span", { class: "badge " + ({ A: "ok", B: "ac", C: "warn", D: "bad" }[gr] || ""), text: gr || "?", title: "Kokoro's training grade", style: "grid-row:1 / span 2;align-self:center" }),
+      el("b", { text: v }), el("button", { type: "button", text: o ? "▶" : state || "▶", disabled: !o, title: j && j.error ? j.error : "", style: "grid-row:1 / span 2;grid-column:3",
+        onclick: () => play(fileUrl(j.dir, o.file), v) }),
+      el("button", { type: "button", text: "Use", style: "grid-row:1 / span 2;grid-column:4", onclick: () => { readForm(); eng = "narrate"; store.set("engine", eng);
+        cur().voice = v; cur().speed = $("vSpeed").value; cur().pitch = $("vPitch").value; store.set("form", F); showEngine(); toast(`Narrate now speaks with ${v}`); } }),
+      el("span", { text: d.replace(/\s*\[[A-D]\]/, ""), style: "grid-column:2" }));
+  }))));
+}
+for (const [id, out, fmt] of [["vSpeed", "vSpeedV", v => (+v).toFixed(2) + "×"], ["vPitch", "vPitchV", v => (v > 0 ? "+" : "") + v + " st"]]) $(id).addEventListener("input", () => $(out).textContent = fmt($(id).value));
+$("vGo").addEventListener("click", async () => {
+  try { const r = await api("/api/voices", { line: $("vLine").value, speed: $("vSpeed").value, pitch: $("vPitch").value }); vGroup = r.group; store.set("vGroup", vGroup); drawVoices.sig = ""; toast(`Queued ${r.jobs.length} voices`); pollSoon(); }
+  catch (e) { toast(e.message, true); }
+});
+
+/* ================= presets ================= */
+let PRESETS = [];
+async function loadPresets(sel) {
+  try { PRESETS = (await api("/api/presets")).presets; } catch (e) { PRESETS = []; }
+  $("preset").replaceChildren(el("option", { value: "", text: "— presets —" }), ...PRESETS.map(p => el("option", { value: p.name, text: `${p.name}  · ${(ENG[p.engine] || {}).name || p.engine}`, selected: p.name === sel })));
+}
+$("presetLoad").addEventListener("click", () => {
+  const p = PRESETS.find(x => x.name === $("preset").value); if (!p) return toast("pick a preset first", true);
+  readForm(); eng = p.snapshot.engine; store.set("engine", eng); F[eng] = { ...p.snapshot.form }; store.set("form", F); setAdv(p.snapshot.adv || {}); showEngine(); toast(`Loaded preset ${p.name}`);
+});
+$("presetSave").addEventListener("click", async () => {
+  const name = (window.prompt("Save these settings as:", $("preset").value || "") || "").trim(); if (!name) return;
+  readForm();
+  try { PRESETS = (await api("/api/presets", { name, snapshot: { engine: eng, form: cur(), adv: ADVV } })).presets; await loadPresets(name); toast(`Saved preset ${name}`); } catch (e) { toast(e.message, true); }
+});
+$("presetDel").addEventListener("click", async () => {
+  const name = $("preset").value; if (!name) return;
+  if (!window.confirm(`Delete the preset "${name}"?`)) return;
+  try { await api("/api/presets/delete", { name }); await loadPresets(); toast(`Deleted preset ${name}`); } catch (e) { toast(e.message, true); }
+});
+
 /* ================= styles ================= */
 function drawStyles() {
   const st = META.styles;
@@ -801,7 +1185,7 @@ async function boot() {
   if (!META.voices || !Object.keys(META.voices).length) $("voice").title = "narrate.py didn't load: " + (META.load_errors?.narrate || "");
   const cli = META.cli || {};
   document.querySelectorAll("[data-flag]").forEach(n => { const h = cli[n.dataset.flag]?.help; if (h) n.title = `${n.dataset.flag}: ${h}`; });
-  drawStyles(); drawAdv(); showEngine(); showTab(location.hash.slice(1) || tab); poll();
+  drawStyles(); drawAdv(); showEngine(); loadPresets(); showTab(location.hash.slice(1) || tab); poll();
 }
 boot();
 </script>

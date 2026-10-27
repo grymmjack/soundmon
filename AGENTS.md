@@ -506,6 +506,13 @@ is one no-build page. Rules that keep it honest:
   the `[i/n]` and `seed=` parts.
 - **Every job keeps its recipe** in `~/soundmon-gallery/gui/<job>/job.json` (params,
   argv, command, each take's seed), plus copies of any input MIDI / audio / bank.
+- **Sets (`gui/sets.py`) store no takes.** A set is a frozen manifest snapshot +
+  theme + picks/flags in `~/soundmon-gallery/sets/<id>/set.json`; a render job carries
+  `params.set = {id, key}`, and a key's takes are found by scanning the gallery. Keep
+  it that way: a second copy of the takes would drift. Export only ever writes inside
+  the set's game folder, and copies whatever it replaces to `.soundmon-backup/` first.
+  Blips and narration are deterministic (same text, same sound), so their sets make one
+  take per key, or one per voice, rather than seeds.
 
 ## The format lock — the owner's call
 
