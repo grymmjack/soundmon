@@ -513,6 +513,13 @@ is one no-build page. Rules that keep it honest:
   the set's game folder, and copies whatever it replaces to `.soundmon-backup/` first.
   Blips and narration are deterministic (same text, same sound), so their sets make one
   take per key, or one per voice, rather than seeds.
+- **Mastering (`master.py`) is shared by the CLI (`--master`) and the GUI** (measures in
+  Sets, ▶ Mastered, master on export). Mastered previews go to `<job>/_mastered/<kind>/`
+  and measurements to `_analysis/`; `scan_outputs` skips `_` folders so they never show
+  up as takes. The chain has **no limiter on purpose**: the final gain step is the only
+  thing keeping a sound under −1 dBTP, and selfcheck asserts it. A lossy export (OGG)
+  can overshoot again between samples, so `sets.convert()` measures the OGG it wrote
+  and re-encodes quieter if needed.
 
 ## The format lock — the owner's call
 

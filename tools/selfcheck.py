@@ -105,6 +105,24 @@ def main():
           and _smj._job_error(running) is None and bool(_smj._job_error(empty)),
           f"error -> {_smj._job_error(err)!r}")
 
+    # Mastering must calm a bright sound without ever pushing it past -1 dBTP:
+    # the chain has no limiter on purpose, so the gain step is the only guard.
+    import shutil as _shm
+    if _shm.which("ffmpeg"):
+        import master as _ms
+        with tempfile.TemporaryDirectory() as mt:
+            t = np.arange(int(44100 * 1.2)) / 44100
+            x = (0.3 * np.sin(2 * np.pi * 3600 * t) + 0.25 * np.random.default_rng(1).standard_normal(len(t))
+                 * np.exp(-t * 2) + 0.2 * np.sin(2 * np.pi * 140 * t))
+            src, dst = os.path.join(mt, "bright.wav"), os.path.join(mt, "out.wav")
+            sf.write(src, np.clip(x, -1, 1) * 0.95, 44100)
+            b = _ms.analyse(src)
+            _ms.master(src, dst, "sfx", b)
+            a2 = _ms.analyse(dst)
+            check("--master calms 2.5 kHz+ and stays under -1 dBTP",
+                  a2["harsh"] < b["harsh"] - 0.1 and a2["true_peak"] <= -0.9,
+                  f"above 2.5k {b['harsh']:.0%} -> {a2['harsh']:.0%}, true peak {a2['true_peak']} dBTP")
+
     # --- tracker output -----------------------------------------------------
     # These four were ALL shipped broken and all were invisible to inspection:
     # correct-looking bytes, wrong interpretation. Only a replayer or arithmetic

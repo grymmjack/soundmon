@@ -623,6 +623,38 @@ about most, generate the other sixty, and nothing audibly switches between them.
 > does **not** need the Kokoro TTS stack installed, so the machine with your
 > good microphone does not have to be the machine with the GPU.
 
+### Mastering a set (`--master`)
+
+Each sound can be fine alone and still grate when a fight stacks twenty of them.
+`--master` gives every file its own amounts of one chain (it began as NEON-CASTER's
+`sfx/mastering/`):
+- tilt toward −3 dB/octave;
+- lift the body at 180 Hz where there is any;
+- cut 3.2 kHz when the 2.5–5 kHz presence band piles up;
+- de-ess sharp sibilants;
+- low-pass 12 kHz for effects;
+- bring each sound back toward its own loudest 400 ms, at most +3 dB and never past
+  −1 dBTP.
+
+It uses no limiter and never normalizes to full scale. Voices are left alone unless
+they're bright.
+
+```bash
+soundmon --master sfx/                       # -> sfx/mastered/… (never overwrites)
+soundmon --master assets/ --output-to out/   # speech/ narration/ voice/ folders are treated as voices
+soundmon --master hit.wav --master-kind sfx --flac
+```
+
+Each line reports what changed, e.g. `above 2.5k 52%→26%  harsh 0.10→0.00s  gain +1.4 dB  peak -1.0 dBTP`.
+On NEON-CASTER it took the effects' energy above 2.5 kHz from 34 % to 21 %. Needs
+numpy and ffmpeg, but no ComfyUI.
+
+In **soundmon-gui**:
+- a set can **master on export**;
+- each take in a set shows its measurements (loudest 400 ms, true peak, share above
+  2.5 kHz, harsh seconds, tilt) and a sonogram;
+- **▶ Mastered** lets you hear it through the chain first.
+
 ### Compressing output (`--ogg`)
 
 WAV is the default because it is lossless and every tool reads it. When size
@@ -917,6 +949,7 @@ soundmon/
 ├── chipfx.py                  --chipfx/--oplfx: sfxr-style effect recipes
 ├── opl.py                     --opl: Nuked OPL3 FM (core fetched, not vendored)
 ├── record.py                  --record: the terminal recording booth (mic → pack)
+├── master.py                  --master: per-sound mastering chain (from NEON-CASTER), + analyse()
 ├── sounds.json                --style guide snippets (edit / add your own)
 ├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI
 ├── servers.example.json       template for --server aliases (copy to servers.json)
