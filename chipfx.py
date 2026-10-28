@@ -445,6 +445,12 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     # Effects are short; --seconds defaults to something musical, so prefer an
     # explicit --max-seconds (which the pack generator passes as the target).
     dur = a.max_seconds if getattr(a, "max_seconds", 0) else a.seconds
+    # With no length asked for, the effect keeps its natural length: render into a roomy window,
+    # then cut the silence after it (below). Using --seconds' default of 10 wrote a 10 s file
+    # holding 0.3 s of sound.
+    natural = not getattr(a, "max_seconds", 0) and not any(x == "--seconds" or x.startswith("--seconds=") for x in sys.argv[1:])
+    if natural:
+        dur = 4.0
     dur = max(0.03, min(float(dur), 10.0))
     n = int(SAMPLE_RATE * dur)
 
@@ -462,6 +468,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         audio = np.asarray(audio, dtype=np.float64)[:n]
         import chip as _dcm
         audio = _dcm._dc_block(audio, np, SAMPLE_RATE)
+        if natural and not getattr(a, "no_trim", False):
+            loud = np.where(np.abs(audio) > np.abs(audio).max() * 10 ** (-60 / 20))[0]
+            if len(loud):
+                cut = min(len(audio), int(loud[-1]) + int(0.03 * SAMPLE_RATE))
+                audio = audio[:cut].copy()
+                f = min(len(audio), int(0.005 * SAMPLE_RATE))
+                if f > 1:
+                    audio[-f:] *= np.linspace(1.0, 0.0, f)
         peak = float(np.abs(audio).max())
         if peak > 1e-9:
             audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)

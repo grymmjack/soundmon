@@ -552,13 +552,56 @@ def match_tone_files(files, ref):
     return out
 
 
+# Prompts this run has sent and not yet seen finish, per server. On Ctrl-C or a stop signal (the GUI's
+# Cancel) they are taken off ComfyUI's queue, and the one rendering is interrupted only if it is ours:
+# a shared ComfyUI may be busy with pixelmon or another soundmon, and those must keep going.
+SENT = {}
+
+
+def _forget(server, pid):
+    SENT.get(server, set()).discard(pid)
+
+
+def cancel_sent(why="stopped"):
+    """Remove this run's prompts from every server's queue; interrupt the running one if it is ours."""
+    told = []
+    for server, pids in list(SENT.items()):
+        if not pids:
+            continue
+        ids = sorted(pids)
+        try:
+            req = urllib.request.Request(f"{server}/queue", data=json.dumps({"delete": ids}).encode(), method="POST",
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=3).close()
+            with urllib.request.urlopen(f"{server}/queue", timeout=3) as r:
+                running = {e[1] for e in json.loads(r.read()).get("queue_running", []) if len(e) > 1}
+            if running & pids:
+                urllib.request.urlopen(urllib.request.Request(f"{server}/interrupt", data=b"{}", method="POST",
+                                                              headers={"Content-Type": "application/json"}), timeout=3).close()
+            told.append(f"{_short(server)} ({len(ids)} prompt{'s' if len(ids) > 1 else ''})")
+        except Exception:
+            told.append(f"{_short(server)} (unreachable; its queue may still hold {len(ids)})")
+        pids.clear()
+    if told:
+        print(f"   ⛔ {why}: cleared {', '.join(told)}", flush=True)
+
+
+def _on_stop(signum, frame):
+    import signal
+    signal.signal(signum, signal.SIG_IGN)             # a second Ctrl-C while cleaning up shouldn't cut it short
+    cancel_sent("cancelled")
+    sys.exit(130 if signum == signal.SIGINT else 143)
+
+
 def submit(graph, server=None):
     server = server or SERVER
     data = json.dumps({"prompt": graph}).encode()
     req = urllib.request.Request(f"{server}/prompt", data=data,
                                  headers={"Content-Type": "application/json"})
     try:
-        return json.loads(urllib.request.urlopen(req, timeout=30).read())["prompt_id"]
+        pid = json.loads(urllib.request.urlopen(req, timeout=30).read())["prompt_id"]
+        SENT.setdefault(server, set()).add(pid)
+        return pid
     except urllib.error.HTTPError as e:
         sys.exit("ComfyUI rejected the request:\n" + e.read().decode()[:1200])
     except urllib.error.URLError:
@@ -597,9 +640,11 @@ def wait(pid, server=None, timeout=1800):
             hist = json.loads(r.read())
         if pid in hist:
             if hist[pid].get("outputs"):
+                _forget(server, pid)
                 return hist[pid]["outputs"]
             err = _job_error(hist[pid])
             if err:
+                _forget(server, pid)
                 sys.exit(f"ComfyUI failed the job on {_short(server)} in {err}")
         time.sleep(1)
     sys.exit("Timed out waiting for the sound.")
@@ -612,9 +657,11 @@ def poll(pid, server):
         hist = json.loads(r.read())
     if pid in hist:
         if hist[pid].get("outputs"):
+            _forget(server, pid)
             return hist[pid]["outputs"]
         err = _job_error(hist[pid])
         if err:
+            _forget(server, pid)
             raise JobFailed(err)
     return None
 
@@ -1780,6 +1827,8 @@ def main():
     # a box missing the checkpoint dumped a raw ComfyUI validation blob instead of
     # saying which file was missing where.
     if len(POOL) <= 1 and (REMOTE or POOL):
+        if not server_up(SERVER):
+            sys.exit(f"can't reach ComfyUI at {SERVER} — is it running there? (check the address in servers.json)")
         need = a.song_base if a.song else a.base
         if need and not server_has_ckpt(SERVER, need):
             sys.exit(f"{_short(SERVER)} doesn't have {need}\n"
@@ -1848,4 +1897,11 @@ def main():
 
 
 if __name__ == "__main__":
+    import atexit
+    import signal
+    signal.signal(signal.SIGINT, _on_stop)
+    signal.signal(signal.SIGTERM, _on_stop)
+    # Any other way out with prompts still queued (a failed job ending a batch, an error) clears them too:
+    # without this, the rest of a failed batch kept rendering on the GPU for nobody.
+    atexit.register(cancel_sent, "stopped early")
     main()

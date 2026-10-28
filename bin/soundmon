@@ -34,7 +34,16 @@ for arg in "$@"; do
 done
 if [ -n "$TARGET" ]; then
     case "$TARGET" in
-        local|localhost|127.0.0.1*|http://127.0.0.1*|http://localhost*) ;;
+        local|localhost) ;;
+        127.0.0.1*|localhost:*|http://127.0.0.1*|http://localhost*)
+            # A local URL: probe THAT address. Only the default ComfyUI (:8188) is started for you;
+            # anything else on this machine (a second ComfyUI, a test server) is managed elsewhere.
+            case "$TARGET" in http://*) URL="${TARGET%/}" ;; *) URL="http://${TARGET%/}" ;; esac
+            case "$URL" in *,*) URL="${URL%%,*}" ;; esac
+            case "$URL" in
+                http://127.0.0.1:8188|http://localhost:8188|http://127.0.0.1|http://localhost) ;;
+                *) needs_server=0 ;;
+            esac ;;
         *) needs_server=0 ;;
     esac
 fi

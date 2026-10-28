@@ -13,6 +13,7 @@
   --ok: #55ff55; --warn: #ffff55; --bad: #ff5555; --radius: 6px;
   --abort: #b3121b; --on-accent: #061416; --on-pick: #1a0418;
   --mono: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  --wave-dim: #4a4a5a;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -33,6 +34,58 @@ a { color: var(--accent); }
 
 .app { display: grid; grid-template-columns: 420px minmax(0, 1fr); height: calc(100vh - 30px); }
 @media (max-width: 900px) { .app { grid-template-columns: 1fr; height: auto; } .form { max-height: none; } }
+
+/* ---- the sound widget (soundRow): ▶ | waveform | time, then facts | spectrum ---- */
+.snd { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; grid-template-areas: "tt tt tt" "pp wv tm" "pp mt sp"; gap: 2px 8px; align-items: center; min-width: 0; }
+.snd .stitle { grid-area: tt; display: flex; gap: 6px; align-items: baseline; justify-content: space-between; min-width: 0; }
+.snd .stitle b { font: 600 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.snd .pp { grid-area: pp; width: 34px; height: 34px; border-radius: 50%; padding: 0; font-size: 12px; letter-spacing: 0; background: var(--accent); color: var(--on-accent); border: 0; align-self: center; }
+.snd .pp:hover { filter: brightness(1.15); }
+.snd canvas.wave { grid-area: wv; width: 100%; height: 46px; display: block; cursor: pointer; background: transparent; }
+.snd .tm { grid-area: tm; font-size: 11px; color: var(--dim); white-space: nowrap; }
+.snd .smeta { grid-area: mt; font-size: 10.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.snd .spec { grid-area: sp; width: 90px; height: 20px; display: block; }
+.snd.compact { grid-template-areas: "tt tt tt" "pp wv tm" "pp mt mt"; }
+.snd.compact .pp { width: 28px; height: 28px; font-size: 10px; }
+.snd.compact canvas.wave { height: 30px; }
+.snd.playing .tm { color: var(--accent); }
+.gcard:has(.snd.playing), .job:has(.snd.playing) { border-color: var(--accent); }
+.souts { grid-column: 1 / -1; display: grid; gap: 8px; }
+.gcard .snd { grid-template-areas: "pp wv tm" "mt mt mt" "sp sp sp"; }
+.gcard .snd .smeta { white-space: normal; overflow-wrap: anywhere; }
+.gcard .snd .spec { width: 100%; height: 22px; }
+
+/* ---- Browse dialog, Open menu, path tools ---- */
+dialog.browse { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); }
+dialog.browse::backdrop { background: rgba(0,0,0,.6); }
+dialog.browse[open] { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto auto; }
+.brhead, .brbar, .brfoot { display: flex; gap: 6px; align-items: center; padding: 8px 12px; }
+.brhead h3 { margin: 0; font-size: 14px; } .brhead { border-bottom: 1px solid var(--line); }
+.brbar input { font-family: var(--mono); font-size: 12px; }
+.crumbs { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; padding: 0 12px 6px; }
+.crumbs .crumb { text-transform: none; letter-spacing: 0; font: 12px var(--mono); padding: 1px 5px; background: none; border-color: transparent; }
+.brmain { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px; padding: 0 12px; min-height: 0; height: min(52vh, 460px); }
+.places { display: grid; align-content: start; gap: 2px; overflow-y: auto; }
+.places .place { text-align: left; text-transform: none; letter-spacing: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; border-color: transparent; }
+.places .place.on { border-color: var(--accent); }
+.brright { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 6px; min-height: 0; }
+.brlist { overflow-y: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+.brow { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto 26px; gap: 8px; align-items: center; padding: 4px 8px; cursor: pointer; border-bottom: 1px solid var(--panel2); }
+.brow b { font: 500 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brow:hover, .brow:focus { background: var(--panel2); outline: none; } .brow.sel { background: rgba(85,255,255,.12); box-shadow: inset 2px 0 var(--accent); }
+.brow span { font-size: 11px; }
+.pp.mini { width: 22px; height: 22px; border-radius: 50%; padding: 0; font-size: 9px; background: var(--accent); color: var(--on-accent); border: 0; }
+#brPrev { padding: 6px 12px 0; } #brPrev:empty { display: none; }
+.brfoot { border-top: 1px solid var(--line); margin-top: 8px; } .brfoot .render { width: auto; padding: 7px 18px; }
+@media (max-width: 640px) { .brmain { grid-template-columns: 1fr; height: 56vh; } .places { display: flex; flex-wrap: wrap; } }
+.omenu { position: fixed; z-index: 50; display: grid; min-width: 190px; background: var(--panel); border: 1px solid var(--accent); border-radius: 4px; box-shadow: 0 6px 24px rgba(0,0,0,.5); padding: 3px; }
+.omenu button { text-align: left; text-transform: none; letter-spacing: 0; font-size: 12.5px; background: none; border-color: transparent; }
+.omenu button:hover { background: var(--panel2); }
+.ptools { display: inline-flex; gap: 4px; flex: none; }
+.pathrow { display: flex; gap: 4px; align-items: center; } .pathrow > input, .pathrow > textarea { flex: 1 1 auto; }
+.drop .dbtn { padding: 2px 7px; font-size: 11px; }
+.drop > button { flex: none; }
+.obtn { padding: 3px 8px; }
 
 /* ---- form ---- */
 .form { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; display: flex; flex-direction: column; min-width: 0; }
@@ -194,7 +247,7 @@ tr:last-child td { border-bottom: 0; }
 .keys { font: 11px var(--mono); color: var(--dim); }
 .keys kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; color: var(--text); }
 .editor { display: grid; gap: 10px; }
-.fres { display: grid; grid-template-columns: 52px 180px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.fres { display: grid; grid-template-columns: 52px minmax(0, 1.2fr) minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
 .fres .sc { font: 600 15px var(--mono); color: var(--accent); text-align: right; }
 .fres canvas { width: 100%; height: 34px; display: block; background: var(--bg); border-radius: 3px; cursor: pointer; }
 .fres .nm { min-width: 0; font-size: 12px; } .fres .nm b { font: 600 12.5px var(--mono); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -212,9 +265,15 @@ tr:last-child td { border-bottom: 0; }
 .sb-abort { background: var(--abort); color: #fff; border-color: #ff8080; padding: 2px 9px; font-size: 11px; font-weight: 700; }
 .sb-abort::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #ff2a2a; box-shadow: 0 0 0 2px #fff; margin-right: 6px; }
 .np { display: flex; align-items: center; gap: 6px; color: var(--text); }
-.np canvas { width: 120px; height: 18px; cursor: pointer; }
+.np canvas { width: 180px; height: 22px; cursor: pointer; }
+.np #npText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34vw; }
+.np #npTime { font-size: 11px; white-space: nowrap; }
 .np button { padding: 1px 6px; font-size: 11px; }
 #sbStatus { color: var(--accent); font-family: var(--mono); }
+#sbStatus .err { color: var(--bad); } #sbStatus .busy { color: var(--warn); }
+.sb .nf { display: inline-flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+.sb .nf label { display: inline-flex; gap: 3px; align-items: center; cursor: pointer; }
+@media (max-width: 1100px) { .sb .nf label:not(:first-child) { display: none; } }
 </style>
 </head>
 <body>
@@ -244,6 +303,7 @@ tr:last-child td { border-bottom: 0; }
     <legend id="promptLegend">Describe the sound</legend>
     <textarea id="prompt" rows="3"></textarea>
     <div class="hint" id="promptHint"></div>
+    <div class="btnrow" data-eng="blip narrate" style="margin-top:-4px"><button type="button" id="promptLoad" title="read a .txt of key | text lines into the box">Load a list from disk…</button></div>
     <label class="c" data-eng="sfx music"><input type="checkbox" id="reprompt" checked> Let SA3 rewrite the description first (Qwen reprompt)</label>
   </fieldset>
 
@@ -255,6 +315,7 @@ tr:last-child td { border-bottom: 0; }
   <fieldset data-eng="sfx music song">
     <legend>Reference <span class="dim">· make it like a sound you have</span></legend>
     <div class="drop" data-drop="ref" data-flag="--ref"><span>Start from: <b id="ref_name">drop a sound here (or 🔎 Find → Use)</b></span><button type="button" data-clear="ref">✕</button></div>
+    <div id="ref_prev"></div>
     <label class="f" data-flag="--ref-strength">How far from it <span class="mono" id="refStrengthV"></span>
       <input id="ref_strength" type="range" min="0.05" max="1" step="0.05" value="0.6"></label>
     <div class="hint" style="display:flex;justify-content:space-between;margin-top:-6px"><span>close variation</span><span>loosely inspired</span></div>
@@ -306,6 +367,7 @@ tr:last-child td { border-bottom: 0; }
     </div>
     <div class="drop" data-drop="from_midi" data-flag="--from-midi"><span>Follow a MIDI file: <b id="from_midi_name">drop a .mid here</b></span><button type="button" data-clear="from_midi">✕</button></div>
     <div class="drop" data-drop="from_audio" data-flag="--from-audio"><span>…or a recording: <b id="from_audio_name">drop audio here</b></span><button type="button" data-clear="from_audio">✕</button></div>
+    <div id="from_audio_prev"></div>
     <div class="chips"><span class="hint">Also write:</span>
       <label class="c" data-eng="chip" data-flag="--write-mod"><input type="checkbox" id="write_mod" checked> .mod</label>
       <label class="c" data-eng="opl" data-flag="--write-rad"><input type="checkbox" id="write_rad" checked> .rad</label>
@@ -484,10 +546,23 @@ tr:last-child td { border-bottom: 0; }
 
 <div class="sb">
   <button type="button" class="sb-abort" id="abortBtn" hidden title="cancel every waiting job, stop the running one, and empty the render server's queue">Cancel and abort</button>
-  <span class="np"><button type="button" id="npStop" aria-label="Stop">■</button><canvas id="npWave" width="240" height="36"></canvas><span id="npText" class="mono">nothing playing</span></span>
+  <span class="np"><button type="button" id="npStop" aria-label="Play or pause" title="play / pause (Space) · Esc stops" disabled>▶</button><canvas id="npWave" class="wave" title="click to seek"></canvas><span id="npTime" class="mono dim"></span><span id="npText" class="mono">nothing playing</span></span>
+  <span class="nf"><label title="desktop notifications (the browser asks once)"><input type="checkbox" id="nfOn"> Notify:</label>
+    <label><input type="checkbox" id="nfDone"> done</label><label><input type="checkbox" id="nfErr"> errors</label>
+    <label title="a chime when a job finishes or fails"><input type="checkbox" id="nfSound"> sound</label>
+    <label title="a coin sound every time a take lands"><input type="checkbox" id="nfCoin"> per take 🪙</label></span>
   <span id="sbMade"></span>
   <span id="sbStatus"></span>
 </div>
+<dialog id="browseDlg" class="browse" aria-labelledby="brTitle">
+  <div class="brhead"><h3 id="brTitle">Choose</h3><span class="sp"></span><label class="c"><input type="checkbox" id="brHidden"> hidden</label><button type="button" id="brCancel" aria-label="close">✕</button></div>
+  <div class="brbar"><button type="button" id="brUp" title="up one folder">↑</button><input id="brPath" aria-label="path" spellcheck="false"><button type="button" id="brOpenHere" title="open this folder in the file manager">↗</button></div>
+  <div id="brCrumbs" class="crumbs"></div>
+  <div class="brmain"><nav id="brPlaces" class="places" aria-label="places"></nav>
+    <div class="brright"><input id="brFilter" placeholder="filter this folder" aria-label="filter"><div id="brList" class="brlist"></div></div></div>
+  <div id="brPrev"></div>
+  <div class="brfoot"><span class="hint" id="brHint"></span><span class="err" id="brErr"></span><span class="sp"></span><button type="button" class="render" id="brOk">Choose</button></div>
+</dialog>
 <audio id="player" preload="none"></audio>
 
 <script>
@@ -615,6 +690,12 @@ function drawChips() {
 function drawDrops() {
   const lab = { from_midi: "drop a .mid here", from_audio: "drop audio here", opl_bank: "built-in (drop a .sbi)", ref: "drop a sound here (or 🔎 Find → Use)" };
   for (const k of Object.keys(lab)) $(k + "_name").textContent = val(k) || lab[k];
+  for (const k of ["ref", "from_audio"]) {            // hear what you dropped, with the same widget as everywhere else
+    const host = $(k + "_prev"), v = val(k);
+    if ((host.dataset.name || "") === (v || "")) continue;
+    host.dataset.name = v || "";
+    host.replaceChildren(...(v ? [soundRow("/api/input?name=" + encodeURIComponent(v), v, { compact: true })] : []));
+  }
 }
 
 /* ---- the command RENDER would run, straight from the server ---- */
@@ -668,10 +749,113 @@ document.querySelectorAll("[data-drop]").forEach(d => {
     try { const j = await upload(file); cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); }
     catch (err) { toast(err.message, true); }
   });
-  d.addEventListener("click", e => { if (e.target.dataset.clear) return; const inp = el("input", { type: "file" }); inp.onchange = async () => {
+  d.addEventListener("click", e => { if (e.target.dataset.clear || e.target.closest(".dbtn")) return; const inp = el("input", { type: "file" }); inp.onchange = async () => {
     if (!inp.files[0]) return; try { const j = await upload(inp.files[0]); cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); } catch (err) { toast(err.message, true); } }; inp.click(); });
 });
 document.querySelectorAll("[data-clear]").forEach(b => b.addEventListener("click", e => { e.stopPropagation(); cur()[b.dataset.clear] = ""; store.set("form", F); drawDrops(); queueCommand(); }));
+
+/* ================= browse & open: pick any file or folder from disk, open anything in its app ================= */
+// Every place the GUI takes or shows a file or folder gets the same two buttons: Browse… (this
+// dialog, served from the GUI's machine and confined to your home folder) and Open (the file in
+// its default app, or in a program from Setup; a folder in the file manager).
+const EXT = { audio: [".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a"], midi: [".mid", ".midi"], bank: [".sbi"], text: [".txt"] };
+const DROP_EXT = { ref: EXT.audio, from_audio: EXT.audio, from_midi: EXT.midi, opl_bank: EXT.bank };
+let lastDir = store.get("browseDir", "~");
+
+function pickPath({ kind = "file", ext = null, start = "", title = "" } = {}) {
+  const dlg = $("browseDlg");
+  return new Promise(resolve => {
+    let cur = null, sel = null, hidden = false, done = false;
+    const finish = v => { if (done) return; done = true; dlg.close(); if (v && cur) { lastDir = cur.path; store.set("browseDir", lastDir); } resolve(v || null); };
+    $("brTitle").textContent = title || (kind === "dir" ? "Choose a folder" : "Choose a file");
+    $("brOk").textContent = kind === "dir" ? "Use this folder" : "Use this file";
+    $("brHint").textContent = kind === "dir" ? "Open a folder, then press Use this folder." : ext ? "Showing " + ext.join(" ") + " files." : "";
+    $("brFilter").value = "";
+    const go = async path => {
+      try { cur = await api("/api/browse?" + new URLSearchParams({ path: path || "~", kind, ext: (ext || []).join(","), hidden: hidden ? "1" : "" })); }
+      catch (e) { $("brErr").textContent = e.message; if (!cur) go("~"); return; }
+      sel = null; $("brErr").textContent = ""; $("brPath").value = cur.path; draw();
+    };
+    const draw = () => {
+      $("brCrumbs").replaceChildren(...cur.crumbs.flatMap((c, i) => [i ? el("span", { class: "dim", text: "/" }) : null, el("button", { type: "button", class: "crumb", text: c.name, onclick: () => go(c.path) })]).filter(Boolean));
+      $("brPlaces").replaceChildren(...cur.places.map(pl => el("button", { type: "button", class: "place" + (pl.path === cur.path ? " on" : ""), text: pl.name, title: pl.path, onclick: () => go(pl.path) })));
+      const q = $("brFilter").value.trim().toLowerCase(), hit = n => !q || n.toLowerCase().includes(q);
+      const rows = [];
+      if (cur.parent) rows.push(el("div", { class: "brow dir", tabindex: 0, ondblclick: () => go(cur.parent), onclick: () => go(cur.parent) }, el("span", { text: "↰" }), el("b", { text: ".." }), el("span"), el("span")));
+      for (const d of cur.dirs) if (hit(d)) rows.push(el("div", { class: "brow dir", tabindex: 0, title: "open " + d, onclick: () => go(cur.path + cur.sep + d) }, el("span", { text: "📁" }), el("b", { text: d }), el("span"), el("span")));
+      for (const f of cur.files) if (hit(f.name)) {
+        const full = cur.path + cur.sep + f.name, isAudio = EXT.audio.some(x => f.name.toLowerCase().endsWith(x));
+        const row = el("div", { class: "brow file" + (sel === full ? " sel" : ""), tabindex: 0, onclick: () => { sel = full; $("brPath").value = full; draw(); }, ondblclick: () => finish(full) },
+          el("span", { text: isAudio ? "♪" : "·" }), el("b", { text: f.name }), el("span", { class: "dim mono", text: fmtBytes(f.size) }),
+          isAudio ? el("button", { type: "button", class: "pp mini", text: "▶", title: "listen", onclick: e => { e.stopPropagation(); play("/api/disk/file?path=" + encodeURIComponent(full), f.name); } }) : el("span"));
+        rows.push(row);
+      }
+      if (!rows.length || (rows.length === 1 && cur.parent)) rows.push(el("div", { class: "empty", text: kind === "dir" ? "No sub-folders here." : "Nothing here matches." }));
+      if (cur.more) rows.push(el("div", { class: "dim", text: `…and ${cur.more} more; type to filter.` }));
+      $("brList").replaceChildren(...rows);
+      $("brOk").disabled = kind !== "dir" && !sel;
+      const prev = $("brPrev"); prev.replaceChildren(...(sel && EXT.audio.some(x => sel.toLowerCase().endsWith(x)) ? [soundRow("/api/disk/file?path=" + encodeURIComponent(sel), sel.split(cur.sep).pop(), { compact: true })] : []));
+    };
+    $("brFilter").oninput = () => cur && draw();
+    $("brHidden").onchange = e => { hidden = e.target.checked; go(cur ? cur.path : start); };
+    $("brPath").onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); go($("brPath").value); } };
+    $("brUp").onclick = () => cur && cur.parent && go(cur.parent);
+    $("brOpenHere").onclick = () => cur && openThing({ path: cur.path });
+    $("brOk").onclick = () => finish(kind === "dir" ? cur.path : sel);
+    $("brCancel").onclick = () => finish(null);
+    dlg.onclose = () => finish(null);
+    dlg.showModal(); go(start || lastDir);
+  });
+}
+
+async function openMenu(target, anchor) {
+  // Open in: the system default, any program saved in Setup, or the file's folder.
+  document.querySelectorAll(".omenu").forEach(m => m.remove());
+  let apps = { audio_apps: [], folder_apps: [] };
+  try { apps = SETUP || (SETUP = await api("/api/setup")); } catch (e) { /* defaults only */ }
+  const isFolder = !!target.folder;
+  const items = [[isFolder ? "File manager" : "System default app", "os", target]];
+  (isFolder ? apps.folder_apps : apps.audio_apps).forEach((a, i) => items.push([a.name || a.exec, (isFolder ? "dir:" : "snd:") + i, target]));
+  if (!isFolder) items.push(["Show in folder", "os", { ...target, reveal: true, folder: !target.path && !target.input && !target.set_now ? true : undefined }]);
+  const m = el("div", { class: "omenu", role: "menu" }, ...items.map(([label, app, t]) => el("button", { type: "button", role: "menuitem", text: label,
+    onclick: () => { m.remove(); api("/api/open", { app, target: t }).then(r => toast(`Opened ${r.opened}${r.with ? " in " + r.with : ""}`)).catch(e => toast(e.message, true)); } })));
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect(); m.style.left = Math.min(innerWidth - m.offsetWidth - 8, r.left) + "px"; m.style.top = (r.bottom + m.offsetHeight + 8 > innerHeight ? r.top - m.offsetHeight - 4 : r.bottom + 4) + "px";
+  setTimeout(() => document.addEventListener("click", function off(e) { if (!m.contains(e.target)) { m.remove(); document.removeEventListener("click", off); } }), 0);
+}
+const openBtn = (target, title) => el("button", { type: "button", class: "obtn", text: "↗", title: title || "open in…", onclick: e => { e.stopPropagation(); openMenu(target, e.currentTarget); } });
+
+function pathTools(input, { kind = "dir", ext = null, multi = false, title = "" } = {}) {
+  // Browse… and Open beside a typed path (multi: a textarea with one path per line; Browse adds a line).
+  const lastLine = () => input.value.split("\n").map(s => s.trim()).filter(Boolean).pop() || "";
+  return el("span", { class: "ptools" },
+    el("button", { type: "button", text: "Browse…", title: kind === "dir" ? "pick a folder" : "pick a file", onclick: async () => {
+      const p = await pickPath({ kind, ext, start: (multi ? lastLine() : input.value.trim()) || "", title });
+      if (!p) return;
+      const v = p.startsWith(HOMEDIR + "/") ? "~" + p.slice(HOMEDIR.length) : p === HOMEDIR ? "~" : p;
+      input.value = multi ? [...input.value.split("\n").map(s => s.trim()).filter(Boolean), v].join("\n") : v;
+      input.dispatchEvent(new Event("input", { bubbles: true })); input.dispatchEvent(new Event("change", { bubbles: true }));
+    } }),
+    el("button", { type: "button", text: "Open", title: "open it (folders in the file manager, files in their app)", onclick: e => {
+      const v = multi ? lastLine() : input.value.trim(); if (!v) { toast("type or browse to a path first", true); return; }
+      openMenu({ path: v, folder: kind === "dir" || undefined }, e.currentTarget); } }));
+}
+let HOMEDIR = "";
+api("/api/browse?kind=dir").then(r => HOMEDIR = r.home).catch(() => {});
+
+async function useDiskFile(key, path) {                // a drop zone fed from Browse
+  const j = await api("/api/input/from-path", { path });
+  cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); return j;
+}
+document.querySelectorAll("[data-drop]").forEach(d => {
+  const key = d.dataset.drop, clear = d.querySelector("[data-clear]");
+  if (!clear) return;
+  d.insertBefore(el("button", { type: "button", class: "dbtn", text: "Browse…", title: "pick a file on this computer", onclick: async e => {
+    e.stopPropagation(); const p = await pickPath({ kind: "file", ext: DROP_EXT[key], title: d.querySelector("span").firstChild.textContent.trim().replace(/:$/, "") });
+    if (p) useDiskFile(key, p).catch(err => toast(err.message, true)); } }), clear);
+  d.insertBefore(el("button", { type: "button", class: "dbtn", text: "↗", title: "open it in…", onclick: e => { e.stopPropagation(); if (!val(key)) { toast("nothing chosen yet", true); return; } openMenu({ input: val(key) }, e.currentTarget); } }), clear);
+});
+
 $("prompt").addEventListener("dragover", e => e.preventDefault());
 $("prompt").addEventListener("drop", async e => {                    // a .txt manifest dropped on the text box
   const file = e.dataTransfer.files[0]; if (!file) return; e.preventDefault();
@@ -698,46 +882,326 @@ function showTab(t) {
 }
 addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
-/* ================= playback & waveforms ================= */
-const player = $("player"), PEAKS = new Map();
-let actx = null, nowKey = null;
-async function peaksFor(url) {
-  if (PEAKS.has(url)) return PEAKS.get(url);
+/* ================= sounds: one player, the same widget in every list ================= */
+// Every list (queue, gallery, sets, find, voices, the reference) shows a sound the same way: a
+// SoundCloud-style waveform you can click to play and seek, with what the file is (length, rate,
+// bit depth, channels, codec, size, peak) and a small spectrum (how far up its content goes).
+// All of it is worked out in the browser from the file itself; the server only serves bytes.
+const player = $("player"), SND = new Map(), VIEWS = new Map();
+let actx = null, nowKey = null, nowLabel = "", rafId = 0;
+
+const fmtBytes = b => b >= 1048576 ? (b / 1048576).toFixed(b >= 10485760 ? 0 : 1) + " MB" : b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B";
+const fmtHz = f => f >= 1000 ? (f / 1000).toFixed(f >= 10000 ? 1 : 2).replace(/\.?0+$/, "") + " kHz" : Math.round(f) + " Hz";
+function fmtClock(s, dur) {           // short sounds in seconds (0.84 s), music as m:ss
+  s = Math.max(0, s || 0);
+  if ((dur ?? s) < 60) return s.toFixed((dur ?? s) < 10 ? 2 : 1) + " s";
+  const m = Math.floor(s / 60), r = Math.floor(s - m * 60); return m + ":" + String(r).padStart(2, "0");
+}
+
+function fileFacts(buf) {
+  // What the decoded audio can't tell us (the browser resamples to its own rate): the file's own
+  // rate, bit depth, channels and codec, read from its header.
+  const v = new DataView(buf), n = buf.byteLength, tag = (o, k) => o + k <= n ? String.fromCharCode(...new Uint8Array(buf, o, k)) : "";
+  try {
+    if (tag(0, 4) === "RIFF" && tag(8, 4) === "WAVE") {
+      for (let o = 12; o + 8 <= n;) {
+        const id = tag(o, 4), sz = v.getUint32(o + 4, true);
+        if (id === "fmt ") {
+          let fmt = v.getUint16(o + 8, true); if (fmt === 0xFFFE && sz >= 26) fmt = v.getUint16(o + 32, true);
+          return { codec: fmt === 3 ? "WAV float" : "WAV", chans: v.getUint16(o + 10, true), rate: v.getUint32(o + 12, true), bits: v.getUint16(o + 22, true) };
+        }
+        o += 8 + sz + (sz & 1);
+      }
+      return { codec: "WAV" };
+    }
+    if (tag(0, 4) === "fLaC") {
+      const b = i => v.getUint8(i);
+      return { codec: "FLAC", rate: (b(18) << 12) | (b(19) << 4) | (b(20) >> 4), chans: ((b(20) >> 1) & 7) + 1, bits: (((b(20) & 1) << 4) | (b(21) >> 4)) + 1 };
+    }
+    if (tag(0, 4) === "OggS") {
+      const head = String.fromCharCode(...new Uint8Array(buf, 0, Math.min(n, 120)));
+      let i = head.indexOf("OpusHead"); if (i >= 0) return { codec: "Opus", chans: v.getUint8(i + 9), rate: 48000 };
+      i = head.indexOf("\x01vorbis"); if (i >= 0) return { codec: "OGG Vorbis", chans: v.getUint8(i + 11), rate: v.getUint32(i + 12, true) };
+      return { codec: "OGG" };
+    }
+    let o = 0;
+    if (tag(0, 3) === "ID3") o = 10 + ((v.getUint8(6) & 127) << 21 | (v.getUint8(7) & 127) << 14 | (v.getUint8(8) & 127) << 7 | (v.getUint8(9) & 127));
+    for (let end = Math.min(n - 4, o + 8192); o < end; o++) {
+      if (v.getUint8(o) !== 0xFF || (v.getUint8(o + 1) & 0xE0) !== 0xE0) continue;
+      const ver = (v.getUint8(o + 1) >> 3) & 3, ri = (v.getUint8(o + 2) >> 2) & 3, mode = v.getUint8(o + 3) >> 6;
+      const base = [44100, 48000, 32000][ri]; if (!base || ver === 1) continue;
+      return { codec: "MP3", rate: ver === 3 ? base : ver === 2 ? base / 2 : base / 4, chans: mode === 3 ? 1 : 2 };
+    }
+  } catch (e) { /* a short or odd header: fall back to what the decoder says */ }
+  return {};
+}
+
+function fft(re, im) {                // in-place radix-2
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) { let b = n >> 1; for (; j & b; b >>= 1) j ^= b; j ^= b; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; } }
+  for (let len = 2; len <= n; len <<= 1) {
+    const a = -2 * Math.PI / len, wr = Math.cos(a), wi = Math.sin(a);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const p = i + k, q = p + len / 2, tr = re[q] * cr - im[q] * ci, ti = re[q] * ci + im[q] * cr;
+        re[q] = re[p] - tr; im[q] = im[p] - ti; re[p] += tr; im[p] += ti;
+        const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+      }
+    }
+  }
+}
+
+function analyseBuffer(a) {
+  const len = a.length, chs = [], N = 800, sr = a.sampleRate;
+  for (let c = 0; c < a.numberOfChannels; c++) chs.push(a.getChannelData(c));
+  const hi = new Float32Array(N), lo = new Float32Array(N);
+  let peak = 0, clip = 0, sum2 = 0;
+  for (let i = 0; i < N; i++) {
+    const s = Math.floor(i * len / N), e = Math.max(s + 1, Math.floor((i + 1) * len / N));
+    let mx = 0, mn = 0;
+    for (const ch of chs) for (let j = s; j < e && j < len; j++) { const x = ch[j]; if (x > mx) mx = x; if (x < mn) mn = x; sum2 += x * x; if (x >= 0.999 || x <= -0.999) clip++; }
+    hi[i] = mx; lo[i] = mn; peak = Math.max(peak, mx, -mn);
+  }
+  // Spectrum: average power of up to 48 Hann-windowed 4096-sample frames spread over the sound.
+  const F = 4096, bins = F / 2, pw = new Float64Array(bins), win = new Float64Array(F);
+  for (let i = 0; i < F; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (F - 1));
+  const frames = Math.max(1, Math.min(48, Math.floor(len / F)));
+  const re = new Float64Array(F), im = new Float64Array(F);
+  for (let f = 0; f < frames; f++) {
+    const s = frames === 1 ? 0 : Math.floor(f * (len - F) / (frames - 1));
+    for (let i = 0; i < F; i++) { let x = 0; for (const ch of chs) x += ch[s + i] || 0; re[i] = x / chs.length * win[i]; im[i] = 0; }
+    fft(re, im);
+    for (let k = 0; k < bins; k++) pw[k] += re[k] * re[k] + im[k] * im[k];
+  }
+  const nyq = sr / 2, hz = k => k * sr / F, B = 36, lo0 = 30, hi0 = Math.min(nyq, 22050);
+  const bandF = [], bands = new Float32Array(B);
+  let pmax = 1e-30, top = 0, kmaxv = 0, kmax = 0;
+  for (let k = 1; k < bins; k++) { if (pw[k] > pmax) pmax = pw[k]; if (pw[k] > kmaxv && hz(k) >= 40) { kmaxv = pw[k]; kmax = k; } }
+  for (let k = bins - 1; k > 0; k--) if (pw[k] > pmax * 1e-6) { top = hz(k); break; }     // last bin within 60 dB of the loudest
+  for (let b = 0; b < B; b++) {
+    const f0 = lo0 * Math.pow(hi0 / lo0, b / B), f1 = lo0 * Math.pow(hi0 / lo0, (b + 1) / B);
+    let s = 0, c = 0; for (let k = Math.max(1, Math.floor(f0 * F / sr)); k <= Math.min(bins - 1, Math.ceil(f1 * F / sr)); k++) { s += pw[k]; c++; }
+    bands[b] = 10 * Math.log10((c ? s / c : 0) / pmax + 1e-12); bandF.push(Math.sqrt(f0 * f1));
+  }
+  const rms = Math.sqrt(sum2 / Math.max(1, len * chs.length));
+  return { hi, lo, dur: a.duration, peakDb: 20 * Math.log10(peak || 1e-9), rmsDb: 20 * Math.log10(rms || 1e-9), clip, bands, bandF, top, loudest: hz(kmax), silent: peak < 1e-4 };
+}
+
+async function soundInfo(url) {
+  if (SND.has(url)) return SND.get(url);
   const pr = (async () => {
+    const r = await fetch(url); if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const buf = await r.arrayBuffer(), facts = fileFacts(buf);
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    const buf = await (await fetch(url)).arrayBuffer();
-    const a = await actx.decodeAudioData(buf);
-    const ch = a.getChannelData(0), n = 400, step = Math.max(1, Math.floor(ch.length / n)), out = new Float32Array(n);
-    for (let i = 0; i < n; i++) { let m = 0; const s = i * step; for (let j = 0; j < step && s + j < ch.length; j += 4) { const v = Math.abs(ch[s + j]); if (v > m) m = v; } out[i] = m; }
-    return { peaks: out, dur: a.duration, rate: a.sampleRate, chans: a.numberOfChannels };
-  })().catch(() => null);
-  PEAKS.set(url, pr); return pr;
+    const a = await actx.decodeAudioData(buf.slice(0));
+    return { ...analyseBuffer(a), bytes: buf.byteLength, codec: facts.codec || (url.split("?")[0].split(".").pop() || "").toUpperCase(),
+      rate: facts.rate || a.sampleRate, chans: facts.chans || a.numberOfChannels, bits: facts.bits || null };
+  })().catch(e => ({ error: e.message || String(e) }));
+  SND.set(url, pr); return pr;
 }
-function drawPeaks(cv, w, pos = -1) {
-  const dpr = devicePixelRatio || 1, W = cv.width = Math.max(1, cv.clientWidth * dpr), H = cv.height = Math.max(1, cv.clientHeight * dpr), g = cv.getContext("2d");
+const peaksFor = url => soundInfo(url).then(w => w && !w.error ? w : null);     // older callers
+
+function factsText(w) {
+  if (!w) return "";
+  if (w.error) return "can't read this file here: " + w.error;
+  const ch = w.chans === 1 ? "mono" : w.chans === 2 ? "stereo" : w.chans + " ch";
+  const depth = w.bits ? w.bits + "-bit" : w.dur ? Math.round(w.bytes * 8 / w.dur / 1000) + " kbps" : "";
+  return [fmtClock(w.dur), fmtHz(w.rate), depth, ch, w.codec, fmtBytes(w.bytes),
+    w.silent ? "silent" : "peak " + w.peakDb.toFixed(1) + " dB", w.clip ? "⚠ " + w.clip + " clipped" : null].filter(Boolean).join(" · ");
+}
+
+function drawWave(cv, w, pos = -1, hover = -1) {
+  const dpr = devicePixelRatio || 1, W = cv.width = Math.max(1, Math.round(cv.clientWidth * dpr)), H = cv.height = Math.max(1, Math.round(cv.clientHeight * dpr)), g = cv.getContext("2d");
   g.clearRect(0, 0, W, H);
-  if (!w) { g.fillStyle = "#33333f"; g.fillRect(0, H / 2 - 1, W, 2); return; }
-  const cs = getComputedStyle(document.documentElement), acc = cs.getPropertyValue("--accent").trim(), dim = cs.getPropertyValue("--dim").trim(), bad = cs.getPropertyValue("--bad").trim();
-  const n = w.peaks.length, bw = W / n;
-  for (let i = 0; i < n; i++) { const v = w.peaks[i], h = Math.max(1, v * (H / 2 - 1));
-    g.fillStyle = v > 0.995 ? bad : pos >= 0 && i / n > pos ? dim : acc; g.fillRect(i * bw, H / 2 - h, Math.max(1, bw - (bw > 2 ? 1 : 0)), h * 2); }
+  const cs = getComputedStyle(document.documentElement), col = k => cs.getPropertyValue(k).trim();
+  if (!w || w.error) { g.fillStyle = col("--line"); g.fillRect(0, H * 0.68 - 1, W, 2); return; }
+  const bar = Math.max(2, Math.round(2 * dpr)), gap = Math.max(1, Math.round(dpr)), n = Math.max(1, Math.floor(W / (bar + gap))), N = w.hi.length, mid = Math.round(H * 0.68);
+  const acc = col("--accent"), dim = col("--wave-dim") || col("--dim"), bad = col("--bad");
+  for (let i = 0; i < n; i++) {
+    const s = Math.floor(i * N / n), e = Math.max(s + 1, Math.floor((i + 1) * N / n));
+    let up = 0, dn = 0; for (let j = s; j < e; j++) { if (w.hi[j] > up) up = w.hi[j]; if (-w.lo[j] > dn) dn = -w.lo[j]; }
+    const f = (i + 0.5) / n, played = pos >= 0 && f <= pos, hov = hover >= 0 && f <= hover && !played;
+    g.fillStyle = Math.max(up, dn) >= 0.999 ? bad : played || hov ? acc : dim;
+    g.globalAlpha = hov ? 0.55 : 1;
+    const x = i * (bar + gap), hU = Math.max(1, up * (mid - 1)), hD = Math.max(1, dn * (H - mid - 1));
+    g.fillRect(x, mid - hU, bar, hU);
+    g.globalAlpha *= 0.45; g.fillRect(x, mid + 1, bar, hD);                       // the reflection
+    g.globalAlpha = 1;
+  }
+  if (hover >= 0) { g.fillStyle = col("--text"); g.fillRect(Math.round(hover * W), 0, Math.max(1, dpr), H); }
 }
-const io = new IntersectionObserver(es => es.forEach(async e => { if (!e.isIntersecting) return; io.unobserve(e.target); const w = await peaksFor(e.target.dataset.url); e.target._w = w; drawPeaks(e.target, w); if (w && e.target._meta) e.target._meta(w); }), { rootMargin: "300px" });
+
+function drawSpec(cv, w) {
+  const dpr = devicePixelRatio || 1, W = cv.width = Math.max(1, Math.round(cv.clientWidth * dpr)), H = cv.height = Math.max(1, Math.round(cv.clientHeight * dpr)), g = cv.getContext("2d");
+  g.clearRect(0, 0, W, H);
+  if (!w || w.error || w.silent) return;
+  const cs = getComputedStyle(document.documentElement), B = w.bands.length, bw = W / B;
+  const grad = g.createLinearGradient(0, 0, W, 0); grad.addColorStop(0, cs.getPropertyValue("--accent2").trim()); grad.addColorStop(1, cs.getPropertyValue("--accent").trim());
+  g.fillStyle = grad;
+  for (let b = 0; b < B; b++) { const h = Math.max(0, (w.bands[b] + 72) / 72) * H; if (h > 0.5) g.fillRect(b * bw, H - h, Math.max(1, bw - dpr), h); }
+  cv.title = `frequency content: strongest near ${fmtHz(w.loudest)}, reaches ${fmtHz(w.top)} (within 60 dB of its loudest). Low on the left, high on the right.`;
+}
+
+function registerView(url, v) { if (!VIEWS.has(url)) VIEWS.set(url, new Set()); VIEWS.get(url).add(v); }
+function viewsFor(url) { const s = VIEWS.get(url); if (!s) return []; for (const v of s) if (!v.cv.isConnected) s.delete(v); return [...s]; }
+function paintView(v) {
+  const on = v.url === nowKey, pos = on && player.duration ? player.currentTime / player.duration : -1;
+  drawWave(v.cv, v.cv._w, pos, v.hover ?? -1);
+  if (v.btn) { const playing = on && !player.paused; v.btn.textContent = playing ? "❚❚" : "▶"; v.btn.setAttribute("aria-label", (playing ? "pause " : "play ") + v.label); }
+  if (v.tm && v.cv._w && !v.cv._w.error) v.tm.textContent = on ? `${fmtClock(player.currentTime, v.cv._w.dur)} / ${fmtClock(v.cv._w.dur)}` : fmtClock(v.cv._w.dur);
+  v.root?.classList.toggle("playing", on);
+}
+function paintUrl(url) { for (const v of viewsFor(url)) paintView(v); }
+function tick() { if (nowKey) { paintUrl(nowKey); paintNow(); } rafId = !player.paused ? requestAnimationFrame(tick) : 0; }
+
+const io = new IntersectionObserver(es => es.forEach(async e => {
+  if (!e.isIntersecting) return; io.unobserve(e.target);
+  const w = await soundInfo(e.target.dataset.url); e.target._w = w;
+  const v = e.target._view; if (v) { paintView(v); v.onInfo?.(w); } else drawWave(e.target, w);
+}), { rootMargin: "300px" });
+
+function waveView(url, label, extra = {}) {
+  // A canvas that plays `url` when clicked (at the spot clicked), follows playback, and shows
+  // where a click would land on hover. Used on its own (sets A/B rows) and inside soundRow.
+  const cv = el("canvas", { class: "wave", "data-url": url, title: "click to play from here" });
+  const v = { url, label, cv, ...extra };
+  cv._view = v; registerView(url, v);
+  cv.addEventListener("mousemove", e => { const r = cv.getBoundingClientRect(); v.hover = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const w = cv._w; if (w && !w.error) cv.title = `${fmtClock(v.hover * w.dur, w.dur)} — click to play from here`; paintView(v); });
+  cv.addEventListener("mouseleave", () => { v.hover = -1; paintView(v); });
+  cv.addEventListener("click", e => { const r = cv.getBoundingClientRect(); seekPlay(url, label, (e.clientX - r.left) / r.width); });
+  io.observe(cv);
+  return cv;
+}
+
+function soundRow(url, label, opts = {}) {
+  // ▶ | waveform | time   over   facts | spectrum.   opts: title, sub (text after the facts),
+  // compact (no spectrum, lower wave), actions (elements on the right of the title line).
+  const btn = el("button", { type: "button", class: "pp", text: "▶", "aria-label": "play " + label, onclick: () => play(url, label) });
+  const tm = el("span", { class: "tm mono" }), meta = el("div", { class: "smeta mono", text: opts.sub || "" });
+  const spec = opts.compact ? null : el("canvas", { class: "spec" });
+  const root = el("div", { class: "snd" + (opts.compact ? " compact" : "") });
+  const cv = waveView(url, label, { btn, tm, root, onInfo: w => { meta.textContent = [factsText(w), opts.sub].filter(Boolean).join(" · "); meta.title = meta.textContent; if (spec) drawSpec(spec, w); } });
+  if (opts.title || opts.actions) root.append(el("div", { class: "stitle" }, opts.title ? el("b", { text: opts.title, title: opts.titleTip || opts.title }) : el("span"), ...(opts.actions || [])));
+  root.append(btn, cv, tm, meta);
+  if (spec) root.append(spec);
+  return root;
+}
+
 function play(url, label, cv) {
-  if (nowKey === url && !player.paused) { stopPlay(); return; }
-  player.src = url; player.play().catch(e => toast("can't play this here: " + e.message, true));
-  nowKey = url; $("npText").textContent = "▶ " + label;
-  document.querySelectorAll(".gcard.playing").forEach(c => c.classList.remove("playing"));
-  cv?.closest(".gcard")?.classList.add("playing");
-  peaksFor(url).then(w => { $("npWave")._w = w; drawPeaks($("npWave"), w, 0); });
+  if (nowKey === url) { if (player.paused) player.play().catch(() => {}); else player.pause(); return; }
+  nowKey = url; nowLabel = label;
+  player.src = url; player.play().catch(e => { if (e.name !== "AbortError") toast("can't play this here: " + e.message, true); });
+  $("npText").textContent = "▶ " + label; $("npText").title = label;
+  const np = $("npWave"); np.dataset.url = url; np._w = null;
+  soundInfo(url).then(w => { if (nowKey === url) { np._w = w; paintNow(); } });
+  for (const [u] of VIEWS) paintUrl(u);
 }
-function stopPlay() { player.pause(); nowKey = null; $("npText").textContent = "nothing playing"; document.querySelectorAll(".gcard.playing").forEach(c => c.classList.remove("playing")); drawPeaks($("npWave"), $("npWave")._w, -1); }
-player.addEventListener("timeupdate", () => { if (player.duration) drawPeaks($("npWave"), $("npWave")._w, player.currentTime / player.duration); });
+function seekPlay(url, label, frac) {
+  frac = Math.min(0.999, Math.max(0, frac));
+  if (nowKey === url && player.duration) { player.currentTime = frac * player.duration; if (player.paused) player.play().catch(() => {}); tick(); return; }
+  play(url, label);
+  if (frac > 0.01) player.addEventListener("loadedmetadata", () => { player.currentTime = frac * player.duration; }, { once: true });
+}
+function paintNow() {
+  const np = $("npWave"), w = np._w;
+  drawWave(np, w, nowKey && player.duration ? player.currentTime / player.duration : -1);
+  $("npTime").textContent = nowKey && w && !w.error ? `${fmtClock(player.currentTime, w.dur)} / ${fmtClock(w.dur)}` : "";
+  $("npStop").textContent = nowKey && !player.paused ? "❚❚" : "▶"; $("npStop").disabled = !nowKey;
+}
+function stopPlay() {
+  const was = nowKey; player.pause(); nowKey = null;
+  $("npText").textContent = "nothing playing"; $("npWave")._w = null; paintNow(); if (was) paintUrl(was);
+}
+for (const ev of ["play", "playing"]) player.addEventListener(ev, () => { cancelAnimationFrame(rafId); rafId = requestAnimationFrame(tick); });
+player.addEventListener("pause", () => { if (nowKey) { paintUrl(nowKey); paintNow(); } });
 player.addEventListener("ended", stopPlay);
-$("npStop").addEventListener("click", stopPlay);
-$("npWave").addEventListener("click", e => { if (player.duration) { const r = e.target.getBoundingClientRect(); player.currentTime = (e.clientX - r.left) / r.width * player.duration; } });
-document.addEventListener("keydown", e => { if (e.key === " " && !/INPUT|TEXTAREA|SELECT|BUTTON/.test(document.activeElement.tagName) && nowKey) { e.preventDefault(); stopPlay(); } });
+$("npStop").addEventListener("click", () => nowKey && play(nowKey, nowLabel));
+$("npWave").addEventListener("click", e => { if (nowKey && player.duration) { const r = e.target.getBoundingClientRect(); player.currentTime = (e.clientX - r.left) / r.width * player.duration; tick(); } });
+document.addEventListener("keydown", e => {
+  if (e.key === " " && !/INPUT|TEXTAREA|SELECT|BUTTON/.test(document.activeElement.tagName) && nowKey) { e.preventDefault(); play(nowKey, nowLabel); }
+  if (e.key === "Escape" && nowKey && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) stopPlay();
+});
+addEventListener("resize", () => { for (const [u] of VIEWS) paintUrl(u); });
+const openThing = target => api("/api/open", { target }).then(r => toast("Opened " + (r.opened || ""))).catch(e => toast(e.message, true));
 const fileUrl = (dir, file, dl) => "/files/" + encodeURIComponent(dir) + "/" + file.split("/").map(encodeURIComponent).join("/") + (dl ? "?download" : "");
+
+/* ================= notifications (pixelmon-gui's, for sound) ================= */
+const NF = Object.assign({ on: false, done: true, err: true, sound: false, coin: false }, store.get("notify", {}));
+let prevStatus = null, prevOutputs = null, prevRender = null;
+function sfxCtx() { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === "suspended") actx.resume(); } catch (e) {} return actx; }
+function coin(delay = 0) {                            // the classic two-note coin
+  const ac = sfxCtx(); if (!ac) return;
+  const t = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+  o.type = "square"; o.connect(g); g.connect(ac.destination);
+  o.frequency.setValueAtTime(987.77, t); o.frequency.setValueAtTime(1318.51, t + 0.075);
+  g.gain.setValueAtTime(0.045, t); g.gain.setValueAtTime(0.045, t + 0.075); g.gain.exponentialRampToValueAtTime(0.0008, t + 0.5);
+  o.start(t); o.stop(t + 0.52);
+}
+function chime(bad) {
+  const ac = sfxCtx(); if (!ac) return;
+  try { const o = ac.createOscillator(), g = ac.createGain(); o.type = "square"; o.frequency.value = bad ? 220 : 880; g.gain.value = 0.05;
+    o.connect(g); g.connect(ac.destination); o.start(); if (!bad) o.frequency.setValueAtTime(1175, ac.currentTime + 0.09); o.stop(ac.currentTime + (bad ? 0.35 : 0.2)); } catch (e) {}
+}
+function notify(title, body, bad) {
+  if (NF.sound) chime(bad);
+  if (!NF.on || !("Notification" in window) || Notification.permission !== "granted") return;
+  const n = new Notification(title, { body, tag: title + body });
+  n.onclick = () => { window.focus(); n.close(); };
+}
+function notifyJobs(jobs, render) {
+  const nm = j => `“${String(j.label || (j.params.prompt || "").split("\n")[0] || j.engine).slice(0, 60)}”`;
+  const outs = Object.fromEntries(jobs.map(j => [j.id, j.outputs.length]));
+  if (prevOutputs && NF.coin) { let k = 0; for (const j of jobs) for (let i = (prevOutputs[j.id] || 0); i < (outs[j.id] || 0) && k < 4; i++) coin(0.14 * k++); }
+  prevOutputs = outs;
+  const now = Object.fromEntries(jobs.map(j => [j.id, j.status]));
+  if (prevStatus) {
+    const doneGroups = new Set();
+    for (const j of jobs) {
+      const was = prevStatus[j.id];
+      if (!was || was === j.status || !["done", "failed"].includes(j.status)) continue;
+      if (j.status === "failed" && NF.err) notify("soundmon: render failed", `${nm(j)} — ${(j.error || j.log.slice(-1)[0] || "").slice(0, 140)}`, true);
+      if (j.status === "done" && NF.done) {
+        if (j.group) {
+          const g = jobs.filter(x => x.group === j.group);
+          if (g.every(x => ["done", "failed", "cancelled"].includes(x.status)) && !doneGroups.has(j.group)) {
+            doneGroups.add(j.group);
+            notify(`soundmon: ${j.group.startsWith("set:") ? "set renders" : "voices"} done`, `${g.reduce((n, x) => n + x.outputs.length, 0)} sounds · ${g.filter(x => x.status === "failed").length} failed`);
+          }
+        } else notify("soundmon: done", `${j.outputs.length} sound${j.outputs.length === 1 ? "" : "s"} · ${nm(j)}`);
+      }
+    }
+  }
+  prevStatus = now;
+  if (prevRender && render) {                         // the render server going away, coming back, sticking, restarting
+    if (render.up === false && prevRender.up) notify("soundmon", `render server ${render.server} isn't answering`, true);
+    if (render.up && prevRender.up === false) notify("soundmon", `render server ${render.server} is back`);
+    if (render.stuck && !prevRender.stuck) notify("soundmon", `render server ${render.server} ${render.stuck.error ? "fails every prompt" : "is stuck: prompts waiting, nothing running"}${render.restart ? "" : " — restart its ComfyUI"}`, true);
+    const rs = render.restart, ps = prevRender.restart;
+    if (rs && (!ps || ps.at !== rs.at)) notify("soundmon", `render server ${rs.server} ${rs.why} — restarting it`, true);
+    else if (rs && ps && ps.status === "running" && rs.status === "failed") notify("soundmon", `couldn't restart ${rs.server}: ${rs.output || "the restart command failed"}`, true);
+  }
+  prevRender = render ? JSON.parse(JSON.stringify(render)) : null;
+}
+{
+  const sync = () => { $("nfOn").checked = NF.on; $("nfDone").checked = NF.done; $("nfErr").checked = NF.err; $("nfSound").checked = NF.sound; $("nfCoin").checked = NF.coin;
+    ["nfDone", "nfErr"].forEach(id => $(id).disabled = !NF.on); store.set("notify", NF); };
+  $("nfOn").onchange = async e => {
+    NF.on = e.target.checked;
+    if (NF.on && !("Notification" in window)) { NF.on = false; toast("This browser has no desktop notifications.", true); }
+    else if (NF.on && Notification.permission !== "granted") {
+      const p = await Notification.requestPermission();
+      if (p !== "granted") { NF.on = false; toast("The browser blocked notifications for this page: allow them in its site settings.", true); }
+    }
+    sync();
+  };
+  $("nfDone").onchange = e => { NF.done = e.target.checked; sync(); };
+  $("nfErr").onchange = e => { NF.err = e.target.checked; sync(); };
+  $("nfSound").onchange = e => { NF.sound = e.target.checked; sync(); if (NF.sound) chime(); };
+  $("nfCoin").onchange = e => { NF.coin = e.target.checked; sync(); if (NF.coin) coin(); };
+  sync();
+}
 
 /* ================= queue ================= */
 let JOBS = [], pollT = 0, wasBusy = false, MADE = 0;
@@ -747,7 +1211,7 @@ async function poll() {
   try {
     const r = await api("/api/jobs"); JOBS = r.jobs; MADE = r.made;
     const busy = JOBS.some(j => j.status === "queued" || j.status === "running");
-    drawQueue(); statusBar(r.render, busy);
+    drawQueue(); statusBar(r.render, busy); notifyJobs(JOBS, r.render);
     setsOnPoll();
     if (tab === "voices") drawVoices();
     if (wasBusy && !busy && tab === "gallery") loadGallery();
@@ -758,6 +1222,7 @@ async function poll() {
 }
 function pollSoon() { clearTimeout(pollT); pollT = setTimeout(poll, 300); }
 let lastQueue = "";
+const QOPEN = new Set();                              // jobs whose every output is shown
 function drawQueue() {
   const sig = JSON.stringify(JOBS.map(j => [j.id, j.status, j.done, j.log.length]));
   if (sig === lastQueue) return; lastQueue = sig;
@@ -773,7 +1238,19 @@ function drawQueue() {
       el("div", { class: "cmd", text: j.command }));
     if (j.status === "running" || j.status === "queued") card.append(el("div", { class: "bar" }, el("i", { style: `width:${j.total ? Math.round(100 * j.done / j.total) : 0}%` })));
     if (j.error) card.append(el("div", { class: "err", text: j.error }));
-    if (j.outputs.length) card.append(el("div", { class: "outs" }, ...j.outputs.map(o => el("button", { type: "button", text: "▶ " + o.file.split("/").pop(), onclick: () => play(fileUrl(j.dir, o.file), o.file) }))));
+    if (j.outputs.length) {
+      const all = QOPEN.has(j.id), show = all ? j.outputs : j.outputs.slice(0, 4);
+      const outs = el("div", { class: "souts" }, ...show.map(o => { const name = o.file.split("/").pop();
+        return soundRow(fileUrl(j.dir, o.file), name, { compact: true, title: name, titleTip: o.file, sub: o.seed != null ? "seed " + o.seed : "",
+          actions: [el("span", { class: "btnrow" },
+            el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇", title: "download " + name }),
+            el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
+            el("button", { type: "button", text: "📂", title: "open this job's folder", onclick: () => openThing({ folder: true, dir: j.dir }) }),
+            openBtn({ dir: j.dir, file: o.file }, "open this sound in…"))] }); }));
+      if (j.outputs.length > 4) outs.append(el("button", { type: "button", style: "justify-self:start", text: all ? "show fewer" : `show all ${j.outputs.length}`,
+        onclick: () => { all ? QOPEN.delete(j.id) : QOPEN.add(j.id); lastQueue = ""; drawQueue(); } }));
+      card.append(outs);
+    }
     const acts = el("div", { class: "btnrow" });
     if (j.status === "queued" || j.status === "running") acts.append(el("button", { type: "button", text: "Cancel", onclick: () => api("/api/cancel/" + j.id, {}).then(pollSoon) }));
     acts.append(el("button", { type: "button", text: "Load", title: "put these settings back in the form", onclick: () => loadSettings(j.params) }));
@@ -791,7 +1268,11 @@ function statusBar(render, busy) {
   $("abortBtn").hidden = !busy;
   $("sbMade").textContent = `${MADE} sound${MADE === 1 ? "" : "s"} made this session`;
   const run = JOBS.find(j => j.status === "running"), q = JOBS.filter(j => j.status === "queued").length;
-  $("sbStatus").textContent = run ? `${(ENG[run.engine] || {}).name} · ${run.done}/${run.total}${q ? ` · ${q} queued` : ""}` : "idle";
+  // the render server's own trouble first: restarting, broken, stuck (soundmon-gui's watchdog sees these)
+  const rs = render.restart, srvNote = rs && rs.status !== "done"
+      ? el("span", { class: rs.status === "failed" ? "err" : "busy", text: `↻ ${rs.status === "failed" ? "couldn't restart" : "restarting"} ${rs.server}: it ${rs.why} · `, title: rs.output || "" })
+    : render.stuck ? el("span", { class: "err", title: render.stuck.error || "", text: `● ${render.server} ${render.stuck.error ? "is broken: every prompt fails" : "is stuck: prompts waiting, nothing running"} · ` }) : null;
+  $("sbStatus").replaceChildren(...[srvNote, run ? `${(ENG[run.engine] || {}).name} · ${run.done}/${run.total}${q ? ` · ${q} queued` : ""}` : "idle"].filter(Boolean));
   $("srvName").textContent = render.server + (render.stuck ? " · stuck" : render.up ? " · up" : " · down");
   $("srvDot").className = "dot " + (render.stuck ? "warn" : render.up ? "up" : "down");
 }
@@ -831,12 +1312,7 @@ function textFor(p, file) {
 }
 function card(j, o) {
   const E = ENG[j.engine] || {}, url = fileUrl(j.dir, o.file), name = o.file.split("/").pop();
-  const cv = el("canvas", { "data-url": url, title: "play / stop" }), meta = el("div", { class: "meta" });
-  const base = [o.seed != null ? "seed " + o.seed : null, name.split(".").pop().toUpperCase()].filter(Boolean);
-  meta.textContent = base.join(" · ");
-  cv._meta = w => { meta.textContent = [fmtT(w.dur).replace(/^(\d+) s$/, (m, s) => (+w.dur).toFixed(2) + " s"), `${(w.rate / 1000).toFixed(w.rate % 1000 ? 1 : 0)} kHz`, w.chans === 1 ? "mono" : "stereo", ...base].join(" · "); };
-  cv.addEventListener("click", () => play(url, name, cv));
-  io.observe(cv);
+  const snd = soundRow(url, name, { sub: o.seed != null ? "seed " + o.seed : "" });
   const r = (j.ratings || {})[o.file] || 0;
   const stars = el("span", { class: "stars" }, ...[1, 2, 3, 4, 5].map(n => el("button", { type: "button", class: n <= r ? "on" : "", text: "★", "aria-label": `${n} star${n > 1 ? "s" : ""}`,
     onclick: async () => { try { j.ratings = (await api("/api/rate", { dir: j.dir, file: o.file, stars: n === r ? 0 : n })).ratings; drawGallery(); } catch (e) { toast(e.message, true); } } })));
@@ -844,7 +1320,7 @@ function card(j, o) {
   const cmd = j.command + (o.seed != null && !/--seed/.test(j.command) ? ` --seed ${o.seed}` : "");
   return el("div", { class: "card gcard" },
     el("div", { class: "t" }, el("b", { text: name, title: o.file }), el("span", { class: "badge", text: (E.icon || "") + " " + (E.name || j.engine) })),
-    cv, meta,
+    snd,
     j.params.prompt ? el("div", { class: "p", text: textFor(j.params, o.file), title: j.params.prompt }) : null,
     el("div", { class: "t" }, stars, el("span", { class: "btnrow" },
       el("button", { type: "button", text: "Load", title: "put this take's settings back in the form", onclick: () => loadSettings(j.params, o.seed) }),
@@ -855,7 +1331,7 @@ function card(j, o) {
       ...(o.scores || []).map(s => el("a", { class: "b", href: fileUrl(j.dir, s, true), text: "⬇ " + s.split(".").pop(), title: "tracker / MIDI score" })),
       el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
       j.params.ref ? el("button", { type: "button", text: "ref ▶", title: "hear the reference this take was steered by", onclick: () => play(fileUrl(j.dir, "input-" + j.params.ref), "reference: " + j.params.ref) }) : null,
-      el("button", { type: "button", text: "📂", title: "open this job's folder", onclick: () => api("/api/open", { target: { folder: true, dir: j.dir } }).catch(e => toast(e.message, true)) })));
+      openBtn({ dir: j.dir, file: o.file }, "open this sound in its app, a program from Setup, or its folder")));
 }
 function loadSettings(p, seed) {
   readForm();
@@ -970,10 +1446,10 @@ function keyRow(r) {
 }
 function detail(r, takes) {
   const S = SET.set, k = r.key, cur = heard[k] || (S.picks[k] && S.picks[k] !== "now" ? S.picks[k] : takes[0].take), i = Math.max(0, takes.findIndex(t => t.take === cur)), t = takes[i];
-  const cvA = el("canvas", { title: "play / stop" }), cvB = el("canvas", { title: "play / stop" }), hasNow = (SET.now[k] || []).length;
-  cvA.onclick = () => play(takeUrl(t), `${k} · take ${tlabel(t, i)}`); cvB.onclick = () => hasNow && play(nowUrl(k), k + " · in the game now");
-  const left = el("div", { style: "display:grid;gap:6px;min-width:0" }, el("div", { class: "wv" }, el("span", { text: "take " + tlabel(t, i) }), cvA), hasNow ? el("div", { class: "wv" }, el("span", { text: "now" }), cvB) : null);
-  peaksFor(takeUrl(t)).then(w => drawPeaks(cvA, w)); if (hasNow) peaksFor(nowUrl(k)).then(w => drawPeaks(cvB, w));
+  const hasNow = (SET.now[k] || []).length;
+  const left = el("div", { style: "display:grid;gap:8px;min-width:0" },
+    soundRow(takeUrl(t), `${k} · take ${tlabel(t, i)}`, { title: "take " + tlabel(t, i), sub: t.seed != null ? "seed " + t.seed : "" }),
+    hasNow ? soundRow(nowUrl(k), k + " · in the game now", { title: "now in the game", titleTip: (SET.now[k] || [])[0] }) : null);
   const flagged = (S.flags[k] || []).includes(t.take);
   const promptIn = el("input", { value: r.prompt, "aria-label": "Prompt for " + k });
   const rc = el("div", { class: "recipe" },
@@ -985,7 +1461,9 @@ function detail(r, takes) {
       el("button", { type: "button", text: flagged ? "Unflag" : "Flag", onclick: () => mark(k, flagged ? "unflag" : "flag", t.take) }),
       el("button", { type: "button", text: "Copy CLI", onclick: e => copyText((t.command || "") + (t.seed != null && !/--seed/.test(t.command || "") ? " --seed " + t.seed : ""), e.target) }),
       el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this take", onclick: () => findFrom({ take: t.take }, `${k} take ${tlabel(t, i)}`) }),
-      el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) })),
+      el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) }),
+      openBtn({ dir: t.job, file: t.file }, "open this take in…"),
+      hasNow ? el("button", { type: "button", text: "↗ now", title: "open the game's current file in…", onclick: e => openMenu({ set_now: { id: setId, key: k } }, e.currentTarget) }) : null),
     el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
       try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
   const kind = S.theme.export.master && S.theme.export.master !== "off" ? S.theme.export.master : S.theme.engine === "narrate" ? "speech" : "sfx";
@@ -1153,11 +1631,11 @@ function drawVoices() {
     const state = !j ? "" : o ? "" : j.status === "failed" ? "failed" : j.status === "cancelled" ? "cancelled" : "rendering…";
     return el("div", { class: "style", style: "grid-template-columns:auto minmax(0,1fr) auto auto" },
       el("span", { class: "badge " + ({ A: "ok", B: "ac", C: "warn", D: "bad" }[gr] || ""), text: gr || "?", title: "Kokoro's training grade", style: "grid-row:1 / span 2;align-self:center" }),
-      el("b", { text: v }), el("button", { type: "button", text: o ? "▶" : state || "▶", disabled: !o, title: j && j.error ? j.error : "", style: "grid-row:1 / span 2;grid-column:3",
-        onclick: () => play(fileUrl(j.dir, o.file), v) }),
+      el("b", { text: v }), el("span", { class: "dim mono", text: o ? "" : state, title: j && j.error ? j.error : "", style: "grid-row:1 / span 2;grid-column:3;font-size:11px" }),
       el("button", { type: "button", text: "Use", style: "grid-row:1 / span 2;grid-column:4", onclick: () => { readForm(); eng = "narrate"; store.set("engine", eng);
         cur().voice = v; cur().speed = $("vSpeed").value; cur().pitch = $("vPitch").value; store.set("form", F); showEngine(); toast(`Narrate now speaks with ${v}`); } }),
-      el("span", { text: d.replace(/\s*\[[A-D]\]/, ""), style: "grid-column:2" }));
+      el("span", { text: d.replace(/\s*\[[A-D]\]/, ""), style: "grid-column:2" }),
+      o ? el("div", { style: "grid-column:2 / span 3" }, soundRow(fileUrl(j.dir, o.file), v, { compact: true })) : null);
   }))));
 }
 for (const [id, out, fmt] of [["vSpeed", "vSpeedV", v => (+v).toFixed(2) + "×"], ["vPitch", "vPitchV", v => (v > 0 ? "+" : "") + v + " st"]]) $(id).addEventListener("input", () => $(out).textContent = fmt($(id).value));
@@ -1195,8 +1673,7 @@ async function findSearch() {
     const r = await api("/api/similar/search", { ...FQ, within: $("findWithin").value.trim(), k: +$("findK").value });
     if (!r.results.length) { $("findResults").replaceChildren(el("div", { class: "empty", text: "No matches in the index. Index more folders, or clear the folder filter." })); return; }
     $("findResults").replaceChildren(...r.results.map(x => {
-      const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = el("canvas", { title: "play / stop", "data-url": url });
-      cv.addEventListener("click", () => play(url, name, cv)); io.observe(cv);
+      const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = soundRow(url, name, { compact: true });
       return el("div", { class: "fres" },
         el("span", { class: "sc", text: x.score + "%", title: "how alike, 100 = the same" }),
         cv,
@@ -1209,6 +1686,7 @@ async function findSearch() {
               cur().ref = u.file; store.set("form", F); showEngine(); toast(`Reference: ${name}. Describe what to make from it and press RENDER.`); } catch (e) { toast(e.message, true); } } }),
           el("button", { type: "button", text: "🔎", title: "find sounds like this one", onclick: () => findFrom({ path: x.path }, name) }),
           el("button", { type: "button", text: "📂", title: "open its folder", onclick: () => api("/api/open", { target: { indexed: x.path } }).catch(e => toast(e.message, true)) }),
+          openBtn({ path: x.path }, "open this sound in…"),
           el("button", { type: "button", text: "Copy path", onclick: e => copyText(x.path, e.target) })));
     }));
   } catch (e) { $("findResults").replaceChildren(el("div", { class: "empty", text: e.message })); }
@@ -1306,12 +1784,30 @@ $("srvRefresh").addEventListener("click", loadServers);
 function drawApps() {
   for (const [key, host] of [["audio_apps", "audioApps"], ["folder_apps", "folderApps"]]) {
     $(host).replaceChildren(...(SETUP[key] || []).map((a, i) => el("div", { class: "app3" },
-      ...["name", "exec", "args"].map(f => { const inp = el("input", { value: a[f] || "", placeholder: { name: "name", exec: "program", args: "{}" }[f], "aria-label": f }); inp.addEventListener("input", () => a[f] = inp.value); return inp; }),
+      ...["name", "exec", "args"].map(f => { const inp = el("input", { value: a[f] || "", placeholder: { name: "name", exec: "program", args: "{}" }[f], "aria-label": f }); inp.addEventListener("input", () => a[f] = inp.value);
+        if (f !== "exec") return inp;
+        return el("div", { class: "pathrow" }, inp, el("button", { type: "button", text: "Browse…", title: "pick the program", onclick: async () => { const p = await pickPath({ kind: "file", start: a.exec && a.exec.includes("/") ? a.exec : "", title: "Choose the program" }); if (p) { inp.value = a.exec = p; if (!a.name) { a.name = p.split("/").pop(); drawApps(); } } } })); }),
       el("button", { type: "button", text: "✕", "aria-label": "remove", onclick: () => { SETUP[key].splice(i, 1); drawApps(); } }))));
   }
 }
 document.querySelectorAll("[data-addapp]").forEach(b => b.addEventListener("click", () => { SETUP[b.dataset.addapp].push({ name: "", exec: "", args: "{}" }); drawApps(); }));
 $("saveSetup").addEventListener("click", async () => { try { SETUP = await api("/api/setup", SETUP); drawApps(); $("setupToast").textContent = "Saved"; setTimeout(() => $("setupToast").textContent = "", 3000); } catch (e) { $("setupToast").textContent = e.message; } });
+
+/* ---- Browse / Open on the fixed path fields ---- */
+function addPathTools(id, opts) { const inp = $(id), row = el("div", { class: "pathrow" }); inp.replaceWith(row); row.append(inp, pathTools(inp, opts)); }
+addPathTools("edFolder", { kind: "dir", title: "Where should picks be exported?" });
+addPathTools("findFolders", { kind: "dir", multi: true, title: "Add a folder to search" });
+addPathTools("findWithin", { kind: "dir", title: "Only look inside this folder" });
+$("findWithin").addEventListener("change", () => FQ && findSearch());
+async function loadListInto(target, after) {
+  const p = await pickPath({ kind: "file", ext: EXT.text, title: "Choose a list (.txt)" }); if (!p) return;
+  try { const j = await api("/api/input/from-path", { path: p }); target.value = j.text ?? ""; after?.(); toast("Loaded " + p.split("/").pop()); } catch (e) { toast(e.message, true); }
+}
+$("promptLoad").addEventListener("click", () => loadListInto($("prompt"), () => { readForm(); queueCommand(); }));
+$("edManifest").closest("label").after(el("div", { class: "btnrow", style: "margin-top:-6px" }, el("button", { type: "button", text: "Load a list from disk…", onclick: () => loadListInto($("edManifest")) })));
+$("findDrop").append(el("button", { type: "button", class: "dbtn", text: "Browse…", style: "margin-left:auto", onclick: async e => {
+  e.stopPropagation(); const p = await pickPath({ kind: "file", ext: EXT.audio, title: "Find sounds like…" }); if (!p) return;
+  try { const j = await api("/api/input/from-path", { path: p }); findFrom({ input: j.file }, p.split("/").pop()); } catch (err) { toast(err.message, true); } } }));
 
 /* ================= boot ================= */
 async function boot() {

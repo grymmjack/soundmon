@@ -53,6 +53,7 @@ AUDIO_EXT = (".wav", ".flac", ".ogg", ".mp3", ".opus")
 SCORE_EXT = (".mod", ".rad", ".mid")
 INPUT_EXT = (".mid", ".midi", ".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a", ".sbi", ".txt")
 HOME = os.path.realpath(os.path.expanduser("~"))
+LAN = False          # --lan: other devices can reach the page, so disk browsing / opening stays with this machine
 IS_WIN, IS_MAC = sys.platform.startswith("win"), sys.platform == "darwin"
 
 # Engines: what the form calls them -> how soundmon is told, and what they need.
@@ -427,6 +428,58 @@ def home_path(path, must_exist=True):
     if must_exist and not os.path.exists(full):
         raise ValueError(f"not found: {path}")
     return full
+
+
+DISK_AUDIO = (".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a")
+
+
+def browse(path, kind="any", exts=None, hidden=False, gallery=None):
+    """One folder of the user's home for the Browse dialog: sub-folders, then files (filtered by
+    extension), breadcrumbs back to home, and shortcuts. Home-confined like every other path here."""
+    full = home_path(path or "~")
+    if os.path.isfile(full):
+        full = os.path.dirname(full)
+    dirs, files = [], []
+    try:
+        with os.scandir(full) as it:
+            for e in it:
+                if not hidden and e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir():
+                        dirs.append(e.name)
+                    elif kind != "dir" and e.is_file() and (not exts or e.name.lower().endswith(exts)):
+                        st = e.stat()
+                        files.append({"name": e.name, "size": st.st_size, "mtime": int(st.st_mtime)})
+                except OSError:
+                    continue
+    except OSError as e:
+        raise ValueError(f"can't read {full}: {e.strerror or e}")
+    dirs.sort(key=str.lower)
+    files.sort(key=lambda f: f["name"].lower())
+    crumbs, p = [], full
+    while True:
+        crumbs.append({"name": "~" if p == HOME else os.path.basename(p), "path": p})
+        if p == HOME or os.path.dirname(p) == p:
+            break
+        p = os.path.dirname(p)
+    places = [{"name": "Home", "path": HOME}]
+    for label, d in (("Gallery", gallery), ("Dropped files", INPUTS), ("Music", "~/Music"), ("Downloads", "~/Downloads"),
+                     ("Desktop", "~/Desktop"), ("Documents", "~/Documents"), ("git", "~/git")):
+        if d and os.path.isdir(os.path.expanduser(d)):
+            places.append({"name": label, "path": os.path.realpath(os.path.expanduser(d))})
+    setup = load_setup()
+    for f in setup.get("similar_folders", []) + [g.get("path", "") for g in setup.get("game_folders", [])]:
+        try:
+            d = home_path(f)
+        except ValueError:
+            continue
+        if os.path.isdir(d) and all(x["path"] != d for x in places):
+            places.append({"name": os.path.basename(d) or d, "path": d})
+    cap = 3000
+    return {"path": full, "home": HOME, "parent": None if full == HOME else os.path.dirname(full), "crumbs": crumbs[::-1],
+            "dirs": dirs[:cap], "files": files[:cap], "more": max(0, len(dirs) + len(files) - 2 * cap), "places": places,
+            "sep": os.sep}
 
 
 def os_opener(is_dir):
@@ -1128,6 +1181,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _local(self):
+        """Is the browser on this machine? Always true unless --lan opened the page to other devices."""
+        return not LAN or self.client_address[0] in ("127.0.0.1", "::1") or self.client_address[0].startswith("127.")
+
     def _file(self, path, ctype, download=None):
         """Serve a file, honouring Range so the browser can seek long music."""
         try:
@@ -1199,6 +1256,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "setup_folders": load_setup()["similar_folders"]})
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
+        if u.path in ("/api/browse", "/api/disk/file") and not self._local():
+            return self._json({"error": "browsing this computer's files only works on the computer running soundmon-gui"}, 403)
+        if u.path == "/api/browse":                    # the Browse dialog: one folder under home
+            q = urllib.parse.parse_qs(u.query)
+            exts = tuple(e.strip().lower() for e in (q.get("ext") or [""])[0].split(",") if e.strip()) or None
+            try:
+                return self._json(browse((q.get("path") or ["~"])[0], (q.get("kind") or ["any"])[0], exts,
+                                         (q.get("hidden") or [""])[0] == "1", self.gallery))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if u.path == "/api/disk/file":                 # hear an audio file picked in Browse (audio only, under home)
+            try:
+                p = home_path(urllib.parse.parse_qs(u.query).get("path", [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            ext = os.path.splitext(p)[1].lower()
+            if not os.path.isfile(p) or ext not in DISK_AUDIO:
+                return self._json({"error": "only audio files can be played"}, 404)
+            return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
+        if u.path == "/api/input":                     # hear a file dropped on the form (reference, recording)
+            try:
+                p = input_path(urllib.parse.parse_qs(u.query).get("name", [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            ext = os.path.splitext(p)[1].lower()
+            return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
         if u.path == "/api/similar/file":              # play a Find result: only files in the index
             p = urllib.parse.parse_qs(u.query).get("path", [""])[0]
             if p not in find_index().data["files"] or not os.path.isfile(p):
@@ -1308,6 +1391,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except LookupError as e:
                     return self._json({"error": str(e)}, 501)
                 return self._json({"query": os.path.basename(q), "results": idx.search(q, k, within=within or None)})
+            if u.path == "/api/input/from-path":        # Browse picked a file on disk: copy it in, like a drop
+                if not self._local():
+                    raise ValueError("picking files from this computer only works on the computer running soundmon-gui")
+                p = home_path(body.get("path"))
+                if not os.path.isfile(p):
+                    raise ValueError("pick a file, not a folder")
+                name = safe_name(os.path.basename(p), 96)
+                if not name.lower().endswith(INPUT_EXT):
+                    raise ValueError(f"not a file soundmon reads: {os.path.basename(p)} (MIDI, WAV/FLAC/OGG/MP3, .sbi or .txt)")
+                if os.path.getsize(p) > 200 * 1024 * 1024:
+                    raise ValueError("file must be under 200 MB")
+                os.makedirs(INPUTS, exist_ok=True)
+                out = unique_path(INPUTS, name)
+                shutil.copy2(p, out)
+                res = {"file": os.path.basename(out), "from": p}
+                if name.lower().endswith(".txt"):
+                    with open(out, encoding="utf-8", errors="replace") as fh:
+                        res["text"] = fh.read(200000)
+                return self._json(res)
             if u.path == "/api/similar/use":            # a Find result becomes a reference (copied into inputs)
                 p = body.get("path")
                 if p not in find_index().data["files"] or not os.path.isfile(p):
@@ -1359,7 +1461,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Only programs saved in Setup can be launched: the request names one, it can't supply a command.
                 setup, key, t = load_setup(), str(body.get("app") or "os"), body.get("target") or {}
                 is_dir = bool(t.get("folder")) or bool(t.get("indexed"))
-                if t.get("indexed"):                        # a Find result: open the folder it is in
+                if t.get("path") or t.get("input") or t.get("set_now"):
+                    if t.get("path") and not self._local():
+                        raise ValueError("opening paths only works on the computer running soundmon-gui")
+                    # any file or folder under home (a path field, a Browse pick, a Find result, the game's file)
+                    if t.get("input"):
+                        path = input_path(t["input"])
+                    elif t.get("set_now"):
+                        path = self.sets.now_path(self.sets.load(t["set_now"].get("id")), t["set_now"].get("key"))
+                    else:
+                        path = home_path(t["path"])
+                    if t.get("reveal") and os.path.isfile(path):
+                        path = os.path.dirname(path)
+                    is_dir = os.path.isdir(path)
+                elif t.get("indexed"):                        # a Find result: open the folder it is in
                     if t["indexed"] not in find_index().data["files"]:
                         raise ValueError("that file isn't in the index")
                     path = os.path.dirname(t["indexed"])
@@ -1487,6 +1602,8 @@ def main():
     Handler.jobs = JobQueue(Handler.gallery)
     Handler.sets = setsmod.Sets(SETS_ROOT, Handler.gallery, home_path)
     threading.Thread(target=watch_server, daemon=True).start()
+    global LAN
+    LAN = bool(args.lan)
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     try:
         srv = QuietServer((host, args.port), Handler)
