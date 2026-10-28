@@ -694,13 +694,37 @@ Each sound can be fine alone and still grate when a fight stacks twenty of them.
 It uses no limiter and never normalizes to full scale. Voices are left alone unless
 they're bright.
 
+**Bright sounds come out quieter, on purpose.** The make-up gain stops at +3 dB, and a
+sound with over 40 % of its energy above 10 kHz (white noise, a whistle) gets none: the
+level the EQ and low-pass took away is the treatment (NEON-CASTER's design). White noise
+goes from −14.4 to −23.3 LUFS at its loudest 400 ms; the line says
+`(bright: no make-up gain, by design)` whenever this happens.
+
 ```bash
 soundmon --master sfx/                       # -> sfx/mastered/… (never overwrites)
 soundmon --master assets/ --output-to out/   # speech/ narration/ voice/ folders are treated as voices
 soundmon --master hit.wav --master-kind sfx --flac
 ```
 
-Each line reports what changed, e.g. `above 2.5k 52%→26%  harsh 0.10→0.00s  gain +1.4 dB  peak -1.0 dBTP`.
+- **Never overwrites a source.** `--output-to` may not be the folder itself or a folder
+  inside it (except its own `mastered/`), and a file that would land on a source is
+  skipped.
+- Output is a 16-bit WAV at the source's rate and channels, named after the source.
+  When two sources share a name (`hit.wav` and `hit.flac`), the `.wav` keeps it and the
+  others keep their extension in theirs (`hit.flac.wav`).
+- Skipped when mastering a folder: `mastered/`, `takes/`, backups, folders starting with
+  `_` or `.` (soundmon-gui's `_mastered/` and `_analysis/`), and hidden files. Reads
+  WAV, FLAC, OGG, MP3, Opus, M4A and AIFF.
+- Voice or effect: the **nearest** folder that says either decides (`speech/`,
+  `narration/`, `voice/`, `vo/`, `dialog/` against `sfx/`, `fx/`, `sounds/`,
+  `effects/`, `foley/`), so `voice/demo/sfx/hit.wav` is an effect and
+  `--master game/speech` masters voices. `--master-kind` overrides it.
+- True peak is measured 4× oversampled and the written file is measured again; one
+  that lands over −1 dBTP (or an `--ogg` encode that does) is written again quieter.
+- A silent file is written as it is; an unreadable one says why (ffmpeg's reason);
+  one with NaN samples is refused.
+
+Each line reports what changed, e.g. `above 2.5k 52%→26%  harsh 0.10→0.00s  loudest -14.9→-14.9 LUFS  gain +1.4 dB  peak -1.1 dBTP`.
 On NEON-CASTER it took the effects' energy above 2.5 kHz from 34 % to 21 %. Needs
 numpy and ffmpeg, but no ComfyUI.
 
@@ -745,7 +769,11 @@ soundmon "laser zap" -n 8 --match-tone our_laser.wav              # sit with the
 - `--match-tone REF` runs after rendering. It compares the take's 1/3-octave curve
   with REF's, applies the difference (smoothed, at most ±9 dB), and sets the level to
   REF's loudest 400 ms, never past −1 dBTP. It works with every engine; for CPU engines
-  you can also do it afterwards with `--master DIR --master-like REF`.
+  you can also do it afterwards with `--master DIR --master-like REF`. It keeps the file
+  sample-exact (same length, nothing shifted — a `--loop` stays seamless) and in its own
+  sample format (8-bit stays 8-bit, 24-bit stays 24-bit). A format-locked take (8-bit,
+  or under 16 kHz: `--format amiga`, `sb`, `nes`, `gameboy`…) only has its level matched,
+  and only ever downwards, so the crush is neither smoothed nor magnified.
 - **Not yet proven on a GPU.** The graph is checked here; whether SA3's 8-step sampler
   gives good variations from an encoded reference needs an rtx run. If SA3 does badly,
   try `--engine sao`, the classic Stable Audio Open audio-to-audio.
@@ -774,11 +802,18 @@ taken from its audible part:
 - **length**.
 
 A search compares every feature on the same scale and weights timbre highest. Results
-show a 0–100 "how alike" score and which aspects match. Identical copies show once.
+show a 0–100 "how alike" score and which aspects match. Identical copies (and links to
+the same file) show once, files deleted since indexing are left out, and the query itself
+never comes back. The fingerprint doesn't depend on volume, and the score's scale comes
+from the whole index, so a near-duplicate reads high however few files `--in` leaves.
 
 The index is `~/soundmon-gallery/similar/index.json`. It skips `mastered/`, backups, and
-folders starting with `_` or `.`, and reads the first 30 s of long files. It needs numpy
-and ffmpeg, but no ComfyUI.
+folders starting with `_` or `.`, and reads the first 30 s of long files. Its summary
+counts unreadable files, silent or too-short ones, and anything skipped (dangling links,
+folders it can't read) separately; a file that failed isn't read again until it changes.
+Two `--index` runs at once are safe (a lock, and each merges the other's work). An index
+made by an older fingerprint is reset and says so: re-run `--index`. It needs numpy and
+ffmpeg, but no ComfyUI.
 
 ### Compressing output (`--ogg`)
 
@@ -1147,7 +1182,11 @@ python tools/instruments.py "out/track - TITLE"     # stems.py runs it at the en
 `Renoise/*.xrni` (drag into Renoise's instrument list; keys as MIDI plays them) and, where
 Bitwig is installed, `Bitwig/*.bwpreset` - its own Drum Machine (a Sampler a pad) and Samplers,
 written by `tools/bwpreset.py`, which reads and writes Bitwig's binary preset format.
-`instruments.py` and `bwpreset.py` need only Python's standard library. The whole walk-through,
+`instruments.py` and `bwpreset.py` need only Python's standard library. With `--bpm`, stems.py
+takes the tempo as given and fits only where the beats fall; without it, it fits a line through
+the beat tracker's beats (the tracker's own tempo is coarse: 129.5 for a 128 bpm track). The bar's
+first beat is where the kick lands hardest, and where the harmony changes when the kick doesn't
+decide (a kick on 1 and 3, or no drums). The whole walk-through,
 from the prompt to the sampler, is [INFINITE-SAMPLES.md](INFINITE-SAMPLES.md).
 
 ### Checking output (`tools/spectral-check.py`)
@@ -1160,6 +1199,12 @@ below the 500–2000 Hz reference band:
 tools/spectral-check.py --min 20 render.wav              # WAV: expect Nyquist
 tools/spectral-check.py --min 17 assets/music/*.ogg      # OGG: Vorbis rolls off
 ```
+
+The reference band falls back to the file's loudest octave when 500–2000 Hz holds nothing
+but leakage (a pure tone under 500 Hz), and the cutoff is searched above the loudest content,
+so a pure tone reads just above its pitch. Files with NaN/inf samples fail; files too short
+or silent to measure are listed (and fail a `--min` check); M4A and anything else soundfile
+can't open is decoded with ffmpeg.
 
 > **Compare like with like.** Vorbis imposes its own rolloff, so an OGG of
 > perfect source still reads ~17 kHz — that is the codec, not a defect. And a

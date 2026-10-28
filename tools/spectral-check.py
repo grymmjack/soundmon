@@ -43,17 +43,45 @@ except ImportError:
 
 REF_LO, REF_HI = 500.0, 2000.0     # the band everything is measured against
 DROP_DB = 40.0                     # how far below reference counts as "gone"
+REF_FALLBACK_DB = 70.0             # reference band this far under the loudest octave (only leakage: a
+                                   # pure tone below 500 Hz) - use that octave. Bass-heavy SFX sit at -40..-60
+
+
+def read(path):
+    """(mono samples, rate): soundfile, else ffmpeg (m4a/AAC, opus... whatever it decodes)."""
+    try:
+        audio, sr = sf.read(path)
+        return (audio.mean(axis=1) if audio.ndim > 1 else audio), sr
+    except Exception as e:
+        import shutil
+        import subprocess
+        if not shutil.which("ffmpeg"):
+            raise
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate",
+                            "-of", "csv=p=0", path], capture_output=True, text=True)
+        try:
+            sr = int(r.stdout.strip().split(",")[0])
+        except ValueError:
+            raise e
+        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-ac", "1", "-f", "f32le", "-"],
+                           capture_output=True)
+        if r.returncode:
+            lines = r.stderr.decode(errors="replace").strip().splitlines()
+            raise RuntimeError(lines[-1] if lines else "ffmpeg couldn't decode it")
+        return np.frombuffer(r.stdout, dtype=np.float32).astype(np.float64), sr
 
 
 def cutoff(path):
-    """Return (cutoff_khz, samplerate, duration, band_table)."""
-    audio, sr = sf.read(path)
-    mono = audio.mean(axis=1) if audio.ndim > 1 else audio
+    """Return (cutoff_khz, samplerate, duration, band_table, non-finite samples)."""
+    mono, sr = read(path)
+    bad = int((~np.isfinite(mono)).sum())
+    if bad:                        # NaN/inf: broken audio, whatever its spectrum says
+        return None, sr, len(mono) / sr, [], bad
     win = 16384
     if len(mono) < win:            # very short one-shots: use what there is
         win = 1 << max(8, (len(mono) - 1).bit_length() - 1)
     if win < 256:
-        return None, sr, len(mono) / sr, []
+        return None, sr, len(mono) / sr, [], 0
 
     acc = np.zeros(win // 2 + 1)
     frames = 0
@@ -61,15 +89,26 @@ def cutoff(path):
         acc += np.abs(np.fft.rfft(mono[i:i + win] * np.hanning(win)))
         frames += 1
     if not frames:
-        return None, sr, len(mono) / sr, []
+        return None, sr, len(mono) / sr, [], 0
     acc /= frames
     freq = np.fft.rfftfreq(win, 1 / sr)
 
+    # The reference: the 500-2000 Hz band, unless it holds almost nothing (a 300 Hz tone, a bass
+    # line): then the file's own loudest octave. Measured against an empty band, a pure 440 Hz tone
+    # read 22 kHz and a 300 Hz one 2.3 kHz; now both read just above their pitch.
     ref_sel = (freq >= REF_LO) & (freq < REF_HI)
-    ref = acc[ref_sel].mean() if ref_sel.any() else acc.max()
+    octs = [acc[(freq >= lo) & (freq < 2 * lo)].mean() for lo in 2.0 ** np.arange(5, 15) if (freq >= lo).any()
+            and ((freq >= lo) & (freq < 2 * lo)).any()]
+    top = max(octs) if octs else acc.max()
+    ref = acc[ref_sel].mean() if ref_sel.any() else top
+    if ref < top * 10 ** (-REF_FALLBACK_DB / 20):
+        ref = top
+    if top <= 0:                   # digital silence: no spectrum to have a cutoff
+        return None, sr, len(mono) / sr, [], 0
     db = 20 * np.log10(acc / (ref + 1e-12) + 1e-12)
 
     below = np.where(db < -DROP_DB)[0]
+    below = below[below > int(np.argmax(acc))]     # a cutoff is above the loudest content, not under it
     # Ignore an early dip: the cutoff is where it drops AND stays down.
     cut = None
     for idx in below:
@@ -84,7 +123,7 @@ def cutoff(path):
                    (16000, 18000), (18000, 22000)):
         sel = (freq >= lo) & (freq < hi)
         bands.append((lo, hi, db[sel].mean() if sel.any() else float("-inf")))
-    return cut / 1000.0, sr, len(mono) / sr, bands
+    return cut / 1000.0, sr, len(mono) / sr, bands, 0
 
 
 def main():
@@ -98,12 +137,19 @@ def main():
     worst, failures = None, 0
     for p in a.files:
         try:
-            cut, sr, dur, bands = cutoff(p)
+            cut, sr, dur, bands, nonfinite = cutoff(p)
         except Exception as e:
             print(f"  {os.path.basename(p):<34} unreadable: {e}")
             failures += 1
             continue
-        if cut is None:
+        if nonfinite:
+            print(f"  {os.path.basename(p):<34} {nonfinite} NaN/inf sample(s) ← BROKEN")
+            failures += 1
+            continue
+        if cut is None:            # too short or silent: say so (it can't pass a --min check)
+            print(f"  {os.path.basename(p):<34} {dur:6.3f}s  too short or silent to measure"
+                  + (" ← can't check" if a.min is not None else ""))
+            failures += a.min is not None
             continue
         nyq = sr / 2000.0
         bad = a.min is not None and cut < a.min

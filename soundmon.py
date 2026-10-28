@@ -2119,7 +2119,7 @@ def _engine_flags(a):
                      # `--blip --narrate-file lines.txt` blips that manifest (the GUI sends it): one engine
                      ((a.narrate or a.narrate_file) and not (a.blip or a.blip_file), "--narrate"),
                      (a.record or a.record_file, "--record"), (a.song, "--song"), (a.music, "--music"),
-                     (a.master, "--master"), (a.index or a.similar, "--index/--similar")):
+                     (a.master is not None, "--master"), (a.index is not None or a.similar is not None, "--index/--similar")):
         if on:
             out.append(flag)
     return out
@@ -2164,7 +2164,7 @@ def check_args(a, p):
     engine = eng[0] if eng else None
     cpu = engine in CPU_ENGINES
     has_input = bool(a.prompt or a.batch or a.batch_file or a.narrate_file or a.record_file or a.blip_file
-                     or a.from_midi or a.from_audio or a.master or a.index or a.similar)
+                     or a.from_midi or a.from_audio or a.master is not None or a.index is not None or a.similar is not None)
     if engine is None and not has_input:
         return None
     # An engine with nothing to work on was answered with the full help and exit 0.
@@ -2742,7 +2742,7 @@ def main():
     # no model of any kind. It shares --narrate's manifest parser and the whole
     # output tail, so a hand-voiced pack and a generated one are interchangeable.
     # Similarity search reads files that already exist — no model, no server.
-    if a.index or a.similar:
+    if a.index is not None or a.similar is not None:   # `--index ''` is an empty folder list, not "not given"
         # -n defaults to 1 (one take), which similar.py can't tell from a typed `-n 1`; this can.
         a.similar_k = a.number if given("-n", "--number") else 20
         sys.path.insert(0, _SCRIPT_DIR)
@@ -2750,7 +2750,7 @@ def main():
         similar.run(a)
         return
     # Mastering works on files that already exist — no model, no server.
-    if a.master:
+    if a.master is not None:
         sys.path.insert(0, _SCRIPT_DIR)
         import master
         master.run(a, slug, to_ogg, loudness_normalize, to_flac)

@@ -487,11 +487,23 @@ Aliases live in `servers.json` (gitignored — real LAN IPs stay out of the repo
   difference (each curve normalised by its own 125 Hz–8 kHz mean), smoothed, ±9 dB,
   eased at the extremes, through ffmpeg `firequalizer`, then the gain step. As with
   `master()`, that gain step is the only −1 dBTP guard.
+  **`firequalizer` is linear-phase: it delays everything by its `delay` (10 ms) and adds
+  as much at the end.** match_tone trims both off (measured from the frame counts, not
+  assumed) so the output is sample-exact — it used to add 20 ms per run and shift a loop
+  seam. It also keeps the source's sample format (u8/s24/FLAC depth), and a format-locked
+  file (8-bit or < 16 kHz) gets level only, attenuate-only: an EQ smooths the crush.
+  selfcheck asserts length, alignment and format.
 - **`similar.py` imports nothing heavy at module level** (the GUI imports it). Its
   fingerprint is DSP only, from the audible part of the file (trimmed at −50 dB):
   game sounds are often padded with silence, and before the trim the padding decided
   the match. **Bump `METHOD` whenever `features()` changes**: an index made with
-  another method rebuilds itself rather than mixing two kinds of vector. The GUI's
+  another method rebuilds itself rather than mixing two kinds of vector (and says so).
+  The fingerprint is volume-invariant by construction (scaled to its own peak, mel floor
+  −60 dB, flux floor 60 dB under the loudest bin); selfcheck asserts it. Scores are scaled
+  by the median pairwise distance of the WHOLE index, never the candidates — a
+  candidate-relative scale scored an identical file at −6 dB as 50 % when it was alone.
+  `Index.save()` locks `index.json.lock` and merges with what is on disk: GUI and CLI
+  can index at the same time. The GUI's
   `/api/similar/file` serves only paths that are in the index, never arbitrary paths.
 
 ## Run tools/selfcheck.py after touching an engine
@@ -613,7 +625,16 @@ is one no-build page. Rules that keep it honest:
   Sets, ▶ Mastered, master on export). Mastered previews go to `<job>/_mastered/<kind>/`
   and measurements to `_analysis/`; `scan_outputs` skips `_` folders so they never show
   up as takes. The chain has **no limiter on purpose**: the final gain step is the only
-  thing keeping a sound under −1 dBTP, and selfcheck asserts it. A lossy export (OGG)
+  thing keeping a sound under −1 dBTP, and selfcheck asserts it. That step aims 0.1 dB
+  under, measures true peak 4× oversampled with soxr (`master.true_peak`; ffmpeg's
+  ebur128 prints 0.1 dB and doesn't oversample 96 kHz), measures the WRITTEN file and
+  writes it again quieter if it's over. **Pin `aformat=sample_fmts=dbl` after soxr's
+  `aresample`**: unpinned, it negotiated an integer format and read a +6 dBFS float file
+  as 0.0 dB. The make-up gain caps (+3 dB, none when air > 40 %) are neon-caster's
+  design, not a bug: bright sounds come out quieter on purpose.
+  `analyse()` streams the file in 10 s chunks and keeps ~40 band sums per frame (a 10-min
+  file took 2.2 GB as one frame matrix); a silent file returns `"silent": True` with
+  neutral numbers — the GUI measures whatever is dropped on it. A lossy export (OGG)
   can overshoot again between samples, so `sets.convert()` measures the OGG it wrote
   and re-encodes quieter if needed.
 

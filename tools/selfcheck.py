@@ -284,6 +284,65 @@ def main():
             check("--similar ranks a sound's own kind first", all(ranks),
                   f"zap/thud/pad top-2 own kind: {ranks}")
 
+            # match_tone is sample-exact: firequalizer's 10 ms linear-phase delay (and its 10 ms
+            # tail) are trimmed, so a click stays on its sample and a --loop stays seamless. In
+            # place, twice: it used to grow 20 ms a run. And it keeps the source's sample format.
+            n_ = 44100
+            xc = 0.05 * np.sin(2 * np.pi * 300 * np.arange(n_) / 44100)
+            xc[5000] = 0.8
+            clk = os.path.join(mt, "click.wav")
+            sf.write(clk, xc, 44100, subtype="PCM_24")
+            _ms.match_tone(clk, clk, dark)
+            _ms.match_tone(clk, clk, dark)
+            y_, _ = sf.read(clk)
+            check("--match-tone keeps length, alignment and format (twice in place)",
+                  len(y_) == n_ and abs(int(np.argmax(np.abs(y_))) - 5000) <= 1 and sf.info(clk).subtype == "PCM_24",
+                  f"{len(y_) - n_:+d} samples, click at {int(np.argmax(np.abs(y_))) - 5000:+d}, {sf.info(clk).subtype}")
+
+            # --master never writes onto a source, and same-name sources don't collide.
+            import argparse as _ap
+            src_d = os.path.join(mt, "src")
+            os.makedirs(os.path.join(src_d, "sub"))
+            sf.write(os.path.join(src_d, "x.wav"), x * 0.5, 44100)
+            sf.write(os.path.join(src_d, "sub", "x.wav"), xc, 44100)
+            sf.write(os.path.join(src_d, "hit.wav"), xc, 44100)
+            sf.write(os.path.join(src_d, "hit.flac"), x * 0.5, 44100)
+            keep = open(os.path.join(src_d, "sub", "x.wav"), "rb").read()
+            ma = _ap.Namespace(master=src_d, master_like=None, master_kind="auto", output_to=os.path.join(src_d, "sub"),
+                               flac=False, ogg=False, keep_wav=False, ogg_quality=5)
+            refused = False
+            try:
+                _ms.run(ma, "x")
+            except SystemExit:
+                refused = True
+            ma.output_to = None
+            plan = sorted(os.path.relpath(d, src_d) for _, _, d in _ms._plan(list(_ms._walk(src_d)), src_d,
+                                                                               os.path.join(src_d, "mastered")))
+            check("--master never overwrites a source; hit.wav + hit.flac don't collide",
+                  refused and open(os.path.join(src_d, "sub", "x.wav"), "rb").read() == keep
+                  and len(set(plan)) == len(plan) == 4 and "mastered/hit.flac.wav" in plan,
+                  f"output inside the source refused: {refused}; planned {plan}")
+
+            # analyse() on silence (the GUI measures whatever is dropped on it) returns sanely.
+            sil = os.path.join(mt, "silence.wav")
+            sf.write(sil, np.zeros(4410), 44100)
+            a_ = _ms.analyse(sil, sonogram=True)
+            check("analyse() on silence: flagged, finite, no traceback",
+                  a_.get("silent") and all(np.isfinite(a_["bands"])) and np.isfinite(a_["tilt"])
+                  and a_["sonogram"]["cols"] >= 1 and _ms.chain(a_)[0] == ["anull"],
+                  f"silent={a_.get('silent')} tilt={a_['tilt']} lufs={a_['lufs']}")
+
+            # similar.py's fingerprint doesn't depend on volume (near-silent mel bands used to count).
+            z0 = os.path.join(lib, "zap0.wav")
+            zq = os.path.join(mt, "zap_quiet.wav")
+            zz, _ = sf.read(z0)
+            sf.write(zq, zz * 0.25, 44100)
+            dv = float(np.abs(np.array(_sim.features(z0)) - np.array(_sim.features(zq))).max())
+            top = ix.search(zq, k=1)
+            check("--similar: fingerprint volume-invariant, a -12 dB copy reads as near-identical",
+                  dv < 0.1 and top and os.path.basename(top[0]["path"]) == "zap0.wav" and top[0]["score"] >= 90,
+                  f"max feature change {dv:.3f}; top {top[0]['score'] if top else None}%")
+
     # --- tracker output -----------------------------------------------------
     # These four were ALL shipped broken and all were invisible to inspection:
     # correct-looking bytes, wrong interpretation. Only a replayer or arithmetic

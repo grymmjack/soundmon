@@ -1817,7 +1817,7 @@ async function findStatus() {
     const j = r.job;
     $("findCount").textContent = `${r.count} sound${r.count === 1 ? "" : "s"} indexed`;
     $("findStatus").textContent = j && j.running ? `Indexing ${j.done} / ${j.total || "…"}  ${j.current}`
-      : j && j.error ? `Indexing failed: ${j.error}` : j && j.stats ? `Indexed: ${j.stats.added} new or changed, ${j.stats.kept} unchanged, ${j.stats.removed} gone, ${j.stats.failed} unreadable.`
+      : j && j.error ? `Indexing failed: ${j.error}` : j && j.stats ? `Indexed: ${j.stats.added} new or changed, ${j.stats.kept} unchanged, ${j.stats.removed} gone, ${j.stats.failed} unreadable${j.stats.short ? `, ${j.stats.short} silent or too short` : ""}${j.stats.skipped ? `, ${j.stats.skipped} skipped (broken links, unreadable folders)` : ""}.`
       : r.updated ? `Last indexed ${new Date(r.updated * 1000).toLocaleString()}.` : "Nothing indexed yet: add folders above and press ↻ Index folders.";
     $("findIndexBtn").disabled = !!(j && j.running);
     clearTimeout(findPoll); if (j && j.running) findPoll = setTimeout(findStatus, 1000);
