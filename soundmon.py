@@ -11,12 +11,15 @@ import argparse
 import json
 import os
 import random
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+
+__version__ = "0.1.0"
 
 # soundmon can render on a REMOTE ComfyUI (e.g. a faster box on the LAN). Choose a
 # target with `--server NAME` (an alias from servers.json) or `--server host[:port]`/URL,
@@ -40,8 +43,18 @@ try:
     import nodes as _sfx
     FORMATS = list(_sfx.FORMATS.keys())
 except Exception:
+    # The node needs torch, which a CLI-only box (or one rendering on a remote server) may not have.
+    # chip.py carries the same registry for the CPU engines (stdlib-only to import), so --list-formats
+    # and validation fall back to it instead of to a hand-kept list that had already fallen behind.
     _sfx = None
-    FORMATS = ["none", "amiga", "sb", "sb22", "gameboy", "nes", "snes", "psx", "cd"]
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import chip as _chipreg
+        _sfx = type("_Reg", (), {"FORMATS": _chipreg.FORMATS})
+        FORMATS = list(_chipreg.FORMATS.keys())
+    except Exception:
+        FORMATS = ["none", "amiga", "sb", "sb22", "gameboy", "nes", "snes", "psx", "cd",
+                   "mod8", "mod8s", "mod6", "mod6s", "crush"]
 
 # Style guides (prompt snippets) loaded from sounds.json next to this script.
 _SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -53,15 +66,21 @@ except Exception:
 
 # Named ComfyUI targets for `--server NAME`. Your personal servers.json (gitignored)
 # is loaded if present; otherwise just the built-in 'local'.
+# "_default": "NAME[,...]" is the target when neither --server nor $SOUNDMON_SERVER is given. It is
+# the same key pixelmon reads, and install.sh copies pixelmon's servers.json — ignoring it here meant
+# a user whose pixelmon defaults to `rtx` got a soundmon that silently rendered on `local`, while
+# soundmon's own GUI (which did read it) rendered on rtx. One file, one answer, in all three.
 try:
     with open(os.path.join(_SCRIPT_DIR, "servers.json"), encoding="utf-8") as _svf:
-        SERVERS = {k: v for k, v in json.load(_svf).items() if not k.startswith("_")}
+        _svjson = json.load(_svf)
+    SERVERS = {k: v for k, v in _svjson.items() if not k.startswith("_")}
+    DEFAULT_SERVER = str(_svjson.get("_default") or "").strip()
 except Exception:
-    SERVERS = {}
+    SERVERS, DEFAULT_SERVER = {}, ""
 SERVERS.setdefault("local", "http://127.0.0.1:8188")
 
 SERVER = SERVERS.get("local", "http://127.0.0.1:8188")
-REMOTE = not any(_h in SERVER for _h in ("127.0.0.1", "localhost", "[::1]"))
+REMOTE = not any(_h in SERVER for _h in ("127.0.0.1", "localhost", "[::1]"))   # refined in main() by is_local()
 
 # Stable Audio 3's prompt-rewriter system prompts, lifted verbatim from
 # ComfyUI's official SA3 workflow (JsonExtractString node). SA3 is trained on
@@ -95,6 +114,25 @@ KEYS = [f"{root} {quality}"
                      "G", "G#", "Ab", "A", "A#", "Bb", "B")]
 
 
+def given(*flags, argv=None):
+    """Was one of these flags actually typed (`--flag V` or `--flag=V`)? The ONLY honest test for
+    "the user didn't choose": comparing a value to its default can't tell a typed `--seconds 10`
+    from no --seconds at all, and treated the typed 10 as "pick the song default" (120 s)."""
+    argv = sys.argv[1:] if argv is None else argv
+    return any(x == f or x.startswith(f + "=")
+               or (len(f) == 2 and x.startswith(f) and not x.startswith("--"))   # -n5
+               for x in argv for f in flags)
+
+
+def pick_target(cli=None, env=None, default=None):
+    """Which --server value applies: --server > $SOUNDMON_SERVER > servers.json "_default" > "" (the
+    `local` alias). bin/soundmon makes the same choice, so the wrapper starts ComfyUI only for the
+    box this will actually talk to."""
+    env = os.environ.get("SOUNDMON_SERVER") if env is None else env
+    default = DEFAULT_SERVER if default is None else default
+    return (cli or "").strip() or (env or "").strip() or (default or "").strip()
+
+
 def resolve_server(value):
     """Resolve a --server value (a servers.json alias, or host[:port]/full URL) to a URL."""
     import urllib.parse
@@ -102,8 +140,11 @@ def resolve_server(value):
     if "://" not in url:
         url = "http://" + url
     parsed = urllib.parse.urlparse(url)
-    if not parsed.port:
-        url = f"{parsed.scheme}://{parsed.hostname}:8188"
+    if not parsed.hostname:
+        raise ValueError(f"--server {value!r}: not an alias in servers.json, a host, or a URL")
+    if not parsed.port:     # ComfyUI's port; keep any path (a ComfyUI behind a reverse proxy at /comfy)
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        url = f"{parsed.scheme}://{host}:8188{parsed.path}"
     return url.rstrip("/")
 
 
@@ -119,6 +160,7 @@ C = _colors()
 
 
 def print_help():
+    """Every flag appears here (tools/selfcheck.py checks it against build_parser())."""
     c = C
 
     def opt(flag, desc, default=""):
@@ -126,29 +168,36 @@ def print_help():
         return f"  {c['grn']}{flag:<19}{c['rst']} {desc}{tail}"
 
     def ex(cmd, note):
-        return f"  {c['yel']}{cmd:<48}{c['rst']}{c['dim']}{note}{c['rst']}"
+        # at least two spaces between a long command and its note ("--style impact steer with" ran together)
+        return f"  {c['yel']}{cmd:<48}{c['rst']}  {c['dim']}{note}{c['rst']}"
+
+    def head(title, note=""):
+        return f"{c['b']}{c['cyan']}{title}{c['rst']}" + (f"  {c['dim']}{note}{c['rst']}" if note else "")
 
     print("\n".join([
-        f"{c['b']}{c['mag']}soundmon{c['rst']} — generate sound effects from a text description",
+        f"{c['b']}{c['mag']}soundmon{c['rst']} {__version__} — generate sound effects from a text description",
         "",
-        f"{c['b']}{c['cyan']}USAGE{c['rst']}",
+        head("USAGE"),
         f"  {c['mag']}soundmon{c['rst']} {c['yel']}\"a description\"{c['rst']} [options]",
         "",
-        f"{c['b']}{c['cyan']}EXAMPLES{c['rst']}",
+        head("EXAMPLES"),
         ex('soundmon "a heavy wooden door creaking open"', "best quality (the default)"),
         ex('soundmon "a sword hitting metal" --style impact', "steer with a style guide"),
         ex('soundmon "footsteps on gravel" -n 4', "4 variations to pick from"),
         ex('soundmon "a lo-fi hip hop piano loop" --music', "musical loops/beds/stings"),
         ex('soundmon "laser blast" --format sb --bits 8', "SoundBlaster-era 8-bit crunch"),
         ex('soundmon --batch "door,glass,fire" -n 8', "8 of each → own folders"),
+        ex("soundmon --batch-file sfx.txt --output-to pack", "one file per 'key | prompt' row"),
         ex('soundmon "rain" --seconds 30 --server rtx,titan', "long, fanned across GPUs"),
         ex("soundmon --narrate-file lines.txt --ogg", "speak a script with a TTS voice"),
         ex("soundmon --record-file lines.txt --ogg", "record that same script yourself"),
         "",
-        f"{c['b']}{c['cyan']}OPTIONS{c['rst']}",
+        head("OPTIONS"),
         opt("description", "the sound you want (in quotes)"),
         opt("-n, --number N", "how many to make, each a different seed", "1"),
         opt('--batch "a,b,c"', "round-robin subjects → a folder each (N of each)"),
+        opt("--batch-file F", "every 'key | prompt' or 'key | seconds | prompt' row → key.wav"),
+        opt("--skip-existing", "with --batch-file: skip keys that already have a file (resume)"),
         opt("--seconds N", "length in seconds (SA3 max 120, SAO max 47)", "10"),
         opt("--style NAMES", "append proven style guide(s) — see --list-styles"),
         opt("--music", "music mode: loops/beds/stings (no full songs or vocals)"),
@@ -157,52 +206,53 @@ def print_help():
         opt("--seed N", "lock / repeat a result (re-run a favorite)", "random"),
         opt("--steps N", "sampling steps (more = better, slower)", "8 on SA3"),
         opt("--cfg N", "prompt adherence (higher = stricter)", "1.0 on SA3"),
-        opt("--fast", "16 steps: ~3x faster, rougher"),
+        opt("--fast", "fewer steps on --engine sao / --song (no effect on SA3)"),
         opt("--no-trim", "keep the model's leading/trailing silence"),
+        opt("--trim", "trim silence in --song mode too (off there: it breaks bars)"),
+        opt("--max-seconds N", "hard length cap — truncates, unlike trimming", "0 = none"),
         opt("--loop", "crossfade tail over head so the track loops seamlessly"),
-        opt("--chip", "real 2A03 chiptune synthesis — no model, loops perfectly"),
-        opt("--mood NAME", "heroic/ominous/eerie/... or auto — see --list-moods", "auto"),
-        opt("--arp N", "arpeggio speed in 16ths (0 = let the mood choose)", "0"),
-        opt("--opl", "real AdLib/OPL3 FM via the Nuked core — no model"),
-        opt("--opl-bank F", "external patch bank (.sbi); omit for built-in"),
-        opt("--chipfx", "synthesize an 8-bit SFX (PSG) — sfxr-style, no model"),
-        opt("--oplfx", "synthesize an SFX through the OPL3 FM core"),
-        opt("--fx-archetype N", "force the archetype (hit/boom/coin/creak/...)"),
-        opt("--blip", "JRPG text-box narration (Undertale / Animal Crossing)"),
-        opt("--blip-style S", "synth = no model at all | voice = Animalese", "synth"),
-        opt("--blip-wave W", "square / triangle / sine / saw / noise", "square"),
-        opt("--blip-rate N", "characters per second (typing speed)", "14"),
         opt("--loop-crossfade SEC", "crossfade length for --loop", "2.0"),
         opt("--normalize-db N", "peak level after generation", "-1.0"),
         opt("--fade-ms N", "de-click fade on both ends", "5"),
         opt("--list-formats", "show every hardware format"),
         opt("--list-styles", "show every style guide"),
+        opt("--version", "print the version"),
         opt("-h, --help", "show this help"),
         "",
-        f"{c['b']}{c['cyan']}ADVANCED{c['rst']}",
-        opt("--server NAMES", "remote ComfyUI (alias/host/URL); comma-list = render farm", "local"),
+        head("PROMPTS", "(see and control exactly what the model is sent)"),
+        opt("--show-prompt", "print the final positive/negative prompt before rendering"),
+        opt("--exact-prompt", "send the text as typed: no tail, default negative or Qwen rewrite"),
+        opt("--no-reprompt", "skip SA3's Qwen rewrite of the description (on by default)"),
+        opt("--reprompt-model F", "the rewriting LLM (models/text_encoders/)", "qwen3.5_2b_bf16"),
+        opt("--reprompt-temp N", "rewriter temperature", "0.7"),
+        opt('--negative "..."', "negative prompt (what to avoid)", "per mode"),
+        opt("--dry-run", "print the ComfyUI graph(s) as JSON and exit — no server"),
+        "",
+        head("ADVANCED"),
+        opt("--server NAMES", "remote ComfyUI (alias/host/URL); comma-list = render farm",
+            DEFAULT_SERVER or "local"),
         opt("--lufs N", "loudness CEILING in LUFS, attenuate-only ('off')", "-16"),
         opt("--true-peak N", "true-peak ceiling in dBTP", "-1.0"),
         opt("--ogg", "compress to OGG Vorbis (~25x smaller) — off by default"),
         opt("--ogg-quality N", "OGG quality 0-10 (accuracy, not bandwidth)", "8"),
+        opt("--keep-wav", "with --ogg/--flac: keep the WAV too"),
         opt("--flac / --mp3 / --opus", "save compressed instead of WAV"),
-        opt('--negative "..."', "negative prompt (what to avoid)"),
+        opt("--no-recipe", "don't embed how it was made (prompt, seed, command) in the file"),
         opt("--name NAME", "output filename base", "from description"),
-        opt("--sampler NAME", "ksampler sampler", "dpmpp_3m_sde_gpu"),
-        opt("--scheduler NAME", "ksampler scheduler", "exponential"),
+        opt("--sampler NAME", "ksampler sampler", "lcm on SA3"),
+        opt("--scheduler NAME", "ksampler scheduler", "simple on SA3"),
         opt("--threshold-db N", "silence floor for trimming", "-45"),
         opt("--engine NAME", "sa3 (full-band, fast) / sao (2024, 16kHz cut)", "sa3"),
         opt("--sa3-size N", "medium (the only verified one) / small", "medium"),
         opt("--base FILE", "checkpoint override", "per --engine"),
-        opt("--text-encoder FILE", "T5 text encoder", "t5_base"),
+        opt("--text-encoder FILE", "text encoder", "t5gemma on SA3"),
         opt("--no-open", "don't auto-play the result"),
         opt("--output-to DIR", "move outputs into DIR (relative to cwd)"),
         opt("--move-to-dirs", "put a run in its own ./<description>/ folder"),
         opt("--create-dirs", "create output folders if missing"),
         opt("--no-subdirs", "with --batch/--output-to: dump all into one flat folder"),
         "",
-        f"{c['b']}{c['cyan']}SONG{c['rst']}  {c['dim']}(--song: full songs with real vocals, via ACE-Step 1.5. "
-        f"needs ./download-models.sh --song){c['rst']}",
+        head("SONG", "(--song: full songs with real vocals, via ACE-Step 1.5. needs ./download-models.sh --song)"),
         opt("--song", "full-song mode; the description becomes genre TAGS"),
         opt('--lyrics "..."', "lyrics to sing — use [verse] / [chorus] markers"),
         opt("--lyrics-file F", "read lyrics from a file"),
@@ -213,10 +263,46 @@ def print_help():
         opt("--no-audio-codes", "skip the quality LLM pass — much faster"),
         opt("--llm-cfg N", "ACE text-encoder guidance", "2.0"),
         opt("--temperature N", "LLM temperature", "0.85"),
+        opt("--top-p / --top-k N", "LLM nucleus / top-k sampling", "0.9 / 0"),
+        opt("--min-p N", "LLM min-p sampling", "0.0"),
+        opt("--song-base FILE", "ACE-Step checkpoint (all-in-one)", "ace_step_1.5_turbo_aio"),
         opt("--list-keys", "show every musical key"),
         "",
-        f"{c['b']}{c['cyan']}VOICE{c['rst']}  {c['dim']}(spoken narration — two ways to make the same pack: "
-        f"a TTS voice, or your own){c['rst']}",
+        head("CHIP & FM", "(real chip synthesis on the CPU — no model, no server)"),
+        opt("--chip", "2A03 chiptune (2 pulse + triangle + noise), loops perfectly"),
+        opt("--opl", "AdLib/OPL3 FM via the Nuked core (./download-models.sh --opl)"),
+        opt("--mood NAME", "heroic/ominous/eerie/... or auto — see --list-moods", "auto"),
+        opt("--arp N", "arpeggio speed in 16ths, 0 = the mood chooses (alias --chip-arp)", "0"),
+        opt("--scale NAME", "override the key's scale (alias --chip-scale)"),
+        opt("--from-midi F", "play a MIDI file on the chip — the best input"),
+        opt("--midi-start F", "skip this fraction into the MIDI first", "0.15"),
+        opt("--transpose N", "shift --from-midi by N semitones", "0"),
+        opt("--from-audio F", "transcribe a recording and play it on the chip"),
+        opt("--chippy L", "off / some / lots / max: arps, slides, echo (--from-midi)", "off"),
+        opt("--write-midi", "also write a .mid (--chip/--opl)"),
+        opt("--write-mod", "also write a ProTracker .MOD (--chip)"),
+        opt("--write-rad", "also write a Reality AdLib Tracker .RAD (--opl)"),
+        opt("--opl-bank F", "external patch bank (.sbi); omit for built-in"),
+        opt("--opl-lead / --opl-arp / --opl-bass NAME", "instrument per voice"),
+        opt("", "", "brass / organ / bass"),
+        opt("--opl-lib PATH", "explicit path to libopl3.so", "auto-detect"),
+        opt("--chipfx", "synthesize an 8-bit SFX (PSG) — sfxr-style, no model"),
+        opt("--oplfx", "synthesize an SFX through the OPL3 FM core"),
+        opt("--fx-archetype N", "force the archetype (hit/boom/coin/creak/...)"),
+        opt("--list-moods", "show every mood and what it changes"),
+        "",
+        head("BLIP", "(JRPG text-box narration — Undertale / Animal Crossing)"),
+        opt("--blip", "blip the description, one blip per character"),
+        opt("--blip-file F", "blip every 'key | text' row of a file"),
+        opt("--blip-style S", "synth = no model at all | voice = Animalese", "synth"),
+        opt("--blip-wave W", "square / triangle / sine / saw / noise", "square"),
+        opt("--blip-rate N", "characters per second (typing speed)", "14"),
+        opt("--blip-pitch ST", "base pitch in semitones from A4 (lower = bigger)", "0"),
+        opt("--blip-jitter ST", "per-character pitch spread, 0 = flat", "1.5"),
+        opt("--blip-duty F", "fraction of each character slot that sounds", "0.55"),
+        opt("--blip-speed X", "speed-up for --blip-style voice", "3.0"),
+        "",
+        head("VOICE", "(spoken narration — two ways to make the same pack: a TTS voice, or your own)"),
         opt("--narrate", "speak the text with a TTS voice (Kokoro, local CPU)"),
         opt("--record", "record it YOURSELF from a mic, line by line"),
         opt("--narrate-file F", "narrate every 'key | text' row of a file"),
@@ -229,12 +315,12 @@ def print_help():
         opt("--list-voices", "show every TTS voice"),
         opt("--list-devices", "show every microphone this machine can see"),
         "",
-        f"{c['b']}{c['cyan']}MASTERING{c['rst']}  {c['dim']}(make a set of sounds sit together — no model){c['rst']}",
+        head("MASTERING", "(make a set of sounds sit together — no model)"),
         opt("--master F|DIR", "master a sound or a folder into --output-to (default DIR/mastered/)"),
         opt("--master-kind K", "sfx / speech / auto (speech for voice folders)", "auto"),
         opt("--master-like REF", "match tone + loudness to REF instead"),
         "",
-        f"{c['b']}{c['cyan']}STEERING & FINDING{c['rst']}  {c['dim']}(make it like a sound you have, or find ones like it){c['rst']}",
+        head("STEERING & FINDING", "(make it like a sound you have, or find ones like it)"),
         opt("--ref FILE", "start from FILE instead of silence (SFX, --music, --song)"),
         opt("--ref-strength N", "0.3 close variation … 0.9 loosely inspired", "0.6"),
         opt("--ref-match", "also take its tempo and key"),
@@ -242,12 +328,16 @@ def print_help():
         opt("--index DIR[,DIR]", "index folders of sounds (incremental)"),
         opt("--similar FILE", "list indexed sounds most like FILE (-n, --in DIR)"),
         "",
-        f"{c['b']}{c['cyan']}OUTPUT{c['rst']}",
-        f"  {c['dim']}{OUTPUT}/soundmon/{c['rst']}",
-        f"  {c['dim']}44.1 kHz stereo WAV, trimmed and normalized{c['rst']}",
+        head("OUTPUT"),
+        f"  {c['dim']}AI engines:  {OUTPUT}/soundmon/ (or --output-to) — 44.1 kHz stereo WAV,{c['rst']}",
+        f"  {c['dim']}             trimmed and normalized{c['rst']}",
+        f"  {c['dim']}CPU engines: the current folder (or --output-to) — each at its own rate and channels{c['rst']}",
+        f"  {c['dim']}             (chip 44.1 kHz mono, OPL 49716 Hz, blips/narration 24 kHz; --format overrides){c['rst']}",
+        f"  {c['dim']}Every file carries its recipe (prompt, seed, engine, the full command) in its comment{c['rst']}",
+        f"  {c['dim']}tag — ffprobe shows it; --no-recipe leaves it out.{c['rst']}",
         "",
         f"  {c['b']}{c['yel']}TIP{c['rst']}  generation is cheap — run {c['grn']}-n 8{c['rst']} and keep the one you like. "
-        f"The seed is in every\n       filename, so re-run it later without {c['grn']}--fast{c['rst']} for the full-quality take.",
+        f"The seed is in every\n       filename, so {c['grn']}--seed N{c['rst']} re-makes exactly that take later.",
         "",
     ]))
 
@@ -318,7 +408,14 @@ def _reprompt_nodes(a, text, seconds):
     }, ["21", 0]
 
 
-def _song_nodes(a, seed, subject):
+def reprompts(a):
+    """Does Qwen rewrite the description on the server? SA3 only — Stable Audio Open 1.0 and
+    ACE-Step were not trained on that structured form — and never with --exact-prompt."""
+    return (a.engine == "sa3" and not a.song and not a.no_reprompt
+            and not getattr(a, "exact_prompt", False) and bool(SA3_REPROMPT))
+
+
+def _song_nodes(a, seed, subject, negative=None):
     """ACE-Step 1.5 graph — full songs with vocals, lyrics, BPM and key.
 
     A different engine from the SFX path, but it lands its AUDIO on node "10"
@@ -345,7 +442,7 @@ def _song_nodes(a, seed, subject):
         # is slow; it's pure waste on the negative branch, so only the positive
         # conditioning pays for it.
         "6": encode(subject, a.lyrics, not a.no_audio_codes),
-        "7": encode(a.negative, "", False),
+        "7": encode(a.negative if negative is None else negative, "", False),
         "9": {"class_type": "EmptyAceStep1.5LatentAudio",
               "inputs": {"seconds": a.seconds, "batch_size": 1}},
         "3": {"class_type": "KSampler",
@@ -357,8 +454,17 @@ def _song_nodes(a, seed, subject):
     }
 
 
-def build_graph(a, seed, subject=None, server=None):
-    subject = subject if subject is not None else a.prompt
+def final_prompts(a, subject):
+    """(positive, negative) exactly as the graph sends them — shared by build_graph and --show-prompt,
+    so what is shown can't drift from what is sent. For SA3 the positive is then rewritten by Qwen
+    on the server (_reprompt_nodes) unless --no-reprompt / --exact-prompt."""
+    if getattr(a, "exact_prompt", False):         # nothing added, nothing changed
+        return subject, a.negative or ""
+    if a.song:
+        # ACE-Step takes genre TAGS: a style guide's words are added as tags (they were dropped).
+        # Its NEGATIVE is not: the guides are written for Stable Audio, and several push away
+        # "vocals, singing" — the one thing a song with lyrics must have.
+        return ", ".join(x for x in (subject, a.style_add) if x), a.negative
     parts = [subject]
     if a.style_add:
         parts.append(a.style_add)
@@ -369,17 +475,29 @@ def build_graph(a, seed, subject=None, server=None):
                  if a.music else "sound effect, high quality, clean recording")
     prompt = ", ".join(parts)
     negative = a.negative + ((", " + a.style_neg) if a.style_neg else "")
+    if getattr(a, "ref_tail", ""):
+        prompt = f"{prompt}, {a.ref_tail}"
+    return prompt, negative
 
-    name = slug(subject) if a.batch else (a.name or slug(subject))
+
+def build_graph(a, seed, subject=None, server=None, seconds=None):
+    """The ComfyUI graph for one take. `seconds` overrides --seconds for this job (a --batch-file
+    row that names its own length)."""
+    if seconds is not None and seconds != a.seconds:
+        import copy
+        a = copy.copy(a)
+        a.seconds = seconds
+    subject = subject if subject is not None else a.prompt
+    prompt, negative = final_prompts(a, subject)
+
+    name = slug(subject) if (a.batch or getattr(a, "batch_file", None)) else (a.name or slug(subject))
     tag = f"{a.bpm}bpm" if a.song else a.format
     steer = getattr(a, "ref_name", None)
     prefix = f"soundmon/{name}_{a.seconds:g}s_{tag}{'_ref' if steer else ''}_s{seed}"
-    if getattr(a, "ref_tail", ""):
-        prompt = f"{prompt}, {a.ref_tail}"
 
     if a.song:
         # Different engine, same tail — _song_nodes also lands its AUDIO on "10".
-        g = _song_nodes(a, seed, subject)
+        g = _song_nodes(a, seed, prompt, negative)
         if steer:
             _apply_ref(a, g)
         g["11"] = {"class_type": "RetroSFX",
@@ -423,7 +541,7 @@ def build_graph(a, seed, subject=None, server=None):
 
     # Prompt rewriter: replace the literal positive text with the LLM's output.
     # Only for SA3 — Stable Audio Open 1.0 was not trained this way.
-    if a.engine == "sa3" and not a.no_reprompt and not a.song:
+    if reprompts(a):
         rp, ref = _reprompt_nodes(a, prompt, a.seconds)
         if ref:
             g.update(rp)
@@ -436,20 +554,17 @@ def build_graph(a, seed, subject=None, server=None):
 
 def _attach_save(a, g, prefix):
     """Attach the save node. Shared by both engines — they agree that the
-    finished AUDIO is on node "11", so everything downstream is identical."""
-    if a.flac:
-        g["12"] = {"class_type": "SaveAudio",
-                   "inputs": {"audio": ["11", 0], "filename_prefix": prefix}}
-    elif a.mp3:
-        g["12"] = {"class_type": "SaveAudioMP3",
-                   "inputs": {"audio": ["11", 0], "filename_prefix": prefix, "quality": "V0"}}
-    elif a.opus:
-        g["12"] = {"class_type": "SaveAudioOpus",
-                   "inputs": {"audio": ["11", 0], "filename_prefix": prefix, "quality": "128k"}}
-    else:
-        g["12"] = {"class_type": "SaveSFX",
-                   "inputs": {"audio": ["11", 0], "filename_prefix": prefix,
-                              "bit_depth": str(a.bits)}}
+    finished AUDIO is on node "11", so everything downstream is identical.
+
+    ALWAYS a WAV (SaveSFX), whatever --flac/--mp3/--opus say; the CLI encodes last (encode()).
+    These flags used to pick ComfyUI's SaveAudio/MP3/Opus nodes, and everything after the server
+    (--loop, the loudness ceiling, --match-tone) then worked on a compressed file and wrote WAV data
+    back under its .flac/.mp3/.opus name — nearly every SA3 render, since the -16 LUFS ceiling
+    almost always attenuates. Processing a WAV and encoding once at the end is also one lossy
+    generation instead of two, and farm boxes need no encoders."""
+    g["12"] = {"class_type": "SaveSFX",
+               "inputs": {"audio": ["11", 0], "filename_prefix": prefix,
+                          "bit_depth": str(a.bits)}}
     return g
 
 
@@ -470,6 +585,15 @@ def _ffprobe_seconds(path):
         return None
 
 
+def _channels(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+                            "-of", "csv=p=0", path], capture_output=True, text=True, timeout=30)
+        return int(r.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError, OSError, subprocess.SubprocessError):
+        return 0
+
+
 def prepare_ref(src, seconds):
     """The reference as the model wants it: 44.1 kHz stereo WAV, exactly `seconds` long (trimmed, or
     padded with silence). Cached by content + length, so a batch uploads one file."""
@@ -483,12 +607,26 @@ def prepare_ref(src, seconds):
     h.update(f"{seconds:.3f}".encode())
     os.makedirs(REF_CACHE, exist_ok=True)
     out = os.path.join(REF_CACHE, f"soundmon_ref_{h.hexdigest()[:12]}.wav")
+    # Reuse a cached copy only if it is whole: the name promises `seconds` of audio. A Ctrl-C during
+    # the conversion used to leave a 172 s file under a 999 s name, reused for ever after.
+    if os.path.exists(out):
+        got = _ffprobe_seconds(out)
+        if got is None or abs(got - seconds) > 0.05:
+            os.remove(out)
     if not os.path.exists(out):
-        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-af", f"apad=whole_dur={seconds:.3f}",
-                            "-t", f"{seconds:.3f}", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", out],
+        tmp = f"{out}.{os.getpid()}.part.wav"       # written aside, renamed only once complete
+        # pan, not -ac 2: ffmpeg's mono->stereo upmix is -3 dB, which made a mono reference quieter
+        # than itself (and --ref-strength steer toward a quieter sound)
+        r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", src, "-af",
+                            f"apad=whole_dur={seconds:.3f},pan=stereo|c0=c0|c1=c0" if _channels(src) == 1
+                            else f"apad=whole_dur={seconds:.3f}",
+                            "-t", f"{seconds:.3f}", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", tmp],
                            capture_output=True, text=True)
         if r.returncode:
+            if os.path.exists(tmp):
+                os.remove(tmp)
             sys.exit(f"--ref: couldn't read {src}: {r.stderr.strip()[-300:]}")
+        os.replace(tmp, out)
     return out
 
 
@@ -593,6 +731,23 @@ def _on_stop(signum, frame):
     sys.exit(130 if signum == signal.SIGINT else 143)
 
 
+def _validation_text(body):
+    """ComfyUI's 400 answer to /prompt as one readable line per node ("node 5 (CLIPLoader): Value not
+    in list: clip_name …"), instead of 1200 characters of JSON. Falls back to the raw text."""
+    try:
+        j = json.loads(body)
+    except ValueError:
+        return body[:1200]
+    lines = []
+    for nid, ne in (j.get("node_errors") or {}).items():
+        for er in (ne or {}).get("errors") or []:
+            msg = er.get("message", "")
+            det = er.get("details", "")
+            lines.append(f"  node {nid} ({ne.get('class_type', '?')}): {msg}{': ' + det if det and det not in msg else ''}")
+    head = (j.get("error") or {}).get("message", "") if isinstance(j.get("error"), dict) else str(j.get("error") or "")
+    return "\n".join(([head] if head else []) + lines)[:2000] or body[:1200]
+
+
 def submit(graph, server=None):
     server = server or SERVER
     data = json.dumps({"prompt": graph}).encode()
@@ -603,13 +758,43 @@ def submit(graph, server=None):
         SENT.setdefault(server, set()).add(pid)
         return pid
     except urllib.error.HTTPError as e:
-        sys.exit("ComfyUI rejected the request:\n" + e.read().decode()[:1200])
-    except urllib.error.URLError:
+        why = _validation_text(e.read().decode(errors="replace"))
+        # One line when it fits: the GUI keeps only the LAST line of a failed run as the job's error.
+        lines = [ln.strip() for ln in why.splitlines() if ln.strip()]
+        if len(lines) <= 2:
+            sys.exit(f"ComfyUI on {_short(server)} rejected the graph: {' — '.join(lines)}")
+        sys.exit(f"ComfyUI on {_short(server)} rejected the graph:\n{why}\n"
+                 f"({len(lines) - 1} node errors on {_short(server)}; first: {lines[1]})")
+    except (OSError, ValueError, KeyError):
         sys.exit("Couldn't reach ComfyUI at " + server + " — is the server running?")
 
 
 class JobFailed(Exception):
-    """ComfyUI finished a job without audio: a node raised, or nothing was saved."""
+    """ComfyUI finished a job without audio: a node raised, or nothing was saved.
+    .kind is what classify() called it: error / poisoned / transient / cached / lost / timeout."""
+
+    def __init__(self, msg, kind="error"):
+        super().__init__(msg)
+        self.kind = kind
+
+
+class CachedNoOutput(JobFailed):
+    """An identical, fully cached prompt that ComfyUI answered with 'success' and no files."""
+
+    def __init__(self, msg="identical cached prompt returned no audio"):
+        super().__init__(msg, "cached")
+
+
+class MissingOutput(JobFailed):
+    """The server says the job is done but the file it names is gone (404). ComfyUI's cache answers an
+    identical prompt with the PREVIOUS run's file names — which a local run already moved away."""
+
+    def __init__(self, msg):
+        super().__init__(msg, "missing")
+
+
+class ServerGone(Exception):
+    """The server stopped answering for longer than SERVER_GRACE: the whole run, not one job, is over."""
 
 
 def _job_error(entry):
@@ -619,6 +804,11 @@ def _job_error(entry):
     node (a missing model in CLIPLoader, say) gets status_str "error" and NO
     outputs, so waiting for outputs alone waits out the full timeout: 30 minutes
     of a dead run that looks busy. Read the status too.
+
+    "Completed with no outputs" is NOT an error here: ComfyUI answers a prompt it has already run,
+    unchanged, from its cache, with success and nothing saved (see _cached_empty). Calling that a
+    failure made the help's own tip ("re-run that seed later") fail, and on the farm it fed the
+    circuit breaker, so re-running a favourite seed twice dropped a healthy box.
     """
     st = entry.get("status") or {}
     if st.get("status_str") == "error":
@@ -626,44 +816,249 @@ def _job_error(entry):
             if kind == "execution_error" and isinstance(data, dict):
                 node = data.get("node_type") or f"node {data.get('node_id', '?')}"
                 msg = " ".join(str(data.get("exception_message") or "").split())
+                et = data.get("exception_type") or ""
+                if et and et.split(".")[-1] not in msg:
+                    msg = f"{et.split('.')[-1]}: {msg}" if msg else et
                 return f"{node}: {msg}"[:600] if msg else node
+        for kind, _ in st.get("messages") or []:
+            if kind == "execution_interrupted":
+                return "interrupted on the server (its Cancel/Interrupt, or a restart)"
         return "ComfyUI reported an error (no details)"
-    if st.get("completed") and not entry.get("outputs"):
-        return "the job finished but saved no audio"
     return None
 
 
-def wait(pid, server=None, timeout=1800):
+def _cached_empty(entry):
+    st = (entry or {}).get("status") or {}
+    return (st.get("status_str") == "success" and bool(st.get("completed"))
+            and not audio_outs((entry or {}).get("outputs") or {}))
+
+
+# Errors after which a server fails EVERY prompt until its ComfyUI is restarted (a broken model
+# manager). The GUIs restart such a box when servers.json has a "_restart" command for it; the CLI
+# waits for that restart and sends the job again, instead of failing it at once.
+POISONED = ("object has no attribute 'model_size'", "object has no attribute 'is_dynamic'")
+
+
+def _transient(err):
+    """A server error worth one automatic retry: ComfyUI's model manager occasionally trips over its own
+    loaded-model list (an IndexError in a loader) or runs short of VRAM while swapping models."""
+    err = err or ""
+    return ("Loader" in err.split(":")[0] and "IndexError" in err) or "out of memory" in err.lower()
+
+
+def classify(entry):
+    """What a /history entry means, as (kind, detail):
+    ok (detail = outputs) · error · poisoned · transient (detail = the message) · cached · pending."""
+    if entry is None:
+        return "pending", None
+    outs = entry.get("outputs") or {}
+    if audio_outs(outs):
+        return "ok", outs
+    err = _job_error(entry)
+    if err:
+        if any(p in err for p in POISONED):
+            return "poisoned", err
+        return ("transient" if _transient(err) else "error"), err
+    if _cached_empty(entry):
+        return "cached", "the server finished but saved no audio (an identical, cached prompt)"
+    return "pending", None
+
+
+def fresh_copy(graph):
+    """The same graph, saved under a unique subfolder. ComfyUI then re-runs only the save step (every
+    node upstream is still cached, so it is instant and the audio identical) and reports the files.
+    The FILE NAME does not change — the seed in it is how a take is found again."""
+    import copy
+    import uuid
+    g = copy.deepcopy(graph)
+    tag = uuid.uuid4().hex[:8]
+    for node in g.values():
+        pre = (node.get("inputs") or {}).get("filename_prefix")
+        if isinstance(pre, str):
+            head, _, tail = pre.rpartition("/")
+            node["inputs"]["filename_prefix"] = f"{head + '/' if head else ''}rerun-{tag}/{tail}"
+    return g
+
+
+def _queue(server, timeout=10):
+    with urllib.request.urlopen(f"{server}/queue", timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _queued(pid, server):
+    """True while the prompt is still waiting in the server's queue (not started yet)."""
+    try:
+        return any(len(it) > 1 and it[1] == pid for it in _queue(server).get("queue_pending", []))
+    except Exception:
+        return False
+
+
+def _known(pid, server):
+    """True while the server still has the prompt waiting or running. True when unsure (no answer),
+    so a slow server never looks like one that forgot the prompt."""
+    try:
+        q = _queue(server)
+        return any(len(it) > 1 and it[1] == pid for it in q.get("queue_running", []) + q.get("queue_pending", []))
+    except Exception:
+        return True
+
+
+def _wait_restart(pid, server, limit=120):
+    """After a POISONED error: wait (up to `limit` s) for someone (the GUI's _restart, a person) to
+    restart the server, which shows as the prompt dropping out of its history. True once it has."""
+    t = time.time()
+    while time.time() - t < limit:
+        time.sleep(3)
+        try:
+            with urllib.request.urlopen(f"{server}/history/{pid}", timeout=10) as r:
+                if pid not in json.loads(r.read()):
+                    return True
+        except (OSError, ValueError):             # down: restarting
+            pass
+    return False
+
+
+def _history(pid, server, timeout=30):
+    import http.client
+    try:
+        with urllib.request.urlopen(f"{server}/history/{pid}", timeout=timeout) as r:
+            return json.loads(r.read())
+    except http.client.HTTPException as e:        # a half-answered request mid-restart: same as no answer
+        raise OSError(str(e)) from e
+
+
+SERVER_GRACE = 240    # seconds wait() rides out a server that stops answering (a restart takes ~10-30 s)
+RESTARTS = {}         # server -> restarts wait() has seen this run (main() then re-sends the rest of the queue)
+
+
+def _restarted(server):
+    RESTARTS[server] = RESTARTS.get(server, 0) + 1
+
+
+def wait(pid, server=None, timeout=1800, resubmit=None):
+    """Wait for a prompt's audio. `timeout` counts seconds of rendering: time spent queued behind other
+    jobs (pixelmon's, another soundmon's) doesn't count. Raises JobFailed for a job that cannot be
+    saved, ServerGone when the server is unreachable for SERVER_GRACE seconds. With resubmit(fresh)
+    — which sends the job again and returns the new prompt id — it also recovers on its own:
+
+      server restarting        waited out (logged when it goes and comes back)
+      prompt forgotten         sent again, at most twice (a restart empties ComfyUI's queue)
+      POISONED error           wait for the restart, then send again
+      transient error          (loader IndexError, out of memory) retried once
+      identical cached re-run  re-saved once under a fresh folder (fresh=True), see fresh_copy()
+    """
     server = server or SERVER
-    for _ in range(timeout):
-        with urllib.request.urlopen(f"{server}/history/{pid}", timeout=30) as r:
-            hist = json.loads(r.read())
-        if pid in hist:
-            if hist[pid].get("outputs"):
+    waited, refreshed, retried = 0, False, False
+    relost, lost, n, down = 2, 0, 0, None
+    back = False                                  # just came back after being down: check at once
+
+    def again(fresh):
+        _forget(server, pid)
+        return resubmit(fresh)
+
+    while waited < timeout:
+        try:
+            hist = _history(pid, server)
+        except (OSError, ValueError) as e:        # refused / reset / timed out: restarting?
+            if down is None:
+                down = time.time()
+                print(f"   … {_short(server)} stopped answering ({getattr(e, 'reason', e)}) — waiting for it", flush=True)
+            elif time.time() - down > SERVER_GRACE:
+                raise ServerGone(f"ComfyUI at {_short(server)} has been unreachable for {SERVER_GRACE}s "
+                                 f"({getattr(e, 'reason', e)}).")
+            time.sleep(3)
+            continue
+        if down is not None:
+            print(f"   … {_short(server)} is back after {time.time() - down:.0f}s", flush=True)
+            down, lost = None, 0
+            _restarted(server)
+            back = True
+        n += 1
+        kind, info = classify(hist.get(pid))
+        if kind == "pending" and (n % 5 == 0 or back):   # every ~5 s: does the server still know it?
+            # right after an outage, one "unknown" is enough: the downtime already says it restarted
+            lost = 0 if _known(pid, server) else (3 if back else lost + 1)
+            back = False
+            if lost >= 3:                         # forgotten three checks running: the server restarted
+                if not (resubmit and relost):
+                    _forget(server, pid)
+                    raise JobFailed(f"{_short(server)} restarted and lost this job", "lost")
+                print("   ↻ the server restarted and lost this job — sending it again", flush=True)
+                _restarted(server)
+                pid, relost, lost, waited = again(False), relost - 1, 0, 0
+                continue
+        if kind == "ok":
+            _forget(server, pid)
+            return info
+        if kind == "poisoned" and resubmit and relost:
+            print(f"   ↻ {_short(server)} broke and needs a ComfyUI restart — waiting for it, then sending "
+                  "this again", flush=True)
+            if not _wait_restart(pid, server):
                 _forget(server, pid)
-                return hist[pid]["outputs"]
-            err = _job_error(hist[pid])
-            if err:
-                _forget(server, pid)
-                sys.exit(f"ComfyUI failed the job on {_short(server)} in {err}")
+                raise JobFailed(f"{info} — its ComfyUI needs a restart", "poisoned")
+            _restarted(server)
+            pid, relost, lost, waited = again(False), relost - 1, 0, 0
+            continue
+        if kind == "transient" and resubmit and not retried:
+            print(f"   ↻ server hiccup ({info.split(': ', 1)[-1][:60]}) — retrying once", flush=True)
+            pid, retried, waited = again(False), True, 0
+            continue
+        if kind == "cached":
+            if resubmit and not refreshed:
+                print("   ↻ identical re-run answered from the server's cache without files — re-saving it", flush=True)
+                pid, refreshed, waited = again(True), True, 0
+                continue
+            _forget(server, pid)
+            raise JobFailed(info, "cached")
+        if kind in ("error", "poisoned", "transient"):
+            _forget(server, pid)
+            raise JobFailed(info, kind)
         time.sleep(1)
-    sys.exit("Timed out waiting for the sound.")
+        if waited % 10 or not _queued(pid, server):
+            waited += 1
+    _forget(server, pid)
+    raise JobFailed(f"timed out after {timeout}s of rendering", "timeout")
 
 
 def poll(pid, server):
-    """One non-blocking /history check; returns the outputs dict, or None if not ready.
-    Raises JobFailed when ComfyUI gave up on the job."""
-    with urllib.request.urlopen(f"{server}/history/{pid}", timeout=30) as r:
-        hist = json.loads(r.read())
-    if pid in hist:
-        if hist[pid].get("outputs"):
-            _forget(server, pid)
-            return hist[pid]["outputs"]
-        err = _job_error(hist[pid])
-        if err:
-            _forget(server, pid)
-            raise JobFailed(err)
+    """One non-blocking /history check for the farm; returns the outputs dict, or None if not ready.
+    Raises CachedNoOutput for a cached identical re-run, JobFailed (with .kind) when ComfyUI gave up,
+    and OSError when the box didn't answer (the farm decides how long that may last)."""
+    kind, info = classify(_history(pid, server, timeout=10).get(pid))
+    if kind == "ok":
+        _forget(server, pid)
+        return info
+    if kind == "cached":
+        _forget(server, pid)
+        raise CachedNoOutput()
+    if kind != "pending":
+        _forget(server, pid)
+        raise JobFailed(info, kind)
     return None
+
+
+def resend_lost(jobs, server):
+    """[(job, pid, graph)] with every prompt the server no longer has (not queued, not running, not
+    in its history) submitted again. Unsure (no answer) = leave it to wait()."""
+    try:
+        q = _queue(server)
+        known = {it[1] for it in q.get("queue_running", []) + q.get("queue_pending", []) if len(it) > 1}
+    except Exception:
+        return jobs
+    out, n = [], 0
+    for job, pid, g in jobs:
+        if pid not in known:
+            try:
+                done = pid in _history(pid, server, timeout=10)
+            except (OSError, ValueError):
+                return out + jobs[len(out):]
+            if not done:
+                _forget(server, pid)
+                pid, n = submit(g, server), n + 1
+        out.append((job, pid, g))
+    if n:
+        print(f"   ↻ sent {n} queued job(s) again — the server forgot them when it restarted", flush=True)
+    return out
 
 
 def server_up(server):
@@ -672,6 +1067,36 @@ def server_up(server):
         return True
     except Exception:
         return False
+
+
+_ARGV = {}
+
+
+def server_argv(server):
+    """The server's own launch arguments (ComfyUI's /system_stats reports sys.argv as system.argv),
+    or None when it doesn't say (an older ComfyUI, or no answer). Asked once per server per run."""
+    if server not in _ARGV:
+        try:
+            with urllib.request.urlopen(f"{server}/system_stats", timeout=5) as r:
+                argv = (json.loads(r.read()).get("system") or {}).get("argv")
+        except Exception:
+            argv = None
+        _ARGV[server] = argv if isinstance(argv, list) else None
+    return _ARGV[server]
+
+
+def fp32_warning(server):
+    """A warning when an SA3 render goes to a ComfyUI that wasn't started with --force-fp32, else "".
+
+    In fp16 Stable Audio 3 returns a WAV of the right length full of static (AGENTS.md gotcha 11),
+    quickly and without any error, so nothing downstream notices. A ComfyUI started for pixelmon is
+    the usual cause: whichever wrapper starts the shared server first decides its dtype. A warning,
+    not a refusal — a box can run fp32 some other way, and the person may know better."""
+    argv = server_argv(server)
+    if argv is None or "--force-fp32" in argv:
+        return ""
+    return (f"   ⚠ {_short(server)}: ComfyUI was started WITHOUT --force-fp32 — Stable Audio 3 renders static in fp16.\n"
+            f"     Restart it there with  ~/launch-comfyui.sh --force-fp32  (fp32 costs pixelmon VRAM; see AGENTS.md)")
 
 
 def server_has_ckpt(server, ckpt):
@@ -767,16 +1192,36 @@ def loop_wrap(path, crossfade=2.0):
     t = np.linspace(0.0, 1.0, x, endpoint=False, dtype=audio.dtype)[:, None]
     out = audio[:n - x].copy()
     out[:x] = audio[:x] * np.sin(t * np.pi / 2) + audio[n - x:] * np.cos(t * np.pi / 2)
+    # Equal-power assumes the two halves are UNcorrelated. When head and tail are in phase (a drone,
+    # a sustained chord) the blend reaches x1.41 and the integer write hard-clipped it. Bring the
+    # whole loop back to the source's own peak instead; the loudness stage runs after this.
+    src_pk, pk = float(np.abs(audio).max()), float(np.abs(out).max())
+    if pk > src_pk > 0:
+        out *= src_pk / pk
 
-    tmp = os.path.splitext(path)[0] + ".loop.wav"
+    root, ext = os.path.splitext(path)
+    tmp = f"{root}.loop{ext}"                 # same container as the source, never WAV-in-.flac
     try:
-        sf.write(tmp, out, sr, subtype=info.subtype)
+        sf.write(tmp, out, sr, subtype=info.subtype, format=info.format)
         os.replace(tmp, path)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
         return path, None
     return path, len(out) / sr
+
+
+def _true_peak(path):
+    """True peak in dBTP via ffmpeg's ebur128 (4x oversampled), or None. Works on any length."""
+    import re
+    r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-i", path, "-af", "ebur128=peak=true",
+                        "-f", "null", "-"], capture_output=True, text=True)
+    m = re.findall(r"True peak:\s*\n\s*Peak:\s*(-?[\d.]+|-inf)", r.stderr)
+    try:
+        v = float(m[-1]) if m else None
+    except ValueError:
+        return None
+    return v if v is not None and v > -200 else None
 
 
 def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
@@ -800,12 +1245,17 @@ def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
     """
     if shutil.which("ffmpeg") is None:
         return path
-    # loudnorm needs enough signal to integrate over. Measured on real output:
+    # loudnorm needs enough signal to INTEGRATE loudness over. Measured on real output:
     # it reports cleanly at 2.97s and 0.60s, and returns nothing at 0.20s and
     # 0.12s. So the floor is ~0.4s, NOT the 3s an EBU R128 window suggests — a
     # 3s guard silently skipped almost the whole SFX pack, since generated
-    # effects land at 2.97s. Anything shorter keeps the node's peak
-    # normalization, and the JSON-parse fallback below catches stragglers.
+    # effects land at 2.97s. Below it the LUFS ceiling is skipped and the node's
+    # peak normalization stands.
+    #
+    # The TRUE-PEAK ceiling is NOT skipped. This guard used to return early, which
+    # dropped both: a 0.3 s chipfx blip (a square wave peak-normalized to -1 dBFS)
+    # shipped at +1.1 dBTP, because a square's band-limited reconstruction
+    # overshoots its samples. True peak needs no integration window.
     try:
         dur = float(subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -813,17 +1263,24 @@ def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
             capture_output=True, text=True).stdout.strip())
     except (ValueError, FileNotFoundError):
         return path
-    if dur < 0.4:
-        return path
+    short = dur < 0.4
 
     meas = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
+        ["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-i", path,
          "-af", "loudnorm=print_format=json", "-f", "null", "-"],
         capture_output=True, text=True).stderr
+    cur_i = cur_tp = None
     try:
         blob = json.loads(meas[meas.rindex("{"):meas.rindex("}") + 1])
         cur_i, cur_tp = float(blob["input_i"]), float(blob["input_tp"])
     except (ValueError, KeyError):
+        pass
+    import math
+    if short or cur_i is None or not math.isfinite(cur_i):
+        cur_i = None                       # nothing to integrate: no loudness ceiling for this file
+    if cur_tp is None or not math.isfinite(cur_tp):
+        cur_tp = _true_peak(path)          # loudnorm said nothing: ask ebur128 for the peak alone
+    if cur_tp is None:
         return path
 
     # A CEILING, not a target. Only ever attenuate.
@@ -837,11 +1294,12 @@ def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
     #
     # So: pull down anything above the ceiling, leave everything else alone,
     # and separately guarantee no true peak exceeds the limit.
-    gain = min(0.0, lufs - cur_i, true_peak - cur_tp)
+    gain = min(0.0, (lufs - cur_i) if cur_i is not None else 0.0, true_peak - cur_tp)
     if gain > -0.1:                       # already compliant; don't re-encode
         return path
 
-    tmp = os.path.splitext(path)[0] + ".ln.wav"
+    root, ext = os.path.splitext(path)
+    tmp = f"{root}.ln{ext or '.wav'}"         # same container as the source: never WAV data under .flac
     m = f"volume={gain:.2f}dB"
     # PRESERVE THE SOURCE'S PCM WIDTH. ffmpeg defaults to 16-bit, so re-encoding
     # here silently promoted format-locked 8-bit audio back to 16-bit — throwing
@@ -857,7 +1315,10 @@ def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
                  "PCM_32": ["-c:a", "pcm_s32le"]}.get(sub, [])
     except Exception:
         codec = []
-    r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+    if ext.lower() == ".ogg":
+        codec = ["-c:a", "libvorbis", "-q:a", "8"] if _has_encoder("libvorbis") else \
+                ["-c:a", "vorbis", "-strict", "-2", "-ac", "2", "-q:a", "8"]
+    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
                         "-i", path, "-af", m] + codec + [tmp],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
@@ -867,12 +1328,53 @@ def loudness_normalize(path, lufs=-16.0, true_peak=-1.0):
     return path
 
 
+_ENCODERS = None
+
+
+def _has_encoder(name):
+    """Does this ffmpeg build have the encoder? (Asked once.)"""
+    global _ENCODERS
+    if _ENCODERS is None:
+        try:
+            _ENCODERS = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-encoders"], capture_output=True,
+                                       text=True, timeout=30).stdout
+        except Exception:
+            _ENCODERS = ""
+    return f" {name} " in _ENCODERS
+
+
+def to_lossy(path, kind, keep=False):
+    """MP3 or Opus from a finished WAV, client-side — for the CPU engines, which write WAV themselves
+    (on the diffusion path --mp3/--opus are ComfyUI save nodes). Returns the new path, or the original
+    when it can't. Same never-onto-itself rule as to_flac."""
+    if shutil.which("ffmpeg") is None:
+        print(f"   ⚠ --{kind} needs ffmpeg on PATH; leaving WAV")
+        return path
+    out = os.path.splitext(path)[0] + "." + kind
+    if os.path.abspath(out) == os.path.abspath(path):
+        return path
+    if kind == "mp3":
+        codec = ["-c:a", "libmp3lame", "-q:a", "0"] if _has_encoder("libmp3lame") else ["-b:a", "256k"]
+    else:   # Opus only runs at 48 kHz; libopus resamples by itself, the native encoder needs -ar
+        codec = (["-c:a", "libopus", "-b:a", "128k"] if _has_encoder("libopus")
+                 else ["-c:a", "opus", "-strict", "-2", "-ar", "48000", "-b:a", "128k"])
+    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-i", path] + codec + [out],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+        print(f"   ⚠ {kind} encode failed for {os.path.basename(path)}; keeping WAV")
+        if os.path.exists(out):
+            os.remove(out)
+        return path
+    if not keep:
+        os.remove(path)
+    return out
+
+
 def to_flac(path, keep=False):
     """Transcode to FLAC losslessly, client-side. Returns the new path.
 
-    Why this exists separately from --flac: that flag attaches a ComfyUI SaveAudio
-    node, so it only ever applied to the diffusion path. --chip/--opl/--chipfx
-    write their own files and were stuck with WAV or a lossy OGG.
+    Every engine's FLAC comes from here: the CPU engines write WAV themselves, and the
+    diffusion path now always saves WAV on the server and encodes last (_attach_save).
 
     FLAC is the right container for format-locked audio. Measured on a 6-bit
     11 kHz render, distinct amplitude levels surviving the encode:
@@ -894,7 +1396,7 @@ def to_flac(path, keep=False):
     # deleted every ComfyUI-saved .flac after a successful download.
     if os.path.abspath(out) == os.path.abspath(path):
         return path
-    r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+    r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
                         "-i", path, "-c:a", "flac", "-compression_level", "8", out],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
@@ -917,9 +1419,9 @@ def to_ogg(path, quality=5, keep=False):
     output format. Encoding a 60s track takes well under a second, so there is
     nothing to gain by pushing it upstream.
 
-    ffmpeg's *native* vorbis encoder is used with `-strict -2` because this
-    build ships no libvorbis, and python-soundfile segfaults writing OGG here
-    (libsndfile 1.2.2, truncates then SIGSEGVs). Measured on a 60s 48kHz track:
+    libvorbis when this ffmpeg has it; otherwise ffmpeg's *native* vorbis encoder
+    with `-strict -2` (the dev box's build ships no libvorbis). python-soundfile
+    segfaults writing OGG here (libsndfile 1.2.2, truncates then SIGSEGVs). Measured on a 60s 48kHz track:
     11 MB -> 436 KB at q=5, a 26x reduction with the full duration intact.
     """
     if shutil.which("ffmpeg") is None:
@@ -928,13 +1430,24 @@ def to_ogg(path, quality=5, keep=False):
     out = os.path.splitext(path)[0] + ".ogg"
     if os.path.abspath(out) == os.path.abspath(path):
         return path            # same trap as to_flac: would delete its own input
-    # `-ac 2` is not optional: ffmpeg's native vorbis encoder is STEREO-ONLY
-    # ("Current FFmpeg Vorbis encoder only supports 2 channels"), and narration
-    # comes out of Kokoro as 24kHz mono. Upmixing costs almost nothing because
-    # Vorbis joint-stereo codes two identical channels efficiently.
+    if _has_encoder("libvorbis"):
+        # The real encoder when this ffmpeg has it: any channel count, and every quality works.
+        codec = ["-c:a", "libvorbis", "-q:a", str(quality)]
+    else:
+        # ffmpeg's native encoder is STEREO-ONLY ("Current FFmpeg Vorbis encoder only supports
+        # 2 channels"), and narration and the chip engines are mono. `-ac 2` upmixed with a -3 dB pan
+        # law, so every mono OGG came out 3 dB quieter than its WAV; duplicating the channel keeps the
+        # level. Vorbis joint-stereo codes two identical channels almost for free.
+        # It also writes SILENCE at -q:a 0 (measured -91 dB mean on a chip track), so 1 is its floor.
+        try:
+            import soundfile as _sf
+            mono = _sf.info(path).channels == 1
+        except Exception:
+            mono = False
+        codec = (["-af", "pan=stereo|c0=c0|c1=c0"] if mono else ["-ac", "2"]) + \
+                ["-c:a", "vorbis", "-strict", "-2", "-q:a", str(max(1, quality))]
     r = subprocess.run(
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
-         "-c:a", "vorbis", "-strict", "-2", "-ac", "2", "-q:a", str(quality), out],
+        ["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-i", path] + codec + [out],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if r.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
         print(f"   ⚠ ogg encode failed for {os.path.basename(path)}; keeping WAV")
@@ -966,21 +1479,22 @@ def encode(path, a):
     output these engines produce a lossy codec destroys the very thing that makes
     it sound like hardware.
 
-    IDEMPOTENT, and that is load-bearing rather than tidy. On the diffusion path
-    --flac attaches a ComfyUI SaveAudio node, so the server already returns a
+    IDEMPOTENT, and that is load-bearing rather than tidy. When the diffusion path
+    still had --flac attach a ComfyUI SaveAudio node, the server already returned a
     .flac; re-encoding it resolved the output to the SAME path, ffmpeg refused to
     write it, and the `if not keep: os.remove(path)` at the end deleted the file.
     Every asset downloaded fine and was then destroyed, reported as "nothing
     produced". So: if the file is already in the requested format, leave it alone.
     """
-    want = "flac" if getattr(a, "flac", False) else (
-        "ogg" if getattr(a, "ogg", False) else None)
+    want = next((k for k in ("flac", "ogg", "mp3", "opus") if getattr(a, k, False)), None)
     if want is None or path.lower().endswith("." + want):
         return path
     if want == "flac":
         return to_flac(path, getattr(a, "keep_wav", False))
-    return to_ogg(path, getattr(a, "ogg_quality", 5),
-                  getattr(a, "keep_wav", False))
+    if want == "ogg":
+        return to_ogg(path, getattr(a, "ogg_quality", 5),
+                      getattr(a, "keep_wav", False))
+    return to_lossy(path, want, getattr(a, "keep_wav", False))
 
 
 def encode_all(paths, a):
@@ -994,23 +1508,377 @@ def audio_outs(outs):
     return [f for node in outs.values() for f in node.get("audio", [])]
 
 
-def fetch_audio(item, dest_dir, server=None):
-    """Download one server-side output file via /view into dest_dir; return local path."""
+def unique_path(path):
+    """`path`, or path with _2, _3 … when a file is already there. The same seed re-rendered into the
+    same folder (another box, another run, other flags) used to overwrite the earlier take silently."""
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    sep = "" if root.endswith("_") else "_"      # ComfyUI names end in "_": x_00001_2.wav, not x_00001__2.wav
+    k = 2
+    while os.path.exists(f"{root}{sep}{k}{ext}"):
+        k += 1
+    return f"{root}{sep}{k}{ext}"
+
+
+def fetch_audio(item, dest_dir, server=None, tries=3):
+    """Download one server-side output file via /view into dest_dir; return the local path.
+    Written to a .part file and renamed when complete (a Ctrl-C mid-download left half a WAV under
+    the real name), checked against Content-Length (a cut connection was accepted as a 5 s file for
+    a 10 s render), and retried a couple of times. A 404 is final."""
+    import http.client
     import urllib.parse
     server = server or SERVER
     q = urllib.parse.urlencode({"filename": item["filename"],
                                 "subfolder": item.get("subfolder", ""),
                                 "type": item.get("type", "output")})
     os.makedirs(dest_dir, exist_ok=True)
-    out = os.path.join(dest_dir, item["filename"])
-    with urllib.request.urlopen(f"{server}/view?{q}", timeout=300) as r, open(out, "wb") as f:
-        shutil.copyfileobj(r, f)
+    out = unique_path(os.path.join(dest_dir, os.path.basename(item["filename"])))
+    tmp = out + ".part"
+    last = None
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(f"{server}/view?{q}", timeout=300) as r, open(tmp, "wb") as f:
+                want = r.headers.get("Content-Length")
+                shutil.copyfileobj(r, f)
+            got = os.path.getsize(tmp)
+            if want is not None and int(want) != got:
+                raise OSError(f"short download: {got} of {want} bytes")
+            if got == 0:
+                raise OSError("empty download")
+            os.replace(tmp, out)
+            return out
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 404:
+                break
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            last = e
+        time.sleep(1 + attempt)
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    why = f"couldn't download {item['filename']} from {_short(server)}: {getattr(last, 'reason', last)}"
+    if isinstance(last, urllib.error.HTTPError) and last.code == 404:
+        raise MissingOutput(why)
+    raise OSError(why)
+
+
+def is_local(url):
+    """Is this server THIS machine? By hostname, not substring: 127.0.0.12 is not 127.0.0.1."""
+    import urllib.parse
+    try:
+        return urllib.parse.urlparse(url).hostname in ("127.0.0.1", "localhost", "::1")
+    except ValueError:
+        return False
+
+
+def collect(items, dest, server):
+    """The saved files of a finished job, on this machine. A local server's files are MOVED out of
+    ComfyUI's output folder (a farm that included the local box used to leave copies behind); when
+    they aren't where expected — a local ComfyUI whose output folder isn't ~/ComfyUI/output — they
+    are downloaded instead. Remote servers: /view. Never an empty success."""
+    files = []
+    for it in items:
+        local = os.path.join(OUTPUT, it.get("subfolder", ""), it["filename"]) if is_local(server) else None
+        if local and os.path.isfile(local):
+            if dest:
+                tgt = unique_path(os.path.join(dest, os.path.basename(local)))
+                shutil.move(local, tgt)
+                files.append(tgt)
+            else:
+                files.append(local)
+        else:
+            files.append(fetch_audio(it, dest or os.path.join(OUTPUT, "soundmon"), server))
+    if not files:
+        raise JobFailed("the server reported success but no audio file")
+    return files
+
+
+# --- provenance: every file says how it was made -------------------------------
+# The seed in a file name re-runs a take only if you also remember the prompt, the style, the engine
+# and the flags. The GUI keeps a job.json; the CLI kept nothing, so a good take found weeks later in a
+# game folder could not be made again. The recipe goes INSIDE the file instead of beside it, so it
+# survives being copied, renamed or shipped: a RIFF LIST/INFO ICMT comment in WAV, a comment tag
+# (Vorbis comment / ID3) in FLAC, OGG, Opus and MP3. The audio data is not touched. --no-recipe
+# leaves it out (shipped game assets that shouldn't carry prompts or local paths).
+def command_line():
+    """The command as typed, ready to paste back (the wrapper's name, not soundmon.py)."""
+    return shlex.join(["soundmon"] + sys.argv[1:])
+
+
+def recipe(a, subject=None, seed=None, server=None, seconds=None, engine=None):
+    """How a take was made, as a dict (stored as compact JSON). Diffusion takes get the full recipe;
+    the CPU engines (engine=NAME) get their engine and the command, which reproduces them exactly."""
+    r = {"tool": "soundmon", "version": __version__}
+    if engine:
+        r["engine"] = engine
+        if subject:
+            r["prompt"] = subject
+    else:
+        song = bool(getattr(a, "song", False))
+        r["engine"] = "song" if song else a.engine
+        r["model"] = a.song_base if song else a.base
+        r["prompt"] = subject
+        if song:
+            r.update(bpm=a.bpm, key=a.key, timesig=a.timesig, lang=a.lang,
+                     lyrics=(a.lyrics or "")[:400], negative=a.negative)
+        else:
+            pos, neg = final_prompts(a, subject)
+            r.update(positive=pos, negative=neg)
+            if reprompts(a):
+                r["reprompt"] = f"rewritten on the server by {a.reprompt_model} (temp {a.reprompt_temp:g})"
+            if a.style:
+                r["style"] = a.style
+        r.update(seed=seed, seconds=seconds if seconds is not None else a.seconds, steps=a.steps, cfg=a.cfg,
+                 sampler=a.sampler, scheduler=a.scheduler, format=a.format, bits=a.bits)
+        if getattr(a, "ref", None):
+            r.update(ref=os.path.basename(a.ref), ref_strength=a.ref_strength, ref_match=bool(a.ref_match))
+        if getattr(a, "match_tone", None):
+            r["match_tone"] = os.path.basename(a.match_tone)
+        if server:
+            r["server"] = _short(server)
+    r["command"] = command_line()
+    return r
+
+
+def _tag_wav(path, text, software):
+    """Put (or replace) a LIST/INFO chunk with ICMT + ISFT at the end of a WAV. Pure byte surgery:
+    every other chunk, the fmt header and the samples are copied unchanged. Not done with ffmpeg on
+    purpose — remuxing rewrites the header (24-bit becomes WAVE_FORMAT_EXTENSIBLE, which some old
+    tools and game engines refuse)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return False
+    pos, kept = 12, []
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], int.from_bytes(data[pos + 4:pos + 8], "little")
+        end = pos + 8 + size
+        if end > len(data):                       # a streamed/unfinished header: don't touch it
+            return False
+        if not (cid == b"LIST" and data[pos + 8:pos + 12] == b"INFO"):
+            kept.append(data[pos:end] + (b"\0" if size & 1 else b""))
+        pos = end + (size & 1)
+
+    def sub(cid, value):
+        b = value.encode("utf-8") + b"\0"
+        return cid + len(b).to_bytes(4, "little") + b + (b"\0" if len(b) & 1 else b"")
+    info = b"INFO" + sub(b"ICMT", text) + sub(b"ISFT", software)
+    body = b"WAVE" + b"".join(kept) + b"LIST" + len(info).to_bytes(4, "little") + info
+    tmp = path + ".tag"
+    with open(tmp, "wb") as f:
+        f.write(b"RIFF" + len(body).to_bytes(4, "little") + body)
+    os.replace(tmp, path)
+    return True
+
+
+def tag_file(path, rec):
+    """Embed `rec` (the recipe) in a finished file. Never fails the run: a file that can't be tagged
+    is left exactly as it was."""
+    text = json.dumps(rec, ensure_ascii=True, separators=(",", ":"))
+    software = f"soundmon {__version__}"
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".wav":
+            return _tag_wav(path, text, software)
+        if ext in (".flac", ".ogg", ".opus", ".mp3") and shutil.which("ffmpeg"):
+            root, _ = os.path.splitext(path)
+            tmp = f"{root}.tagging{ext}"
+            r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", path, "-map", "0", "-c", "copy",
+                                "-map_metadata", "0", "-metadata", f"comment={text}",
+                                "-metadata", f"encoder={software}", tmp],
+                               capture_output=True, text=True)
+            if r.returncode == 0 and os.path.getsize(tmp) > 0:
+                os.replace(tmp, path)
+                return True
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    except Exception:
+        pass
+    return False
+
+
+def read_recipe(path):
+    """The recipe a soundmon file carries, or None (selfcheck, and anyone scripting re-runs)."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags:stream_tags", "-of", "json", path],
+                           capture_output=True, text=True, timeout=30)
+        j = json.loads(r.stdout or "{}")
+        # WAV/FLAC/MP3 keep it as a format tag; OGG and Opus as a tag of the audio stream
+        tags = [j.get("format", {}).get("tags", {})] + [st.get("tags", {}) for st in j.get("streams", [])]
+        c = next((v for t in tags for k, v in t.items() if k.lower() == "comment"), None)
+        return json.loads(c) if c else None
+    except Exception:
+        return None
+
+
+class WriteWatch:
+    """Which files a CPU engine wrote. The engines (chip, opl, chipfx, blip, narrate) own their file
+    writes and all go through soundfile.write, so rather than threading a recorder through five
+    modules, soundmon watches that one call while the engine runs, then tags whatever survived
+    (the WAV, or the .ogg/.flac it was encoded to)."""
+
+    def __init__(self):
+        self.paths = []
+
+    def __enter__(self):
+        try:
+            import soundfile as sf
+        except Exception:
+            self.sf = None
+            return self
+        self.sf, self.orig = sf, sf.write
+
+        def write(file, *args, **kw):
+            out = self.orig(file, *args, **kw)
+            if isinstance(file, (str, os.PathLike)):
+                self.paths.append(os.path.abspath(os.fspath(file)))
+            return out
+        sf.write = write
+        return self
+
+    def __exit__(self, *exc):
+        if self.sf is not None:
+            self.sf.write = self.orig
+        return False
+
+    def finals(self):
+        out = []
+        for p in dict.fromkeys(self.paths):
+            for cand in [p] + [os.path.splitext(p)[0] + e for e in (".flac", ".ogg", ".mp3", ".opus")]:
+                if os.path.isfile(cand) and cand not in out:
+                    out.append(cand)
+        return out
+
+
+def run_engine(a, name, module):
+    """Hand off to a CPU engine and tag what it made (unless --no-recipe)."""
+    sys.path.insert(0, _SCRIPT_DIR)
+    import importlib
+    mod = importlib.import_module(module)
+    with WriteWatch() as ww:
+        made = mod.run(a, slug, to_ogg, loudness_normalize, to_flac)
+    # --mp3 / --opus: the engines only know FLAC and OGG, so they hand back a WAV; convert it here,
+    # in one place, rather than teaching five engines two more codecs.
+    if (a.mp3 or a.opus) and not (a.flac or a.ogg):
+        kind = "mp3" if a.mp3 else "opus"
+        for f in [f for f in ww.finals() if f.lower().endswith(".wav")]:
+            out = to_lossy(f, kind, a.keep_wav)
+            if out != f:
+                ww.paths.append(out)
+                print(f"   ↪ {os.path.basename(out)}")
+    if not getattr(a, "no_recipe", False):
+        subj = a.prompt or a.from_midi or a.from_audio or getattr(a, "narrate_file", None) or getattr(a, "blip_file", None)
+        rec = recipe(a, subject=subj, engine=name)
+        for f in ww.finals():
+            tag_file(f, rec)
+    return made
+
+
+# --- --batch-file: one file per manifest row, named by its key -------------------
+from collections import namedtuple  # noqa: E402
+
+# One take to render. `name` is the final file name without extension (a --batch-file key) or None
+# (keep ComfyUI's <subject>_<len>_<fmt>_s<seed>_00001_ name); `seconds` overrides --seconds or None.
+Job = namedtuple("Job", "subj seed dest name seconds")
+AUDIO_EXTS = (".wav", ".flac", ".ogg", ".mp3", ".opus")
+
+
+def parse_batch_file(path, slugify=None):
+    """Read a --batch-file manifest into [(key, seconds|None, prompt)].
+
+        key | prompt                  one sound, saved as key.wav
+        key | seconds | prompt        with its own length
+        a plain line                  named after itself
+        # comment, blank lines        skipped
+
+    The same `key | text` shape --narrate-file and --blip-file read, so one game string table can
+    drive narration, blips and sound effects. Unlike --batch, prompts may contain commas — that is
+    the point: a real description ("a goblin, red cloak, laughing") can't go in a comma list."""
+    import re
+    slugify = slugify or slug
+    out, seen = [], {}
+    with open(os.path.expanduser(path), encoding="utf-8") as f:
+        for ln, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            secs = None
+            if "|" in line:
+                parts = [x.strip() for x in line.split("|")]
+                if len(parts) > 3:
+                    raise ValueError(f"line {ln}: expected 'key | prompt' or 'key | seconds | prompt', "
+                                     f"got {len(parts)} fields")
+                key, text = parts[0], parts[-1]
+                if len(parts) == 3:
+                    try:
+                        secs = float(parts[1].rstrip("s"))
+                    except ValueError:
+                        raise ValueError(f"line {ln}: the middle field must be seconds, got {parts[1]!r}") from None
+            else:
+                key, text = "", line
+            if not text:
+                raise ValueError(f"line {ln}: no prompt")
+            key = re.sub(r"[^A-Za-z0-9._-]+", "_", key).strip("._") or slugify(text)
+            if key in seen:
+                raise ValueError(f"line {ln}: key {key!r} is already used on line {seen[key]}")
+            seen[key] = ln
+            out.append((key, secs, text))
     return out
+
+
+def existing_output(dest, name):
+    """The file a --batch-file key already has in dest (any audio format), or None."""
+    for ext in AUDIO_EXTS:
+        p = os.path.join(dest, name + ext)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def finish_files(a, files, job, server=None):
+    """Everything after the server: loop, loudness, tone match, encode, the --batch-file name, the
+    recipe. ONE place for the single-server path and the farm, which had drifted (only one of them
+    reported loops)."""
+    # Order: tone match (EQ the take) -> loop (the wrap MIXES two signals, so it changes level) ->
+    # the loudness/true-peak ceiling LAST before encoding: anything that changes gain after it
+    # invalidates it, and --match-tone used to run after it and could lift a take over the ceiling.
+    # Everything here works on the WAV the server saved; encode() makes the FLAC/OGG/MP3/Opus last.
+    if getattr(a, "match_tone", None):
+        files = match_tone_files(files, a.match_tone)
+    if a.loop:
+        for f in files:
+            _, sec = loop_wrap(f, a.loop_crossfade)
+            if sec:
+                print(f"   ↻ looped  {os.path.basename(f)}  ({sec:.1f}s, {a.loop_crossfade:g}s crossfade)")
+            else:
+                print(f"   ⚠ not looped: {os.path.basename(f)} is shorter than 4x --loop-crossfade "
+                      f"({a.loop_crossfade:g}s), or unreadable")
+    if a.lufs_target is not None:
+        files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
+    files = encode_all(files, a)
+    if job.name:
+        named = []
+        for i, f in enumerate(files):
+            stem = job.name if i == 0 else f"{job.name}_{i + 1}"
+            tgt = os.path.join(job.dest or os.path.dirname(f), stem + os.path.splitext(f)[1])
+            os.replace(f, tgt)
+            named.append(tgt)
+        files = named
+    if not getattr(a, "no_recipe", False):
+        rec = recipe(a, job.subj, job.seed, server, job.seconds)
+        for f in files:
+            tag_file(f, rec)
+    return files
+
+
+FARM_GRACE = 30      # seconds a farm box may stop answering before its job goes to another box
 
 
 def run_farm(a, work):
     """Render farm: distribute jobs across POOL with dynamic dispatch (feed the free GPU).
-    Faster boxes naturally pull more jobs; results are fetched back from whichever GPU made them."""
+    Faster boxes naturally pull more jobs; results are fetched back from whichever GPU made them.
+    Returns the finished files."""
     live = [s for s in POOL if server_up(s)]
     down = [s for s in POOL if s not in live]
     if down:
@@ -1025,11 +1893,15 @@ def run_farm(a, work):
     missing = [s for s in live if s not in ready]
     if missing:
         print(f"   ⚠ skipping (no {need}): {', '.join(_short(s) for s in missing)}")
-        hint = "--song" if a.song else ""
-        print(f"     provision them with:  ./download-models.sh {hint}".rstrip())
+        print(f"     provision them with:  {download_hint(a)}")
     if not ready:
-        sys.exit(f"render farm: no server in the pool has {need}.")
+        sys.exit(f"render farm: no server in the pool has {need} — provision one:  {download_hint(a)}")
     live = ready
+    if not a.song and a.engine == "sa3":         # a box in fp16 renders static, quickly: say so per box
+        for s in live:
+            w = fp32_warning(s)
+            if w:
+                print(w)
     if getattr(a, "ref_name", None):           # every box needs its own copy of the reference
         for s in list(live):
             try:
@@ -1040,85 +1912,181 @@ def run_farm(a, work):
         if not live:
             sys.exit("render farm: no server accepted the reference.")
     print(f"   \U0001f69c render farm: {len(live)} GPU(s) — {', '.join(_short(s) for s in live)}")
-    pending = list(work)        # (subject, seed, dest)
-    inflight = {}               # server -> (subject, seed, dest, pid)
+    pending = list(work)        # Job tuples
+    inflight = {}               # server -> [job, pid, graph, polls, lost, resends]
     total = len(work)
     done = 0
     failed = 0
+    made = []
     fails = {}                  # server -> consecutive failed jobs
-    tries = {}                  # (subject, seed) -> failed attempts
+    nfail, nok = {}, {}         # server -> failed / finished jobs this run (the failure-rate rule)
+    tries = {}                  # job -> failed attempts
+    avoid = {}                  # job -> the box that failed it (its retry should go elsewhere)
+    refreshed = set()           # jobs already re-saved after a cached-empty answer
+    silent = {}                 # server -> when it stopped answering polls
+
+    def drop(srv, why):
+        if srv in live:
+            live.remove(srv)
+            print(f"   ⚠ dropping {_short(srv)}: {why}", flush=True)
 
     def launch(srv):
-        """Submit the next pending job to srv. False = server unusable (drop it)."""
-        while pending:
-            subj, seed, d = pending.pop(0)
-            try:
-                pid = submit(build_graph(a, seed, subject=subj, server=srv), srv)
-            except SystemExit:
-                pending.insert(0, (subj, seed, d))   # couldn't submit; keep the job
-                return False
-            inflight[srv] = (subj, seed, d, pid)
-            return True
-        return True             # nothing left to do
+        """Submit the next pending job to srv. False = server unusable (drop it).
+        A job that failed on srv goes to another box when one is live: the box that just failed is
+        free first, so without this the retry landed right back on it."""
+        if not pending:
+            return True             # nothing left to do
+        others = [x for x in live if x != srv]
+        pick = next((j for j in pending if avoid.get(j) != srv), None)
+        if pick is None:
+            if others:
+                return True         # leave it for another box
+            pick = pending[0]
+        pending.remove(pick)
+        g = build_graph(a, pick.seed, subject=pick.subj, server=srv, seconds=pick.seconds)
+        try:
+            pid = submit(g, srv)
+        except SystemExit as e:     # refused (a 400 says why) or unreachable: keep the job, say why
+            pending.insert(0, pick)
+            drop(srv, str(e).replace("\n", " | ")[:400])
+            return False
+        inflight[srv] = [pick, pid, g, 0, 0, 0]
+        return True
+
+    def job_failed(srv, job, why, breaker=True):
+        """A job that came back without audio: requeue it once (on whichever box frees up), and feed the
+        circuit breaker (AGENTS gotcha 16): a box that fails fast is free again first, so dynamic
+        dispatch would hand it most of the queue."""
+        nonlocal failed
+        inflight.pop(srv, None)
+        tries[job] = tries.get(job, 0) + 1
+        avoid[job] = srv
+        print(f"   ⚠ {_short(srv)} failed seed={job.seed}: {why}")
+        if tries[job] >= 2:
+            print(f"   ✖ seed={job.seed} failed twice — giving up on it")
+            failed += 1
+        else:
+            pending.append(job)
+        if breaker:
+            fails[srv] = fails.get(srv, 0) + 1
+            nfail[srv] = nfail.get(srv, 0) + 1
+            if fails[srv] >= 2:
+                drop(srv, f"{fails[srv]} failures in a row")
+            elif nfail[srv] >= 3 and nfail[srv] > nok.get(srv, 0):
+                # a box failing every other job never fails twice IN A ROW, and kept half the queue
+                drop(srv, f"{nfail[srv]} of its {nfail[srv] + nok.get(srv, 0)} jobs failed")
 
     for srv in list(live):
-        if launch(srv) is False:
-            live.remove(srv)
+        launch(srv)
 
-    while inflight:
+    while inflight or (pending and live):
         advanced = False
-        for srv, (subj, seed, d, pid) in list(inflight.items()):
+        for srv, slot in list(inflight.items()):
+            job, pid, g = slot[0], slot[1], slot[2]
             try:
                 outs = poll(pid, srv)
+            except CachedNoOutput:
+                # ComfyUI served an identical re-run from its cache and saved nothing. The box is fine:
+                # re-save it under a fresh folder (instant), and never count it toward the breaker.
+                advanced = True
+                if job not in refreshed:
+                    refreshed.add(job)
+                    print(f"   ↻ {_short(srv)}: identical re-run of seed={job.seed} answered from its cache — re-saving it",
+                          flush=True)
+                    g2 = fresh_copy(g)
+                    try:
+                        inflight[srv] = [job, submit(g2, srv), g2, 0, 0, slot[5]]
+                    except SystemExit:
+                        job_failed(srv, job, "couldn't re-send the cached job", breaker=False)
+                    continue
+                job_failed(srv, job, "the server returned no audio for an identical cached prompt", breaker=False)
+                continue
             except JobFailed as e:
-                # Circuit breaker (AGENTS gotcha 16): a box that fails fast is free
-                # again first, so dynamic dispatch would hand it most of the queue.
-                del inflight[srv]
                 advanced = True
-                fails[srv] = fails.get(srv, 0) + 1
-                tries[(subj, seed)] = tries.get((subj, seed), 0) + 1
-                print(f"   ⚠ {_short(srv)} failed seed={seed}: {e}")
-                if tries[(subj, seed)] >= 2:
-                    print(f"   ✖ seed={seed} failed twice — giving up on it")
-                    failed += 1
-                else:
-                    pending.append((subj, seed, d))
-                if fails[srv] >= 2:
-                    print(f"   ⚠ dropping {_short(srv)} after {fails[srv]} failures in a row")
-                    live.remove(srv)
+                silent.pop(srv, None)
+                why = str(e)
+                if e.kind == "poisoned":
+                    why += "  (its ComfyUI needs a restart)"
+                job_failed(srv, job, why)
                 continue
-            except Exception:
-                print(f"   ⚠ {_short(srv)} unreachable — requeueing its job")
-                pending.append((subj, seed, d))
-                del inflight[srv]
+            except Exception as e:
+                # One unanswered poll is not a dead box: a busy server can miss a 10 s deadline, or
+                # answer one /history with a 500. Requeueing at once sent the job to another box (or
+                # back to the same one) while the original was still rendering — 75 prompts for one
+                # job on a flaky box. So: keep polling for FARM_GRACE; after that the box is out of
+                # this run (never re-fed), and its job goes to the others.
+                if srv not in silent:
+                    print(f"   … {_short(srv)} not answering ({getattr(e, 'reason', e)}) — waiting up to {FARM_GRACE}s",
+                          flush=True)
+                first = silent.setdefault(srv, time.time())
+                if time.time() - first < FARM_GRACE:
+                    continue
+                silent.pop(srv, None)
+                _forget(srv, pid)
+                inflight.pop(srv, None)
+                pending.append(job)
+                avoid[job] = srv
+                drop(srv, f"no answer for {FARM_GRACE}s ({getattr(e, 'reason', e)}) — its job goes to another box")
                 advanced = True
                 continue
+            if silent.pop(srv, None) is not None:
+                print(f"   … {_short(srv)} answering again")
             if outs is None:
+                # Every ~5 polls: does the box still know the job? A restarted ComfyUI forgets its whole
+                # queue, and without this the farm would wait on that prompt forever.
+                slot[3] += 1
+                if slot[3] % 5 == 0:
+                    slot[4] = 0 if _known(pid, srv) else slot[4] + 1
+                    if slot[4] >= 3:
+                        _forget(srv, pid)
+                        advanced = True
+                        if slot[5] < 2:
+                            print(f"   ↻ {_short(srv)} restarted and lost seed={job.seed} — sending it again")
+                            try:
+                                inflight[srv] = [job, submit(g, srv), g, 0, 0, slot[5] + 1]
+                            except SystemExit:
+                                job_failed(srv, job, "it restarted and won't take the job again")
+                        else:
+                            job_failed(srv, job, "it keeps losing the job")
                 continue
             advanced = True
-            dest_dir = d or os.path.join(OUTPUT, "soundmon")
-            files = [fetch_audio(it, dest_dir, srv) for it in audio_outs(outs)]
-            # Before loudness: the wrap MIXES two signals, so it changes level.
-            # Anything that changes gain after normalizing invalidates it.
-            if a.loop:
-                for f in files:
-                    loop_wrap(f, a.loop_crossfade)
-            if a.lufs_target is not None:
-                files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
-            if getattr(a, "match_tone", None):
-                files = match_tone_files(files, a.match_tone)
-            files = encode_all(files, a)
-            done += 1
+            try:
+                files = collect(audio_outs(outs), job.dest, srv)
+            except MissingOutput as e:
+                if job not in refreshed:        # a cache answer naming a file that's gone: re-save, no breaker
+                    refreshed.add(job)
+                    print(f"   ↻ {_short(srv)}: seed={job.seed} came from its cache, file gone — re-saving it", flush=True)
+                    g2 = fresh_copy(g)
+                    try:
+                        inflight[srv] = [job, submit(g2, srv), g2, 0, 0, slot[5]]
+                    except SystemExit:
+                        job_failed(srv, job, "couldn't re-send the cached job", breaker=False)
+                    continue
+                job_failed(srv, job, str(e))
+                continue
+            except Exception as e:
+                job_failed(srv, job, f"couldn't fetch the result ({getattr(e, 'reason', e)})")
+                continue
             fails[srv] = 0
-            sj = f"{subj}  " if a.batch else ""
-            print(f"   ✅ [{done}/{total}] {_short(srv):<20} {sj}seed={seed}  ->  "
-                  f"{files[0] if files else '(no file)'}")
+            nok[srv] = nok.get(srv, 0) + 1
             del inflight[srv]
+            try:
+                files = finish_files(a, files, job, srv)
+            except Exception as e:     # local post-processing: not the box's fault, and re-rendering won't fix it
+                failed += 1
+                print(f"   ✗ seed={job.seed}: rendered, but finishing it here failed: {e}")
+                launch(srv)
+                continue
+            done += 1
+            made.extend(files)
+            sj = f"{job.name or job.subj}  " if (a.batch or a.batch_file) else ""
+            print(f"   ✅ [{done}/{total}] {_short(srv):<20} {sj}seed={job.seed}  ->  "
+                  f"{files[0] if files else '(no file)'}", flush=True)
             launch(srv)          # feed the now-free GPU its next job
         # Requeued work must reach a box that already went idle, or it is lost.
         for srv in list(live):
-            if pending and srv not in inflight and launch(srv) is False:
-                live.remove(srv)
+            if pending and srv not in inflight:
+                launch(srv)
         if not advanced:
             time.sleep(1)
 
@@ -1126,11 +2094,192 @@ def run_farm(a, work):
         print(f"   ⚠ {len(pending)} job(s) left undone (all GPUs dropped).")
     if failed or pending:
         sys.exit(f"render farm: {failed + len(pending)} of {total} job(s) produced no audio.")
+    return made
 
 
-def main():
-    p = argparse.ArgumentParser(prog="soundmon", add_help=False)
+def download_hint(a):
+    """The download-models.sh line that provisions this run's model."""
+    if a.song:
+        return "./download-models.sh --song"
+    return "./download-models.sh --sa3" if a.engine == "sa3" else "./download-models.sh --sao"
+
+
+# --- argument checks, all BEFORE the engine hand-offs ------------------------------
+# The CPU engines `return` from main() early (AGENTS gotcha 10), so a check placed with the diffusion
+# setup never ran for them: --mood bogus played "mysterious", --bpm 0 and --blip-rate 0 rendered
+# (a 270 s blip), and two engine flags were settled silently by whichever hand-off came first.
+CPU_ENGINES = ("--chip", "--opl", "--chipfx", "--oplfx", "--blip", "--narrate", "--record")
+
+
+def _engine_flags(a):
+    """Every engine this command line asks for, by its flag."""
+    out = []
+    for on, flag in ((a.chip, "--chip"), (a.opl, "--opl"), (a.chipfx, "--chipfx"), (a.oplfx, "--oplfx"),
+                     (a.blip or a.blip_file, "--blip"),
+                     # `--blip --narrate-file lines.txt` blips that manifest (the GUI sends it): one engine
+                     ((a.narrate or a.narrate_file) and not (a.blip or a.blip_file), "--narrate"),
+                     (a.record or a.record_file, "--record"), (a.song, "--song"), (a.music, "--music"),
+                     (a.master, "--master"), (a.index or a.similar, "--index/--similar")):
+        if on:
+            out.append(flag)
+    return out
+
+
+def _bad_key(text):
+    """Why a --key can't be read, or None. Song keys must be one of ComfyUI's 34; the chip engines read
+    'D minor', 'f#', 'Bb dorian' — but 'H major' used to become C minor without a word."""
+    import re
+    t = (text or "").strip()
+    m = re.fullmatch(r"([A-Ga-g])([#sb]?)(?:\s+([A-Za-z]+))?", t)
+    if not m:
+        return f"--key {text!r}: expected a note A-G (with # or b) and a scale, e.g. \"D minor\""
+    word = (m.group(3) or "").lower()
+    if word:
+        try:
+            sys.path.insert(0, _SCRIPT_DIR)
+            import chip
+            scales = set(chip.SCALES)
+        except Exception:
+            scales = {"major", "minor"}
+        if word not in scales and not word.startswith(("maj", "min")):
+            return f"--key {text!r}: unknown scale {word!r} (one of: {', '.join(sorted(scales))})"
+    return None
+
+
+def safe_name(name):
+    """--name as a file name and nothing else: no directories (`../x` wrote outside --output-to,
+    `a/b/c` crashed libsndfile), no leading dots, at most 80 characters."""
+    import re
+    out = re.sub(r"[^\w.\- ]+", "_", os.path.basename(name.replace("\\", "/"))).strip(" ._")[:80]
+    return out or "sound"
+
+
+def check_args(a, p):
+    """Refuse what can't work, in one place, before any engine runs. Returns the engine flag (or
+    "sfx" for the default), or None when nothing at all was asked for (main shows the help)."""
+    import math
+    eng = _engine_flags(a)
+    if len(eng) > 1:
+        p.error(f"pick one engine: {' and '.join(eng)} can't be combined")
+    engine = eng[0] if eng else None
+    cpu = engine in CPU_ENGINES
+    has_input = bool(a.prompt or a.batch or a.batch_file or a.narrate_file or a.record_file or a.blip_file
+                     or a.from_midi or a.from_audio or a.master or a.index or a.similar)
+    if engine is None and not has_input:
+        return None
+    # An engine with nothing to work on was answered with the full help and exit 0.
+    if engine in ("--blip", "--narrate", "--record") and not has_input:
+        p.error(f"{engine} needs text: soundmon \"Hello there\" {engine}   (or {engine}-file FILE)")
+    if engine in ("--song", "--music") and not (a.prompt or a.batch or a.batch_file):
+        p.error(f"{engine} needs a description: soundmon \"…\" {engine}")
+    if (a.from_midi or a.from_audio) and engine not in ("--chip", "--opl"):
+        p.error(f"{'--from-midi' if a.from_midi else '--from-audio'} plays a file on a chip: add --chip or --opl")
+    if cpu:
+        for on, flag in ((a.batch, "--batch"), (a.batch_file, "--batch-file"), (a.move_to_dirs, "--move-to-dirs"),
+                         (a.no_subdirs, "--no-subdirs"), (a.style, "--style"), (a.ref, "--ref"),
+                         (a.match_tone, "--match-tone"), (a.ref_match, "--ref-match"),
+                         (given("--ref-strength"), "--ref-strength"),
+                         (a.show_prompt, "--show-prompt"), (a.exact_prompt, "--exact-prompt"),
+                         (a.dry_run, "--dry-run")):
+            if on:
+                p.error(f"{flag} is for the AI engines (SFX, --music, --song); {engine} doesn't use it"
+                        + ("  (for a list of lines use --narrate-file / --blip-file)" if flag.startswith("--batch")
+                           else ""))
+    # numbers that would write destructive or absurd audio
+    def finite(name, v, lo=None, hi=None):
+        if v is None:
+            return
+        if not math.isfinite(v) or (lo is not None and v < lo) or (hi is not None and v > hi):
+            rng = f"{lo:g}..{hi:g}" if lo is not None and hi is not None else (f"≥ {lo:g}" if lo is not None else f"≤ {hi:g}")
+            p.error(f"{name} must be a number {rng}, got {v}")
+    if a.number < 1:
+        p.error(f"-n must be at least 1, got {a.number}")
+    if not math.isfinite(a.seconds) or a.seconds <= 0:
+        p.error(f"--seconds must be more than 0, got {a.seconds}")
+    if engine in ("--chip", "--opl"):
+        finite("--seconds", a.seconds, 0.5, 600)
+    if not cpu and engine not in ("--master", "--index/--similar") and a.seconds < 1.0:
+        # ComfyUI's EmptyLatentAudio has min 1.0: say it here, not as a validation blob from the server
+        p.error(f"--seconds must be at least 1 for the AI engines, got {a.seconds:g} "
+                f"(use --max-seconds to cut a take shorter)")
+    enc = [f for f, on in (("--flac", a.flac), ("--ogg", a.ogg), ("--mp3", a.mp3), ("--opus", a.opus)) if on]
+    if len(enc) > 1:
+        p.error(f"pick one output format: {' and '.join(enc)}  (one container per run)")
+    if a.loop and not cpu and (a.ogg or a.mp3 or a.opus):
+        print(f"   ⚠ --loop with {enc[0]}: lossy encoders pad the start, so the seam can click — "
+              "--flac keeps a loop sample-exact")
+    if a.match_tone and engine not in CPU_ENGINES:
+        mt = os.path.expanduser(a.match_tone)
+        if not os.path.isfile(mt) or not (_ffprobe_seconds(mt) or 0) > 0:
+            p.error(f"--match-tone {a.match_tone}: not a readable sound file")
+    finite("--normalize-db", a.normalize_db, -60, 0)
+    finite("--true-peak", a.true_peak, -30, 0)
+    finite("--fade-ms", a.fade_ms, 0, 10000)
+    finite("--threshold-db", a.threshold_db, -120, 0)
+    finite("--max-seconds", a.max_seconds, 0, None)
+    finite("--loop-crossfade", a.loop_crossfade, 0.01, 60)
+    finite("--ogg-quality", a.ogg_quality, 0, 10)
+    finite("--bpm", a.bpm, 10, 300)
+    finite("--blip-rate", a.blip_rate, 1, 60)
+    finite("--blip-duty", a.blip_duty, 0.05, 1)
+    finite("--blip-speed", a.blip_speed, 0.25, 8)
+    finite("--blip-pitch", a.blip_pitch, -36, 36)
+    finite("--blip-jitter", a.blip_jitter, 0, 24)
+    finite("--midi-start", a.midi_start, 0, 0.99)
+    finite("--transpose", a.transpose, -48, 48)
+    finite("--speed", a.speed, 0.25, 4)
+    finite("--pitch", a.pitch, -24, 24)
+    finite("--record-rate", a.record_rate, 8000, 192000)
+    finite("--reprompt-temp", a.reprompt_temp, 0, 2)
+    if a.cfg is not None:
+        finite("--cfg", a.cfg, 0, 30)
+    if a.steps is not None:
+        finite("--steps", a.steps, 1, 500)
+    if a.lufs is not None and str(a.lufs).lower() not in ("off", "none", "no", ""):
+        try:
+            finite("--lufs", float(a.lufs), -70, 0)
+        except ValueError:
+            p.error(f"--lufs must be a number or 'off', got {a.lufs!r}")
+    if a.mood != "auto" and engine in ("--chip", "--opl"):
+        try:
+            sys.path.insert(0, _SCRIPT_DIR)
+            import chip
+            moods = list(chip.MOODS)
+        except Exception:
+            moods = None
+        if moods and a.mood not in moods:
+            p.error(f"unknown --mood {a.mood!r}. One of: auto, {', '.join(moods)}  (see --list-moods)")
+    if given("--key") or engine == "--song":
+        if engine == "--song" and a.key not in KEYS:
+            p.error(f"unknown --key {a.key!r}. See --list-keys.")
+        why = _bad_key(a.key)
+        if why:
+            p.error(why)
+    if a.format not in FORMATS:
+        p.error(f"unknown format {a.format!r}. See --list-formats.")
+    if a.style and engine not in CPU_ENGINES:
+        for nm in [x.strip() for x in a.style.replace(",", " ").split() if x.strip()]:
+            if nm not in STYLES:
+                p.error(f"unknown style {nm!r}. See --list-styles.")
+    if a.name is not None:
+        a.name = safe_name(a.name)
+    if a.output_to:
+        out = os.path.abspath(os.path.expanduser(a.output_to))
+        if os.path.exists(out) and not os.path.isdir(out):
+            p.error(f"--output-to {a.output_to}: that is a file, not a folder")
+    return engine or "sfx"
+
+
+def build_parser():
+    """Every flag. A function of its own so tools/selfcheck.py can check that --help mentions each one."""
+    # allow_abbrev=False: `--sec 3` must not quietly mean --seconds — given() (which decides whether a
+    # value was typed or defaulted) only knows full flag names.
+    p = argparse.ArgumentParser(prog="soundmon", add_help=False, allow_abbrev=False,
+                                # a short usage line: argparse's own listed every flag (50 lines) above each error
+                                usage='soundmon "a description" [options]   (soundmon -h for all of them)')
     p.add_argument("-h", "--help", action="store_true", dest="show_help")
+    p.add_argument("--version", action="version", version=f"soundmon {__version__}",
+                   help="print the version and exit")
     p.add_argument("prompt", nargs="?", help='the sound you want, e.g. "a heavy door creaking"')
     p.add_argument("-n", "--number", type=int, default=1,
                    help="how many to generate, each with a different seed. default 1 "
@@ -1138,6 +2287,24 @@ def main():
     p.add_argument("--batch", default=None, metavar="SUBJECTS",
                    help='comma-separated subjects to round-robin, one of each per pass; '
                         'each goes to its own folder')
+    p.add_argument("--batch-file", dest="batch_file", default=None, metavar="FILE",
+                   help="render every row of a manifest: 'key | prompt' or 'key | seconds | prompt' "
+                        "(prompts may contain commas). One file per key, named by the key, in --output-to "
+                        "(default: the current directory). Works with the farm.")
+    p.add_argument("--skip-existing", dest="skip_existing", action="store_true",
+                   help="with --batch-file: skip keys that already have a file in the destination "
+                        "(resume an interrupted pack)")
+    p.add_argument("--show-prompt", dest="show_prompt", action="store_true",
+                   help="print the final positive/negative prompt (with the style and reference tails) "
+                        "before rendering")
+    p.add_argument("--exact-prompt", dest="exact_prompt", action="store_true",
+                   help="send the description exactly as typed: no 'sound effect' tail, no default negative, "
+                        "no Qwen rewrite (implies --no-reprompt; can't be combined with --style)")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="build the ComfyUI graph(s), print them as JSON and exit — no server is contacted")
+    p.add_argument("--no-recipe", dest="no_recipe", action="store_true",
+                   help="don't embed the recipe (prompt, seed, engine, command) in the output files' "
+                        "comment tag")
     p.add_argument("--seconds", type=float, default=10.0,
                    help="length in seconds (SA3 max 120, SAO max 47). default 10. The model conditions "
                         "on this, so it shapes the sound — not just its length.")
@@ -1148,9 +2315,12 @@ def main():
                         "'none' = the model's own 44.1 kHz stereo. see --list-formats")
     p.add_argument("--bits", type=int, default=16, choices=[8, 16, 24],
                    help="WAV bit depth. default 16")
-    p.add_argument("--steps", type=int, default=None, help="sampling steps (default 50, or 16 with --fast)")
-    p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 5.0")
-    p.add_argument("--fast", action="store_true", help="16 steps: ~3x faster, rougher")
+    p.add_argument("--steps", type=int, default=None,
+                   help="sampling steps (default: 8 on SA3, 50 on SAO (16 with --fast), 16 on --song)")
+    p.add_argument("--cfg", type=float, default=5.0, help="prompt adherence. default 1.0 on SA3 and --song, 5.0 on SAO")
+    p.add_argument("--fast", action="store_true",
+                   help="fewer steps, rougher: 16 instead of 50 on --engine sao, 8 instead of 16 on --song. "
+                        "No effect on SA3, which already renders in 8 steps")
     p.add_argument("--seed", type=int, default=-1, help="-1 = random each run")
     # --- chip mode: a real PSG synthesizer. No model, no GPU, no ComfyUI. ---
     p.add_argument("--chip", action="store_true",
@@ -1438,24 +2608,36 @@ def main():
     p.add_argument("--list-formats", action="store_true", help="list hardware formats and exit")
     p.add_argument("--list-styles", action="store_true", help="list style guides and exit")
     p.add_argument("--no-open", action="store_true", help="don't auto-play the result")
+    return p
+
+
+def main():
+    p = build_parser()
     a = p.parse_args()
 
     global SERVER, REMOTE, POOL
-    _target = a.server or os.environ.get("SOUNDMON_SERVER")
+    _target = pick_target(a.server)
     if _target:
-        POOL = [resolve_server(s.strip()) for s in _target.split(",") if s.strip()]
+        try:
+            # De-duplicated by resolved URL: `rtx,192.168.1.77` (or `a,a`) is ONE box. Listed twice it
+            # got two jobs at once, the second overwrote the first in the farm's bookkeeping, and that
+            # job was lost while the run still exited 0.
+            POOL = list(dict.fromkeys(resolve_server(s.strip()) for s in _target.split(",") if s.strip()))
+        except ValueError as e:
+            p.error(str(e))
         SERVER = POOL[0]
-        REMOTE = not any(h in SERVER for h in ("127.0.0.1", "localhost", "[::1]"))
+    REMOTE = not is_local(SERVER)
 
-    if a.show_help or (not a.prompt and not a.batch and not a.list_formats
-                       and not a.list_styles and not a.list_keys and not a.list_voices
-                       and not a.narrate_file and not a.record_file
-                       and not a.blip_file and not a.chip and not a.opl
-                       and not a.from_midi
-                       and not a.chipfx and not a.oplfx and not a.list_moods
-                       and not a.list_devices and not a.master and not a.index and not a.similar):
+    if a.show_help:
         print_help()
         return
+    listing = (a.list_formats or a.list_styles or a.list_keys or a.list_voices or a.list_moods
+               or a.list_devices)
+    if not listing:
+        engine = check_args(a, p)
+        if engine is None:                       # nothing to make and no engine named: show the way
+            print_help()
+            return
     if a.list_moods:
         sys.path.insert(0, _SCRIPT_DIR)
         import chip as _c
@@ -1499,7 +2681,8 @@ def main():
         return
     if a.list_keys:
         c = C
-        print(f"{c['b']}{c['cyan']}Musical keys{c['rst']}  {c['dim']}(use with --key, --song only){c['rst']}\n")
+        print(f"{c['b']}{c['cyan']}Musical keys{c['rst']}  {c['dim']}(use with --key: --song takes exactly these; "
+              f"--chip/--opl also take other scales, e.g. \"D dorian\"){c['rst']}\n")
         for q in ("major", "minor"):
             ks = [k for k in KEYS if k.endswith(q)]
             print(f"  {c['grn']}{q:<6}{c['rst']} {c['dim']}{', '.join(k.rsplit(' ',1)[0] for k in ks)}{c['rst']}")
@@ -1521,23 +2704,29 @@ def main():
                 _ck = ("stable_audio_3_small_music.safetensors" if a.music
                        else "stable_audio_3_small_sfx.safetensors")
             a.base = a.base or _ck
-            if a.text_encoder == "t5_base.safetensors":
+            if not given("--text-encoder"):
                 a.text_encoder = "t5gemma_b_b_ul2.safetensors"
             # ComfyUI's official Stable Audio 3 workflow: lcm / simple / 8 steps
             # / cfg 1. Verified by ear — 50 steps at cfg 7 produces clacking and
             # popping, and euler produces noise. These are not tunables.
-            if a.sampler == "dpmpp_3m_sde_gpu":
+            if not given("--sampler"):
                 a.sampler = "lcm"
-            if a.scheduler == "exponential":
+            if not given("--scheduler"):
                 a.scheduler = "simple"
             if a.steps is None:
                 a.steps = 8
-            if a.cfg == 5.0:
+            if not given("--cfg"):
                 a.cfg = 1.0
         else:
             a.base = a.base or "stable-audio-open-1.0.safetensors"
 
-    a.lufs_target = None
+    # No loudness ceiling is +inf, NOT None. The engines skip loudness_normalize() entirely when the
+    # target is None, and that function is also the only place --true-peak is enforced — so "no LUFS
+    # ceiling" (chip/opl music, --lufs off) silently meant "no true-peak ceiling" too: chip moods
+    # shipped at +0.8 dBTP and `--true-peak -3` did nothing. With +inf the loudness term never
+    # applies and the true-peak ceiling always does (attenuate-only either way).
+    NO_CEILING = float("inf")
+    a.lufs_target = NO_CEILING
     if str(a.lufs).lower() not in ("off", "none", "no", ""):
         try:
             a.lufs_target = float(a.lufs)
@@ -1554,6 +2743,8 @@ def main():
     # output tail, so a hand-voiced pack and a generated one are interchangeable.
     # Similarity search reads files that already exist — no model, no server.
     if a.index or a.similar:
+        # -n defaults to 1 (one take), which similar.py can't tell from a typed `-n 1`; this can.
+        a.similar_k = a.number if given("-n", "--number") else 20
         sys.path.insert(0, _SCRIPT_DIR)
         import similar
         similar.run(a)
@@ -1590,42 +2781,50 @@ def main():
     # SFX keep it: a pack where one effect is deafening is worse than a quiet one,
     # and that consistency is exactly what the ceiling buys. Diffusion keeps it
     # too — SA3 renders vary wildly in loudness, which is why it exists.
-    if (a.chip or a.opl) and not any(x == "--lufs" for x in sys.argv):
-        a.lufs_target = None
+    if (a.chip or a.opl) and not given("--lufs"):
+        a.lufs_target = NO_CEILING
+    # --chip and --opl compose in whole bars, so they already loop
+    # sample-accurately. Crossfading would shorten the track to hide an ending
+    # neither of them has. This sat BELOW the engine hand-offs (gotcha 10 again),
+    # so it never ran: --chip/--opl got the SFX default of 10 s, and a typed
+    # `--seconds 10` couldn't have been told apart from no --seconds anyway.
+    if (a.chip or a.opl) and not (a.chipfx or a.oplfx):
+        if not given("--seconds"):           # 10 s is the SFX default; wrong for music
+            a.seconds = 60.0
+        if a.loop:
+            mode = "--chip" if a.chip else "--opl"
+            print(f"   ℹ --loop ignored: {mode} already loops by construction")
+            a.loop = False
 
     if a.chipfx or a.oplfx:
-        sys.path.insert(0, _SCRIPT_DIR)
-        import chipfx
-        chipfx.run(a, slug, to_ogg, loudness_normalize, to_flac)
+        run_engine(a, "oplfx" if a.oplfx else "chipfx", "chipfx")
         return
     if a.opl:
-        sys.path.insert(0, _SCRIPT_DIR)
-        import opl
-        opl.run(a, slug, to_ogg, loudness_normalize, to_flac)
+        run_engine(a, "opl", "opl")
         return
     if a.chip:
-        sys.path.insert(0, _SCRIPT_DIR)
-        import chip
-        chip.run(a, slug, to_ogg, loudness_normalize, to_flac)
+        run_engine(a, "chip", "chip")
         return
     if a.blip or a.blip_file:
-        sys.path.insert(0, _SCRIPT_DIR)
-        import blip
-        blip.run(a, slug, to_ogg, loudness_normalize, to_flac)
+        run_engine(a, "blip", "blip")
         return
     if a.narrate or a.narrate_file:
-        sys.path.insert(0, _SCRIPT_DIR)
-        import narrate
-        narrate.run(a, slug, to_ogg, loudness_normalize, to_flac)
+        run_engine(a, "narrate", "narrate")
         return
 
     if a.format not in FORMATS:
         p.error(f"unknown format {a.format!r}. See --list-formats.")
+    if a.batch_file and (a.batch or a.prompt):
+        p.error("--batch-file replaces the description and --batch; give only the file")
+    if a.skip_existing and not a.batch_file:
+        p.error("--skip-existing works with --batch-file (where each key has one known file name)")
+    if a.exact_prompt and a.style:
+        p.error("--exact-prompt sends the text as typed, so it can't add --style guides")
+    if a.exact_prompt:
+        a.no_reprompt = True
 
     # --ref / --match-tone: steering with a reference sound. Read it now (its length decides
     # --seconds unless given); it is trimmed/padded and uploaded once the length is final.
-    def _given(flag):
-        return any(x == flag or x.startswith(flag + "=") for x in sys.argv)
     a.ref_name, a.ref_file, a.ref_tail = None, None, ""
     if a.match_tone:
         a.match_tone = os.path.expanduser(a.match_tone)
@@ -1638,22 +2837,23 @@ def main():
         if not 0.05 <= a.ref_strength <= 1.0:
             p.error("--ref-strength must be between 0.05 and 1")
         cap = 1000.0 if a.song else (120.0 if a.engine == "sa3" else 47.0)
-        if not _given("--seconds"):
+        if not given("--seconds"):
             dur = _ffprobe_seconds(a.ref)
             if dur:
-                a.seconds = round(min(cap, max(0.5, dur)), 2)
+                a.seconds = round(min(cap, max(1.0, dur)), 2)      # 1 s: EmptyLatentAudio's minimum
         if a.ref_match:
             got = ref_summary(a.ref)
             if got:
                 bpm, key, _dur = got
                 if a.song:
-                    if not _given("--bpm"):
+                    if not given("--bpm"):
                         a.bpm = bpm
-                    if not _given("--key") and key in KEYS:
+                    if not given("--key") and key in KEYS:
                         a.key = key
                 elif a.music:
                     a.ref_tail = f"{bpm} BPM, in {key}"
-                print(f"   🎯 from the reference: {bpm} BPM, {key}, {a.seconds:g}s")
+                used = "" if (a.song or a.music) else "  (a plain SFX uses only its length: tempo and key steer --song / --music)"
+                print(f"   🎯 from the reference: {bpm} BPM, {key}, {a.seconds:g}s{used}")
             else:
                 print("   ⚠ --ref-match: no steady tempo or key in the reference; only its length is used")
 
@@ -1661,7 +2861,7 @@ def main():
     # Audio tops out at 47s, ACE-Step goes to 1000s (~16 min). The default
     # differs too — 10s is right for an SFX, absurd for a song.
     if a.song:
-        if a.seconds == 10.0 and not a.ref:  # untouched SFX default -> song default
+        if not given("--seconds") and not a.ref:  # no length asked for -> the song default
             a.seconds = 120.0
         if a.seconds <= 0 or a.seconds > 1000:
             p.error("--song --seconds must be between 0 and 1000")
@@ -1702,17 +2902,22 @@ def main():
     # Stable Audio's 50 steps / cfg 5 wastes minutes and oversaturates.
     if a.song:
         a.steps = (8 if a.fast else 16) if a.steps is None else a.steps
-        if a.cfg == 5.0:
+        if not given("--cfg"):
             a.cfg = 1.0
-        if a.sampler == "dpmpp_3m_sde_gpu":
+        if not given("--sampler"):
             a.sampler = "euler"
-        if a.scheduler == "exponential":
+        if not given("--scheduler"):
             a.scheduler = "simple"
     else:
         a.steps = (16 if a.fast else 50) if a.steps is None else a.steps
+    # SA3's 8 lcm steps are already its fast path (gotcha 13: fewer or more is noise or clacking), so
+    # --fast has nothing to cut there. Say so instead of printing "FAST" over an unchanged render.
+    a.fast_applies = a.fast and (a.song or a.engine != "sa3")
+    if a.fast and not a.fast_applies:
+        print("   ℹ --fast has no effect on SA3 — it already renders in 8 steps (it speeds up --engine sao and --song)")
 
     if a.negative is None:
-        a.negative = (SONG_NEGATIVE if a.song
+        a.negative = ("" if a.exact_prompt else SONG_NEGATIVE if a.song
                       else MUSIC_NEGATIVE if a.music else SFX_NEGATIVE)
 
     # Trimming is essential for SFX (the model pads short effects with dead air)
@@ -1741,27 +2946,37 @@ def main():
         a.no_trim = False
         a.fade_ms = 0
 
-    # --chip and --opl compose in whole bars, so they already loop
-    # sample-accurately. Crossfading would shorten the track to hide an ending
-    # neither of them has.
-    if a.chip or a.opl:
-        if a.seconds == 10:                  # the SFX default; wrong for music
-            a.seconds = 60
-        if a.loop:
-            mode = "--chip" if a.chip else "--opl"
-            print(f"   ℹ --loop ignored: {mode} already loops by construction")
-            a.loop = False
-
     if a.ref:                              # the length is final now
         a.ref_file = prepare_ref(a.ref, a.seconds)
         a.ref_name = os.path.basename(a.ref_file)
 
     n = max(1, a.number)
-    subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
+    rows = None
+    if a.batch_file:
+        try:
+            rows = parse_batch_file(a.batch_file)
+        except (OSError, ValueError) as e:
+            p.error(f"--batch-file: {e}")
+        if not rows:
+            p.error(f"--batch-file: no rows in {a.batch_file}")
+        cap = 1000.0 if a.song else (120.0 if a.engine == "sa3" else 47.0)
+        for key, secs, _ in rows:
+            if secs is not None and not 0 < secs <= cap:
+                p.error(f"--batch-file: {key}: {secs:g}s is outside 0..{cap:g} for this engine")
+        if a.ref and any(secs is not None for _, secs, _ in rows):
+            # The reference is cut to ONE length and its length is the render's; a row asking for
+            # another length would be conditioned on one length and given another.
+            print("   ⚠ --ref sets the length; the seconds column of --batch-file is ignored")
+            rows = [(k, None, t) for k, _, t in rows]
+        subjects = [t for _, _, t in rows]
+    else:
+        subjects = [s.strip() for s in a.batch.split(",") if s.strip()] if a.batch else [a.prompt]
     base = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
 
     def dest_for(subject):
-        if a.no_subdirs:
+        if a.batch_file:                     # flat, like --narrate-file: the keys are the file names
+            d = base
+        elif a.no_subdirs:
             d = base if (a.output_to or a.batch or a.move_to_dirs) else None
         elif a.batch:
             d = os.path.join(base, slug(subject))
@@ -1773,7 +2988,7 @@ def main():
             d = None
         if d is None:
             return None
-        if not os.path.isdir(d):
+        if not os.path.isdir(d) and not a.dry_run:
             if a.create_dirs or a.move_to_dirs or a.batch:
                 os.makedirs(d, exist_ok=True)
             else:
@@ -1782,16 +2997,42 @@ def main():
 
     dests = {subj: dest_for(subj) for subj in subjects}
 
-    total = n * len(subjects)
+    # Build the work list. --batch / --batch-file round-robin (one of each subject per pass).
+    work, skipped = [], []
+    k = 0
+    for take in range(n):
+        for idx, subj in enumerate(subjects):
+            seed = (a.seed + k) if a.seed >= 0 else random.randint(0, 2**31 - 1)
+            k += 1
+            name = secs = None
+            if rows:
+                key, secs = rows[idx][0], rows[idx][1]
+                name = key if n == 1 else f"{key}_{take + 1:02d}"
+                if a.skip_existing and existing_output(dests[subj], name):
+                    skipped.append(name)
+                    continue
+            work.append(Job(subj, seed, dests[subj], name, secs))
+    if skipped:
+        print(f"   ⏭ {len(skipped)} already made, skipped: {', '.join(skipped[:8])}{' …' if len(skipped) > 8 else ''}")
+    if not work:
+        print("   nothing to do — every key already has a file (drop --skip-existing to remake them)")
+        return
+
+    total = len(work)
     # Rough seconds/clip for the ETA. Measured on an RX 6600 (ROCm, --lowvram):
     # ~6.4s/clip at 50 steps, ~4s at 16. Audio is far cheaper than SDXL — a
     # 4-second SFX is a much smaller latent than a 1024x1024 image.
-    per = 4 if a.fast else 7
+    per = 4 if a.fast_applies else 7
     style_label = f"  |  style: {a.style}" if a.style else ""
     fmt_label = a.format if a.format != "none" else "44.1kHz stereo"
-    subj_label = f"{len(subjects)} subjects: {', '.join(subjects)}" if a.batch else repr(a.prompt)
-    count_label = f"{n} each = {total} total" if a.batch else f"{n} clip(s)"
-    if len(POOL) > 1:
+    if a.batch_file:
+        subj_label = f"{len(subjects)} rows of {os.path.basename(a.batch_file)}"
+    else:
+        subj_label = f"{len(subjects)} subjects: {', '.join(subjects)}" if a.batch else repr(a.prompt)
+    count_label = (f"{n} each = {total} total" if (a.batch or a.batch_file) else f"{n} clip(s)")
+    if a.dry_run:
+        pass
+    elif len(POOL) > 1:
         print(f"🚜 render farm: {len(POOL)} servers — {', '.join(_short(s) for s in POOL)}")
     elif REMOTE:
         print(f"🌐 rendering on remote server {SERVER} (results fetched back here)")
@@ -1802,38 +3043,49 @@ def main():
     else:
         eng = "SA3" if a.engine == "sa3" else "SAO1"
         print(f"🔊 {subj_label}  |  {a.seconds:g}s  |  {fmt_label}{style_label}  |  "
-              f"{eng} {'FAST' if a.fast else 'quality'} {a.steps}st  |  {count_label}")
+              f"{eng} {'FAST' if a.fast_applies else 'quality'} {a.steps}st  |  {count_label}")
     if a.ref:
         print(f"   🎯 steering with {os.path.basename(a.ref)} at strength {a.ref_strength:g}"
               f"  (0.3 close · 0.9 loose)")
     if a.match_tone:
         print(f"   🎚 matching tone to {os.path.basename(a.match_tone)}")
-    if total > 1:
+    if a.show_prompt:
+        for subj in dict.fromkeys(subjects):
+            pos, neg = final_prompts(a, subj)
+            if a.song:
+                print(f"   📝 tags:     {pos}\n   🚫 negative: {neg}")
+                continue
+            print(f"   📝 positive: {pos}\n   🚫 negative: {neg}")
+        if reprompts(a):
+            print(f"   🤖 on the server, {a.reprompt_model} rewrites the positive into Stable Audio 3's structured "
+                  f"form before the model sees it\n      (--no-reprompt or --exact-prompt sends it as shown)")
+    if total > 1 and not a.dry_run:
         eta = total * per
-        tip = "" if a.fast else "  (tip: add --fast for quick variations)"
+        tip = "" if (a.fast_applies or (a.engine == "sa3" and not a.song)) else "  (tip: add --fast for quick variations)"
         print(f"   ~{eta // 60}m{eta % 60:02d}s estimated{tip}")
 
-    # Build the work list. --batch round-robins (one of each subject per pass).
-    work = []  # (subject, seed, dest)
-    k = 0
-    for _ in range(n):
-        for subj in subjects:
-            seed = (a.seed + k) if a.seed >= 0 else random.randint(0, 2**31 - 1)
-            work.append((subj, seed, dests[subj]))
-            k += 1
+    if a.dry_run:
+        # The graphs exactly as they would be POSTed to /prompt, for bug reports, diffing and the GUI's
+        # preview. A --ref is prepared locally (its uploaded name is content-hashed, so it is the same
+        # name the server would get); nothing is uploaded and no server is asked anything.
+        out = [{"subject": j.subj, "seed": j.seed, "name": j.name, "dest": j.dest,
+                "graph": build_graph(a, j.seed, subject=j.subj, server=SERVER, seconds=j.seconds)} for j in work]
+        print(json.dumps(out, indent=1))
+        return
 
-    # Capability check for the single-server path too. run_farm() already routes
-    # around boxes that lack the model; without this, a single --server pointed at
-    # a box missing the checkpoint dumped a raw ComfyUI validation blob instead of
-    # saying which file was missing where.
-    if len(POOL) <= 1 and (REMOTE or POOL):
+    # Capability check for the single-server path too — including the bare local default, which
+    # used to skip it and then dump a raw ComfyUI validation blob when SA3 wasn't downloaded.
+    # run_farm() routes around boxes that lack the model; this says which file is missing where.
+    if len(POOL) <= 1:
         if not server_up(SERVER):
             sys.exit(f"can't reach ComfyUI at {SERVER} — is it running there? (check the address in servers.json)")
         need = a.song_base if a.song else a.base
         if need and not server_has_ckpt(SERVER, need):
-            sys.exit(f"{_short(SERVER)} doesn't have {need}\n"
-                     f"  provision it:  ./download-models.sh"
-                     f"{' --song' if a.song else (' --sa3' if a.engine == 'sa3' else '')}")
+            sys.exit(f"{_short(SERVER)} doesn't have {need} — provision it there:  {download_hint(a)}")
+        if not a.song and a.engine == "sa3":
+            w = fp32_warning(SERVER)
+            if w:
+                print(w)
 
     if a.ref_name and len(POOL) <= 1:
         try:
@@ -1843,50 +3095,63 @@ def main():
 
     t0 = time.time()
     first_open = None
+    failed = 0
     if len(POOL) > 1:
-        run_farm(a, work)
+        made = run_farm(a, work)
+        first_open = made[0] if made else None
     else:
-        jobs = [(subj, seed, d, submit(build_graph(a, seed, subject=subj, server=SERVER)))
-                for (subj, seed, d) in work]
+        # Queue everything up front (ComfyUI runs them one at a time) and keep each graph: wait() may
+        # have to send a job again — the server restarted and forgot it, or answered an identical
+        # re-run from its cache without saving anything (then a fresh_copy() of it).
+        jobs = []
+        for job in work:
+            g = build_graph(a, job.seed, subject=job.subj, server=SERVER, seconds=job.seconds)
+            jobs.append((job, submit(g), g))
         if total > 1:
             print(f"   queued {total} jobs; generating...")
-        for i, (subj, seed, d, pid) in enumerate(jobs, 1):
-            outs = wait(pid)
-            items = audio_outs(outs)
-            if REMOTE:
-                dest_dir = d or os.path.join(OUTPUT, "soundmon")
-                files = [fetch_audio(it, dest_dir) for it in items]
-            else:
-                files = [os.path.join(OUTPUT, it.get("subfolder", ""), it["filename"])
-                         for it in items]
-                if d:  # move finished files out of ComfyUI's output into the target folder
-                    moved = []
-                    for f in files:
-                        if os.path.exists(f):
-                            tgt = os.path.join(d, os.path.basename(f))
-                            shutil.move(f, tgt)
-                            moved.append(tgt)
-                    files = moved
-            # Before loudness: the wrap MIXES two signals, so it changes level.
-            # Anything that changes gain after normalizing invalidates it.
-            if a.loop:
-                for f in files:
-                    _, sec = loop_wrap(f, a.loop_crossfade)
-                    if sec:
-                        print(f"   ↻ looped  {os.path.basename(f)}  "
-                              f"({sec:.1f}s, {a.loop_crossfade:g}s crossfade)")
-            if a.lufs_target is not None:
-                files = [loudness_normalize(f, a.lufs_target, a.true_peak) for f in files]
-            if a.match_tone:
-                files = match_tone_files(files, a.match_tone)
-            files = encode_all(files, a)
+        in_a_row = 0
+        seen_restarts = RESTARTS.get(SERVER, 0)
+        for i, (job, pid, g) in enumerate(jobs, 1):
+            if RESTARTS.get(SERVER, 0) != seen_restarts:
+                # The server restarted while an earlier job was waited on: it forgot every prompt
+                # still queued. Send them all again now, rather than letting each one sit out
+                # wait()'s ~15 s "is it lost?" check in turn.
+                seen_restarts = RESTARTS[SERVER]
+                jobs[i - 1:] = resend_lost(jobs[i - 1:], SERVER)
+                job, pid, g = jobs[i - 1]
+            tag = f"[{i}/{total}] "              # always, even [1/1]: the GUI's progress reads it
+            subj_note = f"{job.name or job.subj}  " if (a.batch or a.batch_file) else ""
+            try:
+                resend = lambda fresh, g=g: submit(fresh_copy(g) if fresh else g)    # noqa: E731
+                outs = wait(pid, resubmit=resend)
+                try:
+                    got = collect(audio_outs(outs), job.dest, SERVER)
+                except MissingOutput:
+                    print("   ↻ the server answered from its cache with a file that's gone — re-saving it", flush=True)
+                    got = collect(audio_outs(wait(resend(True), resubmit=None)), job.dest, SERVER)
+                files = finish_files(a, got, job, SERVER)
+            except ServerGone as e:
+                sys.exit(str(e))                  # atexit takes the rest of this run off its queue
+            except (JobFailed, OSError, ValueError, subprocess.SubprocessError) as e:
+                # One bad job doesn't end the batch: the rest are already queued and rendering. But a
+                # server failing EVERY job (a missing encoder, a broken install) would only print the
+                # same error N times, so three in a row ends the run.
+                failed += 1
+                in_a_row += 1
+                print(f"   ✗ {tag}{subj_note}seed={job.seed} failed on {_short(SERVER)}: {e}", flush=True)
+                if in_a_row >= 3 and i < total:
+                    sys.exit(f"{_short(SERVER)} failed {in_a_row} jobs in a row — stopping "
+                             f"({total - i} not run).")
+                continue
+            in_a_row = 0
             clip = files[0] if files else None
             first_open = first_open or clip
-            tag = f"[{i}/{total}] " if total > 1 else ""
-            subj_note = f"{subj}  " if a.batch else ""
-            print(f"   ✅ {tag}{subj_note}seed={seed}  ->  {clip}")
+            print(f"   ✅ {tag}{subj_note}seed={job.seed}  ->  {clip}", flush=True)
 
-    where = ", ".join(sorted({str(x) for x in dests.values() if x})) or f"{OUTPUT}/soundmon/"
+    if a.batch_file:
+        where = base
+    else:
+        where = ", ".join(sorted({str(x) for x in dests.values() if x})) or f"{OUTPUT}/soundmon/"
     print(f"   all done in {time.time() - t0:.1f}s  |  files in {where}")
     if first_open and not a.no_open and shutil.which("xdg-open"):
         try:
@@ -1894,6 +3159,8 @@ def main():
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+    if failed:
+        sys.exit(f"{failed} of {total} job(s) produced no audio.")
 
 
 if __name__ == "__main__":

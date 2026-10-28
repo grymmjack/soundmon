@@ -722,7 +722,7 @@ function showEngine() {
   $("prompt").placeholder = E.ph;
   $("prompt").rows = ["blip", "narrate"].includes(eng) ? 5 : 3;
   $("seconds").placeholder = E.secs;
-  $("secsHint").innerHTML = { sfx: "SA3 conditions on length: <b>2 s</b> asks for a short hit, not a cropped long one. Max 120.", music: "Up to 120 s on SA3 (47 on Stable Audio Open).",
+  $("secsHint").innerHTML = { sfx: "SA3 conditions on length: <b>2 s</b> asks for a short hit, not a cropped long one. 1 to 120 s (ComfyUI's minimum is 1).", music: "Up to 120 s on SA3 (47 on Stable Audio Open).",
     song: "Up to 1000 s. Songs keep their silence (no trim) so bars stay aligned.", chip: "Rounded to whole bars, so it loops by construction.", opl: "Rounded to whole bars, so it loops by construction.", fx: "0.03 to 10 s." }[eng] || "";
   $("promptHint").textContent = { blip: "One line, or `key | text` rows (one file per key; # comments are skipped).", narrate: "One line, or `key | text` rows (one file per key; # comments are skipped).",
     chip: "Optional when you give it a MIDI or audio file to follow.", opl: "Optional when you give it a MIDI or audio file to follow." }[eng] || "";

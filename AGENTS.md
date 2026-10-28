@@ -401,18 +401,69 @@ failing jobs mid-batch. Extend `server_has_ckpt()` if you add a model.
 
 **A job ComfyUI fails is seen at once.** `/history` only grows `outputs` on
 success; a node that raises leaves `status.status_str == "error"` and nothing
-else, so waiting for outputs alone sat out the full 1800 s timeout. `_job_error()`
-reads the status; `wait()` exits with the node's message and `poll()` raises
-`JobFailed`. On the farm that feeds the circuit breaker (gotcha 16): a box that
-fails twice in a row is dropped, a failed job is requeued once, and idle boxes
-pick up requeued work. selfcheck asserts the status check.
+else, so waiting for outputs alone sat out the full 1800 s timeout. `classify()`
+turns a `/history` entry into ok / error / poisoned / transient / **cached** /
+pending, and both `wait()` (single server) and `poll()` (farm) act on it. On the
+farm a failure feeds the circuit breaker (gotcha 16): a box that fails twice in a
+row — or most of its jobs — is dropped, a failed job is retried once on
+**another** box, and idle boxes pick up requeued work. selfcheck asserts the
+classifier.
+
+**The job lifecycle (ported from pixelmon's `wait()`, keep the two in step):**
+
+- **"Completed, no outputs" is not a failure.** ComfyUI answers a prompt it has
+  already run, unchanged, from its cache with success and nothing saved
+  (`_cached_empty`). Re-running a seed — the help's own advice — hit it. Answer it
+  with `fresh_copy()` (same graph, save node under `rerun-<id>/`: only the save
+  re-runs, the file name and seed stay), and on the farm **never count it toward
+  the breaker** — it dropped healthy boxes.
+- **A restart forgets the whole queue.** `wait()` rides out an unreachable server
+  for `SERVER_GRACE` (240 s), notices a prompt the server no longer knows
+  (`_known`, three checks, or one right after an outage) and resends it, max
+  twice; `main()` then resends every other queued job the server forgot
+  (`resend_lost`) instead of letting each sit out the check. The single-server
+  loop keeps each job's graph for exactly this.
+- **POISONED** (`object has no attribute 'model_size'`/`'is_dynamic'`): the box
+  fails every prompt until restarted. `wait()` waits (120 s) for someone — the
+  GUI's `_restart` — to restart it, then resends. **Transient** (a loader
+  IndexError, out of memory): one retry.
+- **Time queued behind other jobs doesn't count** toward the timeout.
+- **Farm polls get `FARM_GRACE` (30 s).** Requeueing on the first failed poll
+  sent the job elsewhere while it was still rendering — one flaky box issued 75
+  prompts for one job. After the grace the box is out of the run.
+- **A fetch or post-processing error fails one job**, never the farm; downloads go
+  to `.part` and are checked against Content-Length.
+- **Ctrl-C / SIGTERM / an early exit** remove this run's prompts from every
+  server's queue and interrupt only a running prompt that is ours (`SENT`,
+  `cancel_sent`).
 
 **Capability is not the only way a box is wrong.** A box with every model present
 but ComfyUI running *without* `--force-fp32` passes `server_has_ckpt()` and then
-returns static for every SA3 job — quickly, so dispatch sends it more work. There
-is no API surface that reports the server's dtype, so this cannot currently be
-checked; treat "one box's output sounds different" as a launch-flag question
-before a model question.
+returns static for every SA3 job — quickly, so dispatch sends it more work.
+ComfyUI's `/system_stats` reports its launch arguments as `system.argv`, so
+`fp32_warning()` checks it (once per box per run) and prints a `⚠` for SA3 runs.
+It warns, it doesn't refuse: an older ComfyUI may not report argv (then nothing
+is said), and a box can be fp32 by other means. Still treat "one box's output
+sounds different" as a launch-flag question before a model question.
+
+**Target resolution is one rule, in three places:** `--server` > `$SOUNDMON_SERVER`
+> servers.json `"_default"` > the `local` alias (`pick_target()`; `bin/soundmon`
+resolves the same way to decide whether to start a local ComfyUI; the GUI reads
+`_default` too). Keep them agreeing — `install.sh` copies pixelmon's servers.json,
+so a `_default` the CLI ignored meant renders on the wrong box.
+
+**Everything after the server works on WAV.** The graph always ends in `SaveSFX`;
+`--flac/--mp3/--opus/--ogg` are encoded client-side, last, in `encode()`. Saving
+FLAC/MP3 on the server and then running the loudness ceiling, `--loop` or
+`--match-tone` wrote WAV data back under the `.flac`/`.mp3` name.
+`finish_files()` is the one post-server tail for both paths: tone match → loop →
+loudness/true-peak ceiling → encode → `--batch-file` name → recipe tag.
+
+**The recipe goes in the file** (`recipe()`, `tag_file()`): a RIFF LIST/INFO
+ICMT chunk appended to WAVs by byte surgery (ffmpeg remuxing would rewrite 24-bit
+headers to WAVE_FORMAT_EXTENSIBLE), a comment tag elsewhere. The CPU engines are
+tagged by `run_engine()`, which watches `soundfile.write` while the engine runs.
+selfcheck asserts the samples are untouched.
 
 Aliases live in `servers.json` (gitignored — real LAN IPs stay out of the repo);
 `servers.example.json` is the template.
@@ -472,9 +523,28 @@ two different compositions. My first FLAC check did that and "failed" on a
 
 - **Models are not in git** (~29 GB across all engines). `./download-models.sh
   --sa3` fetches the default engine + the Qwen rewriter, `--song` adds ACE-Step,
-  bare fetches the legacy Stable Audio Open set. It downloads to `.part` and
-  renames on success, so an interrupted transfer can never masquerade as a
-  complete file.
+  `--sao` the legacy Stable Audio Open set (also what the bare command fetches,
+  for old scripts), `--opl` builds the OPL core; flags combine, `--list` shows
+  what's missing. It downloads to `.part` and renames on success, so an
+  interrupted transfer can never masquerade as a complete file, and exits
+  non-zero naming whatever is still missing.
+- **Check arguments in `check_args()`, never next to the diffusion setup.** The
+  CPU engines return from `main()` early (gotcha 10), so validation placed below
+  them never ran for them (`--mood bogus`, `--bpm 0`, a 270 s `--blip-rate 0`).
+  And decide "did the user choose this?" with `given()`, never by comparing to the
+  default: a typed `--seconds 10` was read as "no length given" (→ 120 s songs),
+  and a typed `--cfg 5` on SA3 was silently replaced. The parser has
+  `allow_abbrev=False` so `given()` can't be fooled by `--sec 3`.
+- **"No loudness ceiling" is `+inf`, not `None`.** The engines skip
+  `loudness_normalize()` on `None`, and it is also the only place `--true-peak`
+  is enforced — so chip music and `--lufs off` shipped above -1 dBTP. Files
+  under 0.4 s skip only the LUFS part.
+- **Keep the GUI's last-line contract:** a failed run's LAST line is what the GUI
+  stores as the error, so put the essential facts (which box, which model, the
+  `download-models.sh` fix) on one line. Every result line keeps `[i/n]` (even
+  `[1/1]`) and `seed=`.
+- **Releases**: `.claude/skills/create-release/SKILL.md`. `__version__` is in
+  `soundmon.py`.
 - **`install.sh` symlinks** this repo into `~/ComfyUI` — the repo stays the
   source of truth. Editing `custom_nodes/retro_sfx/nodes.py` requires a
   **ComfyUI restart** to take effect, and on every farm box, or they will reject

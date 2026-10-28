@@ -95,15 +95,91 @@ def main():
     # outputs alone sat out the full 30-minute timeout on every dead job.
     sys.path.insert(0, HERE)
     import soundmon as _smj
-    err = {"outputs": {}, "status": {"status_str": "error", "completed": False,
-           "messages": [["execution_error", {"node_type": "CLIPLoader",
-                                             "exception_message": "missing model"}]]}}
-    running = {"outputs": {}, "status": {"status_str": "success", "completed": False}}
-    empty = {"outputs": {}, "status": {"status_str": "success", "completed": True}}
-    check("a failed ComfyUI job is seen as failed, not still running",
-          bool(_smj._job_error(err)) and "CLIPLoader" in _smj._job_error(err)
-          and _smj._job_error(running) is None and bool(_smj._job_error(empty)),
-          f"error -> {_smj._job_error(err)!r}")
+    def entry(status, outputs=None, msgs=()):
+        return {"outputs": outputs or {}, "status": dict(status, messages=list(msgs))}
+
+    def xerr(node, msg, etype=""):
+        return entry({"status_str": "error", "completed": False},
+                     msgs=[["execution_error", {"node_type": node, "exception_message": msg, "exception_type": etype}]])
+    saved = {"12": {"audio": [{"filename": "x_00001_.wav", "subfolder": "soundmon", "type": "output"}]}}
+    cases = {
+        "error": xerr("CLIPLoader", "missing model"),
+        "pending": entry({"status_str": "success", "completed": False}),
+        "ok": entry({"status_str": "success", "completed": True}, saved),
+        # an identical re-run ComfyUI answers from its cache: success, nothing saved. NOT a failure
+        "cached": entry({"status_str": "success", "completed": True}),
+        "poisoned": xerr("KSampler", "'NoneType' object has no attribute 'model_size'", "AttributeError"),
+        "transient": xerr("CheckpointLoaderSimple", "list index out of range", "IndexError"),
+    }
+    got = {want: _smj.classify(e)[0] for want, e in cases.items()}
+    got["transient(oom)"] = _smj.classify(xerr("KSampler", "CUDA out of memory. Tried to allocate"))[0]
+    got["pending(None)"] = _smj.classify(None)[0]
+    check("the job classifier: failed, cached-empty, poisoned, transient, pending, done",
+          all(k.split("(")[0] == v for k, v in got.items())
+          and "CLIPLoader" in _smj._job_error(cases["error"]) and _smj._job_error(cases["cached"]) is None,
+          f"{got}")
+    fg = {"12": {"class_type": "SaveSFX", "inputs": {"filename_prefix": "soundmon/door_s7", "bit_depth": "16"}},
+          "3": {"class_type": "KSampler", "inputs": {"seed": 7}}}
+    fc = _smj.fresh_copy(fg)
+    pre = fc["12"]["inputs"]["filename_prefix"]
+    check("fresh_copy re-saves under a new folder, same file name, nothing else changed",
+          pre.startswith("soundmon/rerun-") and pre.endswith("/door_s7") and fc["3"] == fg["3"]
+          and fg["12"]["inputs"]["filename_prefix"] == "soundmon/door_s7", pre)
+
+    # Target resolution: --server > $SOUNDMON_SERVER > servers.json "_default" > the `local` alias,
+    # and the `local` alias is repointable (not a literal 127.0.0.1).
+    pt = _smj.pick_target
+    old_servers = dict(_smj.SERVERS)
+    _smj.SERVERS.update(local="http://10.0.0.9:8188", rtx="http://192.168.1.77:8188")
+    order = [pt("a", "b", "c"), pt(None, "b", "c"), pt("", "", "c"), pt(None, "", "")]
+    res = [_smj.resolve_server(x) for x in ("rtx", "local", "box:9000", "http://h:7/")]
+    _smj.SERVERS.clear()
+    _smj.SERVERS.update(old_servers)
+    check("server choice: --server > $SOUNDMON_SERVER > _default > local; aliases resolve",
+          order == ["a", "b", "c", ""] and res == ["http://192.168.1.77:8188", "http://10.0.0.9:8188",
+                                                   "http://box:9000", "http://h:7"], f"{order} {res}")
+    check("given() tells a typed default from no flag at all",
+          _smj.given("--seconds", argv=["x", "--seconds", "10"]) and _smj.given("--lufs", argv=["--lufs=-23"])
+          and _smj.given("-n", argv=["-n5"]) and not _smj.given("--seconds", argv=["x", "--seconds-x"])
+          and not _smj.given("--seconds", argv=["x"]), "")
+
+    # --help must mention every flag (28 were missing once).
+    import contextlib
+    import io
+    import re as _re
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _smj.print_help()
+    hidden = [o for act in _smj.build_parser()._actions for o in act.option_strings
+              if not _re.search(_re.escape(o) + r"(?![\w-])", buf.getvalue())]
+    check("--help mentions every flag", not hidden, f"missing: {hidden}")
+
+    # The wrapper must never start ComfyUI for a command that doesn't render on it: every --list-*,
+    # --version, --dry-run and the CPU engines (it matches --flag and --flag=VALUE alike).
+    import re as _re2
+    wrap = open(os.path.join(HERE, "bin", "soundmon"), encoding="utf-8").read()
+    block = wrap[wrap.index("needs_server=1"):wrap.index("needs_server=0 ;;")]
+    skip = set(_re2.findall(r"--[a-z][a-z0-9-]*|-h\b", block))
+    want = {o for act in _smj.build_parser()._actions for o in act.option_strings if o.startswith("--list-")}
+    want |= {"--version", "--dry-run", "--help", "--chip", "--opl", "--chipfx", "--oplfx", "--blip", "--blip-file",
+             "--narrate", "--narrate-file", "--record", "--record-file", "--master", "--index", "--similar",
+             "--from-midi", "--from-audio"}
+    check("bin/soundmon never starts ComfyUI for listings, --version, --dry-run or a CPU engine",
+          want <= skip and '"${arg%%=*}"' in wrap, f"missing from its skip-list: {sorted(want - skip)}")
+
+    # --batch-file rows: key | prompt, key | seconds | prompt, plain lines, commas inside prompts.
+    with tempfile.TemporaryDirectory() as bt:
+        mf = os.path.join(bt, "m.txt")
+        with open(mf, "w") as f:
+            f.write("# pack\ndoor_open | a heavy door, creaking open\nboom | 3.5 | an explosion, far away\n"
+                    "glass breaking\n../evil | x\n")
+        rows = _smj.parse_batch_file(mf)
+    check("--batch-file parses keys, per-row seconds and comma prompts; keys can't escape",
+          rows == [("door_open", None, "a heavy door, creaking open"), ("boom", 3.5, "an explosion, far away"),
+                   ("glass_breaking", None, "glass breaking"), ("evil", None, "x")], f"{rows}")
+    check("--name can't leave --output-to", _smj.safe_name("../../etc/x") == "x"
+          and "/" not in _smj.safe_name("a/b/c") and len(_smj.safe_name("y" * 300)) <= 80,
+          _smj.safe_name("../../etc/x"))
 
     # --ref: both AI graphs must start from the encoded reference instead of silence:
     # node "9" (the empty latent) gone, LoadAudio -> VAEEncodeAudio (the checkpoint's own
@@ -128,6 +204,17 @@ def main():
                    and "_ref_" in g["12"]["inputs"]["filename_prefix"])
     check("--ref wires LoadAudio -> VAEEncodeAudio -> KSampler at --ref-strength (SFX + song)",
           all(okg), f"sfx/song ok: {okg}")
+
+    # Everything after the server works on a WAV: the graph always ends in SaveSFX, whatever the
+    # output format (a server-side FLAC/MP3 got WAV data written back under its name).
+    ga.song = False
+    saves = []
+    for fl in ("flac", "mp3", "opus"):
+        setattr(ga, fl, True)
+        saves.append(_smj.build_graph(ga, 1)["12"]["class_type"])
+        setattr(ga, fl, False)
+    check("the server always saves WAV (SaveSFX); --flac/--mp3/--opus are encoded last, client-side",
+          saves == ["SaveSFX"] * 3, f"{saves}")
 
     # Mastering must calm a bright sound without ever pushing it past -1 dBTP:
     # the chain has no limiter on purpose, so the gain step is the only guard.
@@ -331,13 +418,30 @@ def main():
         # THE ONE THAT KEEPS BREAKING: the loudness ceiling must not apply to
         # music, and the override must be set ABOVE the engine hand-offs, which
         # return early (AGENTS.md gotcha 10).
-        p, err = _render(tmp, "--chip", "--bpm", "120")
+        p, err = _render(tmp, "--chip", "--bpm", "120", "--seed", "7")
         if check("--chip renders", p, err):
             au, sr = sf.read(p, always_2d=True)
             m = au[:, 0]
-            peak = 20 * np.log10(max(abs(m).max(), 1e-9))
-            check("--chip is NOT held down by the LUFS ceiling", peak > -2.0,
-                  f"peak {peak:.2f} dBFS (a -16 LUFS ceiling lands near -3)")
+            import master as _msl
+            # What the engine is HANDED, captured in-process — decisive whatever the piece's own
+            # loudness: no -16 LUFS ceiling on music (+inf = none; the override must sit ABOVE the
+            # hand-off), and a real render still under the -1 dBTP ceiling ("no LUFS ceiling" once
+            # meant no true-peak ceiling either: chip moods shipped at +0.8 dBTP).
+            seen = {}
+            real_run, argv0 = chip.run, sys.argv
+            chip.run = lambda a, *x, **k: seen.update(lufs=a.lufs_target, tp=a.true_peak) or []
+            try:
+                for extra, key in (((), "default"), (("--lufs=-20",), "asked")):
+                    sys.argv = ["soundmon", "x", "--chip", "--no-open", "--no-recipe", *extra]
+                    _smj.main()
+                    seen[key] = seen.pop("lufs")
+            finally:
+                chip.run, sys.argv = real_run, argv0
+            tp = _msl.loudness(p)[1]
+            check("--chip is NOT held down by the LUFS ceiling, but stays <= -1 dBTP",
+                  seen.get("default") == float("inf") and seen.get("asked") == -20.0 and tp <= -0.95,
+                  f"LUFS ceiling handed to the engine: {seen.get('default')} (asked: {seen.get('asked')}), "
+                  f"true peak {tp:.2f} dBTP")
             check("--chip output carries no DC", abs(float(m.mean())) < 0.02,
                   f"dc {float(m.mean()):+.4f}")
 
@@ -415,6 +519,62 @@ def main():
                 check("FLAC is bit-identical to its WAV", same,
                       f"{len(x1)} vs {len(x2)} frames, "
                       f"max diff {float(np.abs(x1[:min(len(x1),len(x2)),0] - x2[:min(len(x1),len(x2)),0]).max()):.2e}")
+
+    import shutil as _sh2
+    if _sh2.which("ffmpeg"):
+        import master as _mq
+        with tempfile.TemporaryDirectory() as tt:
+            # Short files keep the TRUE-PEAK ceiling. Below 0.4 s the LUFS integration is skipped, and
+            # that skip used to skip the -1 dBTP cap too: a 0.3 s square peak-normalized to -1 dBFS
+            # (a chipfx blip) shipped at +1.1 dBTP.
+            sr = 44100
+            t = np.arange(int(sr * 0.3)) / sr
+            sq = os.path.join(tt, "sq.wav")
+            sf.write(sq, np.sign(np.sin(2 * np.pi * 440 * t)) * 10 ** (-1 / 20), sr, subtype="PCM_16")
+            before = _mq.loudness(sq)[1]
+            _smj.loudness_normalize(sq, float("inf"), -1.0)
+            after = _mq.loudness(sq)[1]
+            check("a 0.3 s full-scale square is pulled under -1 dBTP (no LUFS, true peak still capped)",
+                  after <= -0.95, f"{before:+.1f} -> {after:+.1f} dBTP")
+
+            # The recipe rides in the file and changes no sample: WAV gets a LIST/INFO chunk (8- and
+            # 24-bit headers untouched), FLAC/OGG a comment tag.
+            rec = {"tool": "soundmon", "prompt": "a door, creaking — slowly", "seed": 7, "command": "soundmon x"}
+            okr, why = True, []
+            for sub, ext in (("PCM_U8", "wav"), ("PCM_24", "wav"), ("PCM_16", "flac")):
+                f = os.path.join(tt, f"r_{sub}.{ext}")
+                sf.write(f, 0.5 * np.sin(2 * np.pi * 220 * t), sr, subtype=sub)
+                raw0, info0 = sf.read(f, dtype="int32")[0], sf.info(f)
+                hdr0 = open(f, "rb").read(44)
+                _smj.tag_file(f, rec)
+                raw1, info1 = sf.read(f, dtype="int32")[0], sf.info(f)
+                back = _smj.read_recipe(f) or {}
+                same = (np.array_equal(raw0, raw1) and info0.subtype == info1.subtype
+                        and (ext != "wav" or open(f, "rb").read(36)[8:36] == hdr0[8:36]))
+                okr &= same and back.get("prompt") == rec["prompt"] and back.get("seed") == 7
+                why.append(f"{sub}:{'same' if same else 'CHANGED'}/{'tag' if back else 'no tag'}")
+            ogg = _smj.to_ogg(os.path.join(tt, "r_PCM_16.flac"), 5, keep=True)
+            _smj.tag_file(ogg, rec)
+            okr &= (_smj.read_recipe(ogg) or {}).get("seed") == 7
+            check("the recipe is embedded (WAV 8/24-bit, FLAC, OGG) without touching the audio", okr,
+                  " ".join(why))
+
+            # OGG: never silent at a low quality (the native encoder writes silence at -q:a 0), and a
+            # mono file keeps its level (the -ac 2 upmix cost 3 dB).
+            mono = os.path.join(tt, "mono.wav")
+            t2 = np.arange(sr * 2) / sr
+            sf.write(mono, 0.5 * np.sign(np.sin(2 * np.pi * 330 * t2)), sr, subtype="PCM_16")
+
+            def mean_db(path):
+                import re
+                r = subprocess.run(["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+                                   capture_output=True, text=True).stderr
+                m = re.findall(r"mean_volume:\s*(-?[\d.]+)", r)
+                return float(m[-1]) if m else -99.0
+            w = mean_db(mono)
+            o = mean_db(_smj.to_ogg(mono, 0, keep=True))
+            check("--ogg-quality 0 isn't silent, and mono OGG keeps the WAV's level", abs(o - w) < 1.0,
+                  f"WAV {w:.1f} dB, OGG q0 {o:.1f} dB")
 
     width = max(len(n) for n, _, _ in RESULTS)
     bad = 0

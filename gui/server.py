@@ -977,7 +977,7 @@ def build_argv(p, meta, jdir=None):
             if "\n" in prompt:
                 raise ValueError("one description per render — use a Set for a list of sounds")
             argv.insert(1, prompt)
-        lim = {"sfx": (0.03, 120), "music": (1, 120), "song": (1, 1000), "chip": (2, 600), "opl": (2, 600), "fx": (0.03, 10)}[eng]
+        lim = {"sfx": (1, 120), "music": (1, 120), "song": (1, 1000), "chip": (2, 600), "opl": (2, 600), "fx": (0.03, 10)}[eng]
         if (p.get("adv") or {}).get("engine") == "sao" and eng in ("sfx", "music"):
             lim = (lim[0], 47)
         secs = num("seconds", float, *lim)
