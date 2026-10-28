@@ -2148,10 +2148,11 @@ def _bad_key(text):
 
 def safe_name(name):
     """--name as a file name and nothing else: no directories (`../x` wrote outside --output-to,
-    `a/b/c` crashed libsndfile), no leading dots, at most 80 characters."""
-    import re
-    out = re.sub(r"[^\w.\- ]+", "_", os.path.basename(name.replace("\\", "/"))).strip(" ._")[:80]
-    return out or "sound"
+    `a/b/c` crashed libsndfile), no leading dots, at most 80 characters. The same rule as every
+    manifest key (narrate.safe_key), so `--name a/b` and a manifest row `a/b` both give `a_b`."""
+    sys.path.insert(0, _SCRIPT_DIR)
+    import narrate
+    return narrate.safe_key(name) or "sound"
 
 
 def check_args(a, p):

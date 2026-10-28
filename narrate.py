@@ -95,6 +95,51 @@ def _pitch_shift(audio, semitones, np):
     return np.interp(src, np.arange(len(audio)), audio).astype(audio.dtype)
 
 
+def safe_key(key, maxlen=80):
+    """A manifest key or --name as a FILE NAME and nothing else. Returns "" if
+    nothing usable is left (the caller decides the fallback).
+
+    The same rule soundmon.safe_name applies to --name: letters, digits, space,
+    `.`, `-`, `_`; everything else (path separators above all) becomes `_`; no
+    leading or trailing dots/spaces/underscores, so `../x` and `.hidden` cannot
+    leave the output folder or hide in it; at most 80 characters, which keeps
+    `<key>_s<seed>.wav` far below every filesystem's name limit.
+
+    Separators become `_` rather than being cut at (basename): `sfx/door` and
+    `music/door` in one manifest must stay two different files.
+    """
+    out = re.sub(r"[^\w.\- ]+", "_", str(key or "").replace("\\", "/"))
+    return out.strip(" ._")[:maxlen].strip(" ._")
+
+
+def _read_text(path):
+    """A manifest's text. UTF-8 (with or without BOM) first; a file saved in a
+    legacy 8-bit code page (Windows Notepad, old editors) is read as cp1252 /
+    latin-1 with a notice, instead of dying in a UnicodeDecodeError traceback."""
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        sys.exit(f"{path}: no such file")
+    if os.path.isdir(p):
+        sys.exit(f"{path}: is a folder, not a `key | text` file")
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        sys.exit(f"{path}: can't read it ({e.strerror or e})")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    for enc in ("cp1252", "latin-1"):
+        try:
+            txt = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        print(f"   ℹ {os.path.basename(p)} is not UTF-8; read it as {enc}", file=sys.stderr)
+        return txt
+    sys.exit(f"{path}: not a text file")
+
+
 def parse_lines(path):
     """Read a narration source file into [(name, text), ...].
 
@@ -102,26 +147,56 @@ def parse_lines(path):
     which covers strings.txt, labels.txt, curios.txt and friends. For a
     pipe-delimited row the LAST field is the prose and the first is the key;
     a plain line is used as its own text with a generated name.
+
+    `[Group]` lines (the GUI's manifest grouping) are headings, not lines to
+    speak, and are skipped. Every key goes through safe_key() — the key IS the
+    output file name, so `../escape` or `sub/dir` would write outside the pack
+    or crash halfway through it. All rows are validated BEFORE anything is
+    rendered: a duplicate key with different text stops here, with line
+    numbers, rather than silently overwriting the first file.
     """
     out, n = [], 0
-    with open(os.path.expanduser(path), encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
+    seen = {}                       # key -> (line number, text)
+    renamed = []
+    for ln, raw in enumerate(_read_text(path).splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if re.fullmatch(r"\[[^\]|]*\]", line):
+            continue                # [Group] heading
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            key, text = parts[0], parts[-1]
+            # Rows that are pure data (all numeric tail) have no prose to
+            # read — e.g. labels.txt is "col | row | TEXT", so the key is a
+            # number. Fall back to naming by the text itself.
+            if not key or key.replace(".", "").isdigit():
+                key = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:40]
+        else:
+            n += 1
+            text, key = line, f"line{n:03d}"
+        if not text:
+            continue
+        safe = safe_key(key)
+        if not safe:
+            safe = safe_key(re.sub(r"[^a-z0-9]+", "_", text.lower())[:40]) or f"line{ln:03d}"
+        if safe != key:
+            renamed.append((ln, key, safe))
+        if safe in seen:
+            pln, ptext = seen[safe]
+            if ptext == text:
+                print(f"   ℹ line {ln}: {safe!r} repeats line {pln} word for word; made once",
+                      file=sys.stderr)
                 continue
-            if "|" in line:
-                parts = [p.strip() for p in line.split("|")]
-                key, text = parts[0], parts[-1]
-                # Rows that are pure data (all numeric tail) have no prose to
-                # read — e.g. labels.txt is "col | row | TEXT", so the key is a
-                # number. Fall back to naming by the text itself.
-                if not key or key.replace(".", "").isdigit():
-                    key = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:40]
-            else:
-                n += 1
-                text, key = line, f"line{n:03d}"
-            if text:
-                out.append((key, text))
+            sys.exit(f"{path}: key {safe!r} is used twice with different text (lines {pln} and {ln})"
+                     f" — the second would overwrite the first. Give one of them another key.")
+        seen[safe] = (ln, text)
+        out.append((safe, text))
+    for ln, key, safe in renamed[:5]:
+        print(f"   ℹ line {ln}: key {key[:40]!r} is not a safe file name; using {safe!r}",
+              file=sys.stderr)
+    if len(renamed) > 5:
+        print(f"   ℹ ...and {len(renamed) - 5} more keys renamed the same way", file=sys.stderr)
     return out
 
 

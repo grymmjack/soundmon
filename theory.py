@@ -244,8 +244,14 @@ def key_for_track(name, home_root, mood_name=""):
     return (home_root + ident.pick(RELATED)) % 12
 
 
-def plan_track(name, mood, mood_name, scale_name, bars_target):
+def plan_track(name, mood, mood_name, scale_name, bars_target, take=None):
     """Everything about a track that should be stable across regenerations.
+
+    `name` decides the PIECE: form, cadence, progressions, metre, tempo.
+    `take` (the piece plus a seed) decides each section's GROOVE: contour,
+    rhythm, bass style, kit, transform, register and arp rate — so `-n 4` gives
+    four takes of one piece instead of four identical files. take=None keeps
+    the old behaviour (groove from the name too).
 
     Returns a dict the caller turns into notes. Kept as data so it can be
     printed, diffed and reasoned about without rendering audio.
@@ -290,7 +296,7 @@ def plan_track(name, mood, mood_name, scale_name, bars_target):
     sections = {}
     first = form[0]
     for letter in dict.fromkeys(form):
-        sid = Ident(name, f"sec:{letter}:{mood_name}")
+        sid = Ident(take or name, f"sec:{letter}:{mood_name}")
         sections[letter] = {
             "contour": sid.pick(contours),
             # Rhythm is GENERATED for this meter, not indexed out of a 4/4 table.

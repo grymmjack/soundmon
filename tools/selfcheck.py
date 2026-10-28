@@ -91,6 +91,198 @@ def main():
           abs(float(chip._dc_block(x, np, 44100)[2048:].mean())) < 0.02,
           "a 12.5% duty pulse sits at a mean of -0.75")
 
+    # --- CPU engines: findings from the 2026-10-28 test pass ------------------
+    # Every one of these shipped a valid, normalised file that was silently wrong.
+    import opl as _opl
+    import narrate as _nar
+    import transcribe as _tr
+    from types import SimpleNamespace as _NS
+
+    def _ca(**k):
+        d = dict(mood="mysterious", prompt="a crypt", name=None, output_to="/tmp/packA",
+                 key="C minor", chip_scale=None, bpm=120, seconds=8.0, chip_arp=0,
+                 chippy="off", normalize_db=-1.0, opl_lib=None)
+        d.update(k)
+        return _NS(**d)
+
+    def _plan(_cfg, seed):
+        ev, bars, spb, sc, _p, mname, md, plan = chip.compose(_cfg, np, np.random.default_rng(seed))
+        return ev, bars, spb, sc, mname, md, plan
+
+    # The prompt and the seed feed identity: with no --name every prompt composed
+    # one piece, and -n 4 wrote four byte-identical files.
+    e1 = _plan(_ca(prompt="a crypt"), 1)[0]
+    e2 = _plan(_ca(prompt="the old tomb"), 1)[0]
+    e3 = _plan(_ca(prompt="a crypt"), 2)[0]
+    e1b = _plan(_ca(prompt="a crypt"), 1)[0]
+    check("--chip: prompt and seed change the music, same inputs repeat it",
+          e1["lead"] != e2["lead"] and e1["lead"] != e3["lead"] and e1 == e1b,
+          "prompt A/B, seed 1/2, and a repeat of A+1")
+
+    # Whole bars, exactly: the release tail is folded onto the head, so the loop
+    # lands on the bar (a 0.35-0.4 s tail made every loop late).
+    lens = []
+    for mood in ("heroic", "ominous", "playful"):
+        _cfg = _ca(mood=mood, chippy="max")
+        ev, bars, spb, sc, mname, md, plan = _plan(_cfg, 3)
+        pn, pd = chip.events_to_timed(ev, bars, spb, plan["_steps"], mname)
+        y1 = chip.render_timed(_cfg, pn, pd, bars * spb, np, md, loop=True)
+        y2 = _opl.render_timed(_cfg, pn, pd, bars * spb, np, _opl.load_wopl_bank(),
+                               with_drums=bool(pd), loop=True)
+        lens.append((len(y1) - int(round(bars * spb * chip.SAMPLE_RATE)),
+                     len(y2) - int(round(bars * spb * _opl.SAMPLE_RATE))))
+    check("--chip/--opl files are exactly whole bars", all(l == (0, 0) for l in lens),
+          f"samples over bars*spb (chip, opl): {lens}")
+
+    # 2A03 voice limit: two pulses, one triangle. The composed bass reaches B3 and
+    # used to land on a pulse (three pulses at once); arps ran over the bar line.
+    worst, duty_ok = 0, True
+    for mood in chip.MOODS:
+        ev, bars, spb, sc, mname, md, plan = _plan(_ca(mood=mood, seconds=10), 1)
+        pn, _pd = chip.events_to_timed(ev, bars, spb, plan["_steps"], mname)
+        def _poly(ns):
+            ts = sorted([(n["t"], 1) for n in ns] + [(n["t"] + n["dur"] - 1e-9, -1) for n in ns])
+            c = m = 0
+            for _t, dd in ts:
+                c += dd
+                m = max(m, c)
+            return m
+        worst = max(worst, _poly([n for n in pn if n.get("role") != "bass"]))
+        duty_ok &= all(n.get("duty") == chip.DUTIES[md["duty"]] for n in pn if n.get("role") == "lead")
+    check("--chip keeps the 2A03 limit (<= 2 pulses) and plays the mood's duty",
+          worst <= 2 and duty_ok, f"max pulses at once {worst}, lead duty from mood: {duty_ok}")
+
+    # --key "E major" used to come out minor/dorian.
+    sc = _plan(_ca(key="E major", mood="ominous"), 1)[3]
+    check("--key names the scale", sc == "major", f"--key 'E major' -> {sc}")
+
+    # Short --seconds: the floor was 8 bars (0.5 s -> 19 s).
+    _ev, bars, spb, *_r = _plan(_ca(seconds=0.5), 1)
+    check("--chip --seconds 0.5 makes 1-2 bars", bars <= 2, f"{bars} bars, {bars * spb:.1f}s")
+
+    # DC blocking must not depend on scipy: the fallback subtracted the mean,
+    # which CREATES a step at both ends of the file.
+    x = np.random.default_rng(5).standard_normal(5000) + 0.3
+    aa = float(np.exp(-2 * np.pi * 12.0 / 44100))
+    ref, xp, yp = np.empty(5000), 0.0, 0.0
+    for i in range(5000):
+        yp = x[i] - xp + aa * yp
+        xp = x[i]
+        ref[i] = yp
+    check("_dc_block is the one-pole high-pass, without scipy",
+          float(np.abs(chip._dc_block(x, np, 44100) - ref).max()) < 1e-9, "vs a per-sample loop")
+
+    # No GM bank installed: --opl used to render unprogrammed channels (raw peak
+    # 1 LSB, normalised up to a full-scale hiss). Simulate a bare vendor/.
+    _w, _g = _opl.WOPL_BANK, _opl.GM_BANK
+    _opl.WOPL_BANK, _opl.GM_BANK = {}, []
+    try:
+        ch = _opl.OPL3()
+        _opl.Allocator(ch, None).note_on(60, 0, 261.6, 100, 1)
+        lvl = 20 * np.log10(np.abs(ch.render(20000, np)).max() + 1e-12)
+        dr = _opl.render_timed(_NS(opl_lib=None, chippy="off", normalize_db=0.0), [],
+                               [(i * 0.25, (36, 38, 42)[i % 3]) for i in range(6)],
+                               1.5, np, None, with_drums=True, loop=True)
+        hits = [20 * np.log10(np.sqrt(np.mean(dr[int(i * 0.25 * 49716):int(i * 0.25 * 49716) + 2400] ** 2)) + 1e-12)
+                for i in range(6)]
+    finally:
+        _opl.WOPL_BANK, _opl.GM_BANK = _w, _g
+    check("--opl without a GM bank plays the built-in patches and drums",
+          lvl > -40 and min(hits) > -30, f"one note {lvl:.1f} dBFS raw, kick/snare/hat hits {[round(h) for h in hits]} dB")
+
+    # --opl-lead/arp/bass must reach the audio (they only reached the summary).
+    _cfg = _ca(mood="heroic")
+    ev, bars, spb, sc, mname, md, plan = _plan(_cfg, 1)
+    pn, pd = chip.events_to_timed(ev, bars, spb, plan["_steps"], mname)
+    va = _opl.render_timed(_cfg, pn, pd, bars * spb, np, _opl.load_wopl_bank(), voices={"lead": _opl.INSTRUMENTS["bell"]}, loop=True)
+    vb = _opl.render_timed(_cfg, pn, pd, bars * spb, np, _opl.load_wopl_bank(), voices={"lead": _opl.INSTRUMENTS["flute"]}, loop=True)
+    check("--opl-lead changes the audio", not np.allclose(va, vb), "bell vs flute lead")
+
+    # An OPL envelope only restarts from its release phase: key-off then key-on
+    # with no samples between played the first note of --oplfx coin and nothing else.
+    import chipfx as _fx
+    y = _fx.render_opl("coin", 44100, 44100, np.random.default_rng(3), np, _opl)
+    db = lambda s: 20 * np.log10(np.sqrt(np.mean(s ** 2)) + 1e-12)     # noqa: E731
+    jump = db(y[22050 + 64:22050 + 64 + 882]) - db(y[22050 - 882:22050])
+    check("--oplfx retriggers each note of a sequence", jump > 6, f"second coin note attack {jump:+.1f} dB")
+
+    # File names: --name and manifest keys never leave --output-to.
+    with tempfile.TemporaryDirectory() as td:
+        mf = os.path.join(td, "m.txt")
+        with open(mf, "w") as fh:
+            fh.write("[Group]\n../escape | hello\n.hidden | there\nsub/dir | x\n")
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            keys = [k for k, _ in _nar.parse_lines(mf)]
+        with open(mf, "w") as fh:
+            fh.write("ok | one\nok | two\n")
+        try:
+            _nar.parse_lines(mf)
+            dup = False
+        except SystemExit:
+            dup = True
+    check("manifest keys are safe file names; [Group] skipped; clashing keys refused",
+          keys == ["escape", "hidden", "sub_dir"] and dup, f"keys {keys}, duplicate refused: {dup}")
+
+    # --from-audio / --ref: non-music returns None instead of an invented tempo and
+    # key, and a real loop reads at its true tempo (was 115 for 120, 88 for 174)
+    # and its own key (minor loops read as their relative major).
+    with tempfile.TemporaryDirectory() as td:
+        sr = 22050
+        def _loop(bpm, root, minor=True, bars=8):
+            beat, n = 60.0 / bpm, int(bars * 4 * 60.0 / bpm * sr)
+            x = np.zeros(n)
+            sc = [0, 2, 3, 5, 7, 8, 10] if minor else [0, 2, 4, 5, 7, 9, 11]
+            prog = [0, 5, 2, 6] if minor else [0, 4, 5, 3]
+            f = lambda m: 440 * 2 ** ((m - 69) / 12)                      # noqa: E731
+            rr = np.random.default_rng(bpm)
+            for b in range(bars * 4):
+                s, L = int(b * beat * sr), int(beat * sr)
+                tt = np.arange(min(L, n - s)) / sr
+                d = prog[(b // 4) % 4]
+                for k in (0, 2, 4):
+                    m = root + 60 + sc[(d + k) % 7] + 12 * ((d + k) // 7)
+                    x[s:s + len(tt)] += 0.08 * np.sin(2 * np.pi * f(m) * tt) * np.exp(-tt * 1.5)
+                x[s:s + len(tt)] += 0.25 * np.sin(2 * np.pi * f(root + 36 + sc[d]) * tt) * np.exp(-tt * 4)
+                x[s:s + len(tt)] += (0.6 * np.sin(2 * np.pi * 55 * tt * np.exp(-tt * 8)) * np.exp(-tt * 18)
+                                     if b % 2 == 0 else 0.3 * rr.standard_normal(len(tt)) * np.exp(-tt * 25))
+                for h in (0, L // 2):
+                    hl = min(1000, n - s - h)
+                    if hl > 0:
+                        x[s + h:s + h + hl] += 0.05 * np.diff(np.concatenate([[0], rr.standard_normal(hl)])) \
+                            * np.exp(-np.arange(hl) / sr * 60)
+            return 0.9 * x / np.abs(x).max()
+        cases = []
+        for bpm, root, minor in ((120, 0, False), (174, 4, True), (60, 9, True)):
+            p = os.path.join(td, f"m{bpm}.wav")
+            sf.write(p, _loop(bpm, root, minor), sr)
+            r = _tr.analyze(p, np, sf)
+            cases.append(bool(r) and abs(r["bpm"] - bpm) < 1.5 and r["root"] == root
+                         and r["mode"] == ("minor" if minor else "major"))
+        nonmusic = []
+        for nm, x in (("silence", np.zeros(sr * 6)),
+                      ("noise", 0.3 * np.random.default_rng(1).standard_normal(sr * 6))):
+            p = os.path.join(td, nm + ".wav")
+            sf.write(p, x, sr)
+            nonmusic.append(_tr.analyze(p, np, sf) is None)
+    check("transcribe reads tempo and key, and refuses non-music",
+          all(cases) and all(nonmusic),
+          f"120 C maj / 174 E min / 60 A min correct: {cases}; silence, noise -> None: {nonmusic}")
+
+    # --blip honours --format (gameboy still wrote 24 kHz PCM_16), and a line
+    # with no letters fails instead of writing silence as a success.
+    with tempfile.TemporaryDirectory() as td:
+        r = subprocess.run([PY, SM, "Hello there", "--blip", "--format", "gameboy", "--no-open",
+                            "--output-to", td], capture_output=True, text=True)
+        made = [f for f in os.listdir(td) if f.endswith(".wav")]
+        info = sf.info(os.path.join(td, made[0])) if made else None
+        r2 = subprocess.run([PY, SM, "!!! ... ???", "--blip", "--no-open", "--output-to",
+                             os.path.join(td, "s")], capture_output=True, text=True)
+    check("--blip applies --format; a silent line exits non-zero",
+          info is not None and info.samplerate == 8192 and info.subtype == "PCM_U8" and r2.returncode != 0,
+          f"{info.samplerate if info else '-'} Hz {info.subtype if info else '-'}; silent line exit {r2.returncode}")
+
     # A ComfyUI job that raises gets status "error" and NO outputs. Waiting for
     # outputs alone sat out the full 30-minute timeout on every dead job.
     sys.path.insert(0, HERE)
@@ -177,7 +369,8 @@ def main():
     check("--batch-file parses keys, per-row seconds and comma prompts; keys can't escape",
           rows == [("door_open", None, "a heavy door, creaking open"), ("boom", 3.5, "an explosion, far away"),
                    ("glass_breaking", None, "glass breaking"), ("evil", None, "x")], f"{rows}")
-    check("--name can't leave --output-to", _smj.safe_name("../../etc/x") == "x"
+    # one rule with manifest keys (narrate.safe_key): separators become "_", they're never followed
+    check("--name can't leave --output-to", _smj.safe_name("../../etc/x") == "etc_x"
           and "/" not in _smj.safe_name("a/b/c") and len(_smj.safe_name("y" * 300)) <= 80,
           _smj.safe_name("../../etc/x"))
 

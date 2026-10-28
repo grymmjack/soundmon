@@ -28,10 +28,13 @@ useless: there are only four channels to play it on.
 METHOD (numpy + scipy only, no librosa)
 
     onset envelope   spectral flux over an STFT
-    tempo            autocorrelation of the onset envelope, 60-200 BPM
+    tempo            the tatum in the onset autocorrelation, sub-frame accurate,
+                     beat = tatum or tatum/2 by accent, 50-200 BPM
     beat phase       cross-correlation of the envelope against a pulse train
     chroma           STFT bins folded to 12 pitch classes, per beat
-    key              chroma correlated against Krumhansl-Kessler profiles
+    key              chroma (+ bass line) against Krumhansl-Kessler profiles;
+                     the first bass note settles relative major vs minor
+    not music?       no tatum, or no key  ->  None, not an invented answer
     chords           per-bar chroma matched to triad templates within the key
     melody / bass    strongest pitch per beat in a high / low band
     drums            onsets binned by spectral centroid into kick/snare/hat
@@ -49,13 +52,48 @@ NOTE_NAMES = "C C# D D# E F F# G G# A A# B".split()
 
 
 def _load(path, np, sf, target_sr=22050):
-    audio, sr = sf.read(path, always_2d=True)
-    m = audio.mean(axis=1)
+    """Mono float audio at <= target_sr. Raises ValueError with a one-line reason.
+
+    libsndfile reads WAV/FLAC/OGG/AIFF; anything else it cannot open (.m4a,
+    .mp3 on older builds, .opus) is decoded through ffmpeg when it is installed.
+    A missing path, a folder, or a file that is not audio at all is a clear
+    error instead of a LibsndfileError traceback.
+    """
+    p = os.path.expanduser(str(path))
+    if not os.path.exists(p):
+        raise ValueError("no such file")
+    if os.path.isdir(p):
+        raise ValueError("is a folder, not an audio file")
+    try:
+        audio, sr = sf.read(p, always_2d=True)
+    except Exception as e:                          # LibsndfileError, RuntimeError
+        audio, sr = _ffmpeg_decode(p, np, sf, target_sr, e)
+    if audio.size == 0:
+        raise ValueError("contains no audio")
+    m = np.nan_to_num(np.asarray(audio, dtype=np.float64).mean(axis=1),
+                      nan=0.0, posinf=0.0, neginf=0.0)
     if sr > target_sr:                      # cheap decimation; we only need pitch
         k = int(round(sr / target_sr))
         m = m[::k]
         sr = sr // k
     return m.astype(np.float64), sr
+
+
+def _ffmpeg_decode(p, np, sf, sr, why):
+    import io
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        raise ValueError(f"can't read it as audio ({why}); installing ffmpeg adds more formats")
+    r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", p, "-vn", "-ac", "1",
+                        "-ar", str(sr), "-f", "wav", "pipe:1"], capture_output=True)
+    if r.returncode != 0 or len(r.stdout) < 64:
+        msg = (r.stderr.decode("utf-8", "replace").strip().splitlines() or ["unknown format"])[-1]
+        raise ValueError(f"not an audio file soundmon can read ({msg[:120]})")
+    try:
+        return sf.read(io.BytesIO(r.stdout), always_2d=True)
+    except Exception as e:
+        raise ValueError(f"not an audio file soundmon can read ({e})") from None
 
 
 def _stft(x, np, n_fft=2048, hop=512):
@@ -75,47 +113,113 @@ def _onset_env(S, np):
     return np.concatenate([[0.0], np.maximum(d, 0.0).sum(axis=1)])
 
 
-def _fold_tempo(bpm, lo=70.0, hi=150.0):
-    """Pull an octave-error tempo into a musically plausible range.
+# Tempo, by TATUM. Measured on synthetic loops at 14 known tempos (60-180) and on
+# chip renders, the old estimate was coarse and pulled toward 100: the lag was a
+# whole STFT frame (114.9-120.2 bpm shared one lag, and the prior then picked the
+# one nearest 100), and folding into 70-150 halved everything fast (174 -> 88).
+# 4 of 14 were right.
+#
+# What is stable across all of them is the METRICAL LADDER in the onset
+# autocorrelation: bar ~ half-bar > beat > 8th, then a collapse at the 16th. So:
+#
+#   1. find the FASTEST strong periodicity whose double also recurs — the tatum
+#      (the finest level the music really articulates; usually the 8th)
+#   2. measure it precisely from a long lag (8x), with parabolic sub-frame
+#      interpolation — resolution ~0.1 bpm instead of ~5
+#   3. decide beat = tatum or tatum/2 from ACCENTS: if every other tatum is weak
+#      (hats between kicks and snares) the tatum is a subdivision of the beat
+#   4. keep the beat in 50-200
+#
+# 20 of 20 references land within 1 bpm, including 60, 160, 174 and 180. The
+# accent threshold is a judgement — music with genuinely even 8ths at 60 bpm
+# will read as 120 — and an octave is the one error tempo-from-audio cannot
+# rule out without a listener.
+TATUM_MIN_AC = 0.35         # normalised autocorrelation a tatum must reach
+SUBDIVISION_ALT = 0.5       # offbeat/onbeat accent ratio below which tatum = 8th
 
-    Autocorrelation happily locks onto twice or four times the real tempo, which
-    is why a slow dirge measured 191 bpm. Halving/doubling until it lands in the
-    range costs nothing and fixes the common case; genuinely fast music is still
-    reachable because the range is generous.
-    """
-    while bpm > hi:
-        bpm /= 2.0
-    while bpm < lo:
-        bpm *= 2.0
-    return bpm
+
+def _onset_env_fine(x, sr, np, n_fft=1024, hop=256):
+    """Log-compressed spectral flux at ~86 frames/s (twice the old resolution)."""
+    if len(x) < n_fft * 2:
+        return np.zeros(0), sr / float(hop)
+    S = _stft(x, np, n_fft, hop)
+    S = np.log1p(100.0 * S / (S.max() + 1e-12))
+    d = np.maximum(np.diff(S, axis=0), 0.0).sum(axis=1)
+    return np.concatenate([[0.0], d]), sr / float(hop)
 
 
-def _tempo(env, sr, hop, np, lo=60.0, hi=200.0):
-    """Autocorrelate the onset envelope and pick the strongest plausible period."""
-    e = env - env.mean()
-    ac = np.correlate(e, e, mode="full")[len(e) - 1:]
+def _acf(e, np):
+    """Unbiased, normalised autocorrelation (via FFT)."""
+    e = e - e.mean()
     n = len(e)
-    # UNBIASED autocorrelation. The raw ACF falls off with lag simply because
-    # fewer samples overlap, which biases the winner toward short lags — i.e.
-    # implausibly fast tempos. Measured symptom: 18 of 22 orchestral tracks all
-    # reported the same 96bpm, because everything locked near 192 and folded.
-    counts = np.arange(n, 0, -1)
-    ac = ac / np.maximum(counts, 1)
-    fps = sr / hop
-    # Log-normal prior centred on ~100bpm. Tempo perception is roughly
-    # log-uniform around a preferred rate; without a prior, harmonics of the true
-    # tempo score as well as the tempo itself.
-    best, best_v = 100.0, -1e30
-    for bpm in np.arange(lo, hi + 0.5, 0.5):
-        lag = int(round(fps * 60.0 / bpm))
-        if lag < 2 or lag >= len(ac):
-            continue
-        v = ac[lag] + 0.5 * ac[min(len(ac) - 1, lag * 2)]
-        prior = np.exp(-0.5 * (np.log(bpm / 100.0) / 0.35) ** 2)
-        v *= prior
-        if v > best_v:
-            best, best_v = float(bpm), v
-    return best
+    f = np.fft.rfft(e, 2 * n)
+    ac = np.fft.irfft(f * np.conj(f))[:n]
+    ac = ac / np.arange(n, 0, -1)
+    return ac / (ac[0] + 1e-12) if ac[0] > 0 else ac * 0.0
+
+
+def _parabolic(ac, j):
+    if 0 < j < len(ac) - 1:
+        d = ac[j - 1] - 2 * ac[j] + ac[j + 1]
+        if d < 0:
+            return j + 0.5 * (ac[j - 1] - ac[j + 1]) / d
+    return float(j)
+
+
+def _accent_alt(e, period, np):
+    """Mean onset strength at odd tatum positions / at even ones, with the phase
+    chosen so the even ones are the strong ones."""
+    best, bo = -1.0, 0.0
+    for off in np.arange(0.0, 2 * period, 0.5):
+        idx = np.round(np.arange(off, len(e) - 1, 2 * period)).astype(int)
+        v = float(e[idx].sum())
+        if v > best:
+            best, bo = v, off
+    pk = lambda ii: np.array([e[max(0, i - 1):i + 2].max() for i in ii])   # noqa: E731
+    on = pk(np.round(np.arange(bo, len(e) - 1, 2 * period)).astype(int))
+    off = pk(np.round(np.arange(bo + period, len(e) - 1, 2 * period)).astype(int))
+    if not len(on) or not len(off):
+        return 1.0
+    return float(off.mean() / (on.mean() + 1e-12))
+
+
+def estimate_tempo(x, sr, np):
+    """-> (bpm, clarity), or (None, 0.0) when nothing recurs (noise, a sweep,
+    random hits, silence). `clarity` is the tatum's normalised autocorrelation."""
+    e, fps = _onset_env_fine(x, sr, np)
+    if len(e) < 64 or e.max() <= 0:
+        return None, 0.0
+    ac = _acf(e, np)
+    lo, hi = fps * 60.0 / 600.0, fps * 60.0 / 80.0          # tatum 80..600 /min
+    pk = []
+    for i in range(max(2, int(lo)), min(len(ac) - 1, int(hi) + 1)):
+        if ac[i] >= ac[i - 1] and ac[i] >= ac[i + 1] and ac[i] >= TATUM_MIN_AC:
+            pk.append((_parabolic(ac, i), float(ac[i])))
+    tat = None
+    for L, v in sorted(pk):
+        j = int(round(2 * L))
+        if j + 3 < len(ac) and ac[max(0, j - 2):j + 3].max() >= TATUM_MIN_AC:
+            tat, clarity = L, v
+            break
+    if tat is None:
+        return None, 0.0
+    for k in (8, 4, 2):                                      # precise period
+        Lk = k * tat
+        i0, w = int(round(Lk)), max(2, int(0.03 * Lk))
+        if i0 - w > 0 and i0 + w + 1 < len(ac) * 0.5:
+            j = int(np.argmax(ac[i0 - w:i0 + w + 1])) + i0 - w
+            tat = _parabolic(ac, j) / k
+            break
+    if not (np.isfinite(tat) and tat > 0):
+        return None, 0.0
+    bpm = fps * 60.0 / tat
+    if _accent_alt(e, tat, np) < SUBDIVISION_ALT:
+        bpm /= 2.0
+    while bpm > 200.0:
+        bpm /= 2.0
+    while bpm < 50.0:
+        bpm *= 2.0
+    return float(bpm), float(clarity)
 
 
 def _beat_phase(env, sr, hop, bpm, np):
@@ -149,19 +253,87 @@ def _chroma(S, sr, n_fft, np):
     return np.roll(out, -3, axis=1)
 
 
-def _find_key(chroma, np):
+def _find_key(chroma, np, bass_pcs=None, first_pc=None):
+    """Krumhansl-Kessler key, with the TONIC weighed properly.
+
+    Chroma alone cannot separate a minor key from its relative major — they share
+    every note, and a loop that cycles i-VI-III-VII has the same pitch content as
+    vi-IV-I-V. Measured: 6 of 14 minor loops came back as their relative major.
+    The bass says which note is HOME, so a bass-note histogram is scored against
+    the same profiles, and the first bass note (where pieces and loops nearly
+    always start on the tonic) breaks what is left of a tie.
+
+    Returns (root, mode, conf); conf is the plain chroma correlation, which is
+    what says whether this is tonal music at all.
+    """
     v = chroma.sum(axis=0)
-    v = v / (v.sum() + 1e-12)
+    if not np.isfinite(v).all() or v.sum() <= 0 or np.ptp(v) <= 0:
+        return 0, "minor", -2.0
+    v = v / v.sum()
+    b = None
+    if bass_pcs:
+        b = np.bincount(np.asarray(bass_pcs, dtype=int) % 12, minlength=12).astype(np.float64)
+        if np.ptp(b) <= 0:
+            b = None
     maj = np.array(KK_MAJOR); mnr = np.array(KK_MINOR)
-    best = (0, "minor", -2.0)
+    scores = {}
     for r in range(12):
         rot = np.roll(v, -r)
         for name, prof in (("major", maj), ("minor", mnr)):
-            p = prof / prof.sum()
-            c = float(np.corrcoef(rot, p)[0, 1])
-            if c > best[2]:
-                best = (r, name, c)
-    return best[0], best[1], best[2]
+            c = float(np.corrcoef(rot, prof)[0, 1])
+            score = c
+            if b is not None:
+                score += 0.5 * float(np.corrcoef(np.roll(b, -r), prof)[0, 1])
+            scores[(r, name)] = (score, c)
+    (r, name), (score, c) = max(scores.items(), key=lambda kv: kv[1][0])
+    # Relative major/minor share every note, so pitch content alone often picks
+    # the wrong one of the pair (vi-IV-I-V and i-VI-III-VII are the same notes).
+    # Where the music STARTS settles it: if the first bass note is the other
+    # one's tonic, and the two are not far apart on content, it is the other.
+    rel = ((r + 9) % 12, "minor") if name == "major" else ((r + 3) % 12, "major")
+    if first_pc is not None and first_pc % 12 == rel[0] and first_pc % 12 != r \
+            and score - scores[rel][0] < REL_SWITCH_GAP:
+        r, name = rel
+    # Confidence that this is TONAL at all: the best plain-chroma fit of any key.
+    # Which key wins is decided above; how tonal the music is does not depend on it.
+    return r, name, max(c_ for _s, c_ in scores.values())
+
+
+def _bass_pcs(S, sr, n_fft, np, beats):
+    """Bass pitch class per beat -> (list, first one or None).
+
+    The LOWEST strong peak in 40-200 Hz, with parabolic interpolation: at 22 kHz
+    a 2048-point bin is 10.8 Hz, two semitones at E2, so the raw bin lands on
+    the wrong note. HPS is no help here — on a sine bass it locks onto the
+    chord's harmonics instead (E minor read as G).
+    """
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    sel = np.where((freqs >= 40.0) & (freqs <= 200.0))[0]
+    out = []
+    for i, b in enumerate(beats):
+        b2 = beats[i + 1] if i + 1 < len(beats) else S.shape[0]
+        frame = S[b:max(b + 1, b2)].sum(axis=0)
+        band = frame[sel]
+        if not len(band) or band.max() <= 1e-9:
+            continue
+        j = int(sel[int(np.argmax(band))])
+        if 0 < j < len(frame) - 1:
+            a_, b_, c_ = np.log(frame[j - 1:j + 2] + 1e-12)
+            d = a_ - 2 * b_ + c_
+            j = j + (0.5 * (a_ - c_) / d if d < 0 else 0.0)
+        f = j * sr / float(n_fft)
+        if f > 0:
+            out.append(int(round(69 + 12 * np.log2(f / 440.0))) % 12)
+    return out, (out[0] if out else None)
+
+
+# Not music: below this a reference has no tonal centre worth transcribing.
+# Measured: tonal loops 0.73-0.95, modal chip music (phrygian, harmonic minor)
+# down to 0.54; white noise 0.28, speech-like buzz 0.39. Most non-music never
+# gets this far — noise, sweeps, random hits and silence have no tatum at all.
+KEY_MIN_CONF = 0.45
+REL_SWITCH_GAP = 0.5         # how far apart (score) the relative key may be and still win on the first bass note
+SILENCE = 1e-4               # peak below -80 dBFS: nothing there
 
 
 def _dominant_pitch(S, sr, n_fft, np, lo, hi):
@@ -179,24 +351,49 @@ def _dominant_pitch(S, sr, n_fft, np, lo, hi):
     return int(round(69 + 12 * np.log2(f / 440.0)))
 
 
-def analyze(path, np, sf, bars_max=32):
-    """Extract a musical summary of a recording. Returns a plain dict."""
-    n_fft, hop = 2048, 512
-    x, sr = _load(path, np, sf)
-    if len(x) < n_fft * 4:
+def _read_music(x, sr, np, n_fft, hop):
+    """The shared front end: tempo, beat grid, chroma and key — or None when the
+    reference is not music with a pulse and a key.
+
+    Returning None for non-music is the point. Silence used to come back as
+    "120 bpm C minor" (key-confidence sentinel -2.0), white noise as 148 bpm,
+    a sweep as 148, speech-like buzz as 115 E minor — and --from-audio then
+    "transcribed" them: a silent reference rendered a loud arpeggio. Callers
+    already handle None ("no steady tempo or key").
+    """
+    if len(x) < n_fft * 4 or float(np.abs(x).max()) < SILENCE:
         return None
-    S = _stft(x, np, n_fft, hop)
+    bpm, clarity = estimate_tempo(x, sr, np)
+    if bpm is None:
+        return None
+    # Pad one window of silence so the STFT reaches the LAST sample. Without it
+    # the final ~90 ms had no frame, the grid came up a few steps short of the
+    # last bar, and a 4-bar reference transcribed as 3 bars.
+    # And one in FRONT: spectral flux needs a frame before the first onset, or
+    # beat 1 at sample 0 is invisible and the grid starts a beat late.
+    S = _stft(np.concatenate([np.zeros(n_fft), x, np.zeros(n_fft)]), np, n_fft, hop)
     env = _onset_env(S, np)
-    bpm = _fold_tempo(_tempo(env, sr, hop, np))
     off, period = _beat_phase(env, sr, hop, bpm, np)
     chroma = _chroma(S, sr, n_fft, np)
-    root, mode, conf = _find_key(chroma, np)
-
-    # Beat frame indices
     beats = np.arange(off, S.shape[0], period).astype(int)
     beats = beats[beats < S.shape[0]]
     if len(beats) < 4:
         return None
+    bass, first = _bass_pcs(S, sr, n_fft, np, beats)
+    root, mode, conf = _find_key(chroma, np, bass, first)
+    if conf < KEY_MIN_CONF:
+        return None
+    return S, env, bpm, clarity, off, period, chroma, beats, root, mode, conf
+
+
+def analyze(path, np, sf, bars_max=32):
+    """Extract a musical summary of a recording. Returns a plain dict."""
+    n_fft, hop = 2048, 512
+    x, sr = _load(path, np, sf)
+    got = _read_music(x, sr, np, n_fft, hop)
+    if not got:
+        return None
+    S, env, bpm, clarity, off, period, chroma, beats, root, mode, conf = got
 
     per_beat = []
     for i, b in enumerate(beats):
@@ -212,7 +409,7 @@ def analyze(path, np, sf, bars_max=32):
                               / (frame.sum() + 1e-12)),
         })
     return {"bpm": bpm, "root": root, "mode": mode, "key_conf": conf,
-            "beats": per_beat, "duration": len(x) / sr,
+            "clarity": clarity, "beats": per_beat, "duration": len(x) / sr,
             "onset_env": env, "fps": sr / hop, "beat_period": period}
 
 
@@ -399,22 +596,18 @@ def to_events_hi(path, np, sf, seconds=None, beats_per_bar=4, div=4,
     import theory
     n_fft, hop = 2048, 512
     x, sr = _load(path, np, sf)
-    if len(x) < n_fft * 4:
+    got = _read_music(x, sr, np, n_fft, hop)
+    if not got:
         return None
-    S = _stft(x, np, n_fft, hop)
-    env = _onset_env(S, np)
-    bpm = _fold_tempo(_tempo(env, sr, hop, np))
-    off, period = _beat_phase(env, sr, hop, bpm, np)
-    chroma = _chroma(S, sr, n_fft, np)
-    root, mode, conf = _find_key(chroma, np)
+    S, env, bpm, clarity, off, period, chroma, _beats, root, mode, conf = got
     scale_name = "minor" if mode == "minor" else "major"
     scale = scale or theory.SCALES[scale_name]
     pcs = [(root + t) % 12 for t in scale]
 
     # Grid: `div` steps per beat, so a 16th grid at 4 beats/bar = 16 steps/bar.
     step_frames = period / div
-    n_steps = int((S.shape[0] - off) / step_frames)
-    if n_steps < div * beats_per_bar:
+    n_steps = int(round((S.shape[0] - off) / step_frames))
+    if n_steps < 0.75 * div * beats_per_bar:
         return None
     steps_per_bar = beats_per_bar * div
 
@@ -469,7 +662,10 @@ def to_events_hi(path, np, sf, seconds=None, beats_per_bar=4, div=4,
         mel = [snap(n) for n in mel]
         bass = [snap(n) for n in bass]
 
-    nbars = max(1, len(mel) // steps_per_bar)
+    # Whole bars, counting a final bar that is at least 3/4 there: the grid can
+    # end a step or two short of the file's last sample, and flooring that
+    # dropped the whole last bar.
+    nbars = max(1, int(len(mel) / float(steps_per_bar) + 0.25))
     if seconds:
         spb_sec = 60.0 / bpm * beats_per_bar
         nbars = max(1, min(nbars, max(1, int(round(seconds / spb_sec)))))
@@ -481,7 +677,7 @@ def to_events_hi(path, np, sf, seconds=None, beats_per_bar=4, div=4,
     # that is where the reference is quiet, and silence is part of the
     # arrangement.
     _pos = [v for v in strength if v > 0]
-    arp_gate = float(np.median(_pos)) * 0.8 if _pos else 0.0
+    arp_gate = float(np.median(_pos)) * 0.8 if _pos else float("inf")   # no onsets: no arp
 
     ev = {"lead": [], "arp": [], "bass": [], "drum": []}
     for st, ln, p, sg in _segment(mel, strength):
@@ -519,7 +715,7 @@ def to_events_hi(path, np, sf, seconds=None, beats_per_bar=4, div=4,
         for kind in hits:
             ev["drum"].append((i // steps_per_bar, i % steps_per_bar, kind))
 
-    ana = {"bpm": bpm, "root": root, "mode": mode, "key_conf": conf,
+    ana = {"bpm": bpm, "root": root, "mode": mode, "key_conf": conf, "clarity": clarity,
            "duration": len(x) / sr, "steps_per_bar": steps_per_bar,
            "notes": len(ev["lead"]), "drum_hits": len(ev["drum"])}
     return ev, nbars, 60.0 / bpm * beats_per_bar, ana, scale_name

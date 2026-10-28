@@ -366,7 +366,7 @@ _SEQ = {"alarm": 2, "fanfare": 4, "coin": 2, "chime": 3, "confirmup": 2,
         "errordown": 2, "shimmer": 5, "metal": 2, "search": 3, "rattle": 6}
 
 
-def render_opl(arch, n, sr, rng, np, oplmod):
+def render_opl(arch, n, sr, rng, np, oplmod, lib=None):
     """Render an archetype through the real OPL3 core."""
     spec = OPL_FX.get(arch, OPL_FX["blip"])
     (mult, ksl, tl, ar, dr, sl, rr, wv), fb, (m0, m1, curve) = spec
@@ -376,7 +376,7 @@ def render_opl(arch, n, sr, rng, np, oplmod):
     elif arch in ("click", "crack", "shimmer", "metal"):
         base = float(rng.uniform(900.0, 1400.0))
 
-    chip = oplmod.OPL3()
+    chip = oplmod.OPL3(lib)
     ins = oplmod.Instrument(arch,
                             (mult, ksl, tl, ar, dr, sl, rr, wv, 0, 0, 0, 0),
                             (1, 0, 0, ar, dr, sl, rr, wv, 0, 0, 0, 0), fb=fb, con=0)
@@ -397,6 +397,11 @@ def render_opl(arch, n, sr, rng, np, oplmod):
     per = max(1, n // reps)
     for r_i in range(reps):
         f_start = base * rs[r_i % len(rs)]
+        # Off, then on. The chip only restarts an envelope that has reached its
+        # release phase, which takes at least one sample with the key off — so
+        # OPL3.key_on runs OPL3.RETRIGGER_GAP (64) samples between the two and
+        # takes them out of the next render, keeping the length exact. With zero
+        # samples between, only the FIRST note of coin/chime/fanfare... sounded.
         chip.key_off(0)
         chip.key_on(0, f_start * m0)
         seg = per if r_i < reps - 1 else max(per, n - per * (reps - 1))
@@ -426,21 +431,20 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
 
     use_opl = bool(getattr(a, "oplfx", False))
     oplmod = None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import chip as _cm
     if use_opl:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import opl as oplmod                                    # noqa: N813
+        oplmod.OPL3(getattr(a, "opl_lib", None))   # a bad --opl-lib fails here, in one line
 
-    dest = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
-    if not os.path.isdir(dest):
-        if a.create_dirs or a.output_to:
-            os.makedirs(dest, exist_ok=True)
-        else:
-            sys.exit(f"output dir does not exist: {dest} (add --create-dirs)")
-
-    base = a.name or slug(a.prompt or "sfx")
+    dest = _cm.out_dir(a)
+    base = _cm.base_name(a, slug, "sfx")
     arch = a.fx_archetype or classify(base, a.prompt or "")
     if arch not in ARCHETYPES:
         sys.exit(f"unknown --fx-archetype {arch!r}. One of: {', '.join(ARCHETYPES)}")
+    for fl in ("--transpose", "--key", "--mood"):
+        if _cm._flag_given(fl):
+            print(f"   \u2139 {fl} is for --chip/--opl music; effects ignore it")
 
     # Effects are short; --seconds defaults to something musical, so prefer an
     # explicit --max-seconds (which the pack generator passes as the target).
@@ -451,6 +455,9 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     natural = not getattr(a, "max_seconds", 0) and not any(x == "--seconds" or x.startswith("--seconds=") for x in sys.argv[1:])
     if natural:
         dur = 4.0
+    import math
+    if not math.isfinite(float(dur)) or float(dur) <= 0:
+        sys.exit(f"--chipfx: --seconds/--max-seconds must be more than 0, got {dur}")
     dur = max(0.03, min(float(dur), 10.0))
     n = int(SAMPLE_RATE * dur)
 
@@ -463,7 +470,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        audio = (render_opl(arch, n, SAMPLE_RATE, rng, np, oplmod) if use_opl
+        audio = (render_opl(arch, n, SAMPLE_RATE, rng, np, oplmod, getattr(a, "opl_lib", None)) if use_opl
                  else render_psg(arch, n, SAMPLE_RATE, rng, np))
         audio = np.asarray(audio, dtype=np.float64)[:n]
         import chip as _dcm
@@ -483,21 +490,9 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         name = f"{base}_s{seed}"
         # Hardware format lock, if asked. Applied here rather than in the
         # ComfyUI node because these engines never touch the graph.
-        out_sr = SAMPLE_RATE
-        out_bits = a.bits
-        if getattr(a, "format", "none") not in (None, "none"):
-            _mod = sys.modules.get("chip") or __import__("chip")
-            audio, out_sr = _mod.format_lock_np(audio, SAMPLE_RATE, a.format, np)
-            # Store at the format's OWN bit depth. Writing 8-bit audio into a
-            # 16-bit container wastes half the file and is a lie about the data;
-            # it also stops FLAC from compressing what is really an 8-bit signal.
-            _spec = _mod.FORMATS.get(a.format) or {}
-            _fb = int(_spec.get("bits") or 0)
-            if _fb:
-                out_bits = 8 if _fb <= 8 else (16 if _fb <= 16 else 24)
+        audio, out_sr, out_bits = _cm.apply_format(audio, SAMPLE_RATE, a, np)
         path = os.path.join(dest, f"{name}.wav")
-        sf.write(path, audio, out_sr,
-                 subtype=f"PCM_{out_bits}" if out_bits != 8 else "PCM_U8")
+        sf.write(path, audio, out_sr, subtype=_cm.wav_subtype(out_bits))
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
         # FLAC before OGG: it is lossless, so for format-locked audio it is the
@@ -508,7 +503,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
         print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.2f}s  {'FM' if use_opl else 'PSG'}:{arch:<10} "
+              f"{len(audio)/float(out_sr):5.2f}s  {'FM' if use_opl else 'PSG'}:{arch:<10} "
               f"seed={seed}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}")

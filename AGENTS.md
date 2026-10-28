@@ -531,6 +531,14 @@ identity**, so rendering the same seed into two directories deliberately produce
 two different compositions. My first FLAC check did that and "failed" on a
 7436-frame length difference that was the feature working correctly.
 
+For `--chip`/`--opl` the identity has two layers (`chip.track_identity`,
+`chip.take_identity`): the **piece** is the output folder plus `--name` (or the
+prompt's slug when there is no name) and decides key, form, harmony, metre and
+tempo; the **take** adds a token from the seed and decides melody, rhythm, bass
+style and kit. So two prompts in one folder are two pieces, `-n 4` is four takes of
+one piece, and the same prompt + seed + folder + name repeats byte for byte. Before
+this, every unnamed prompt was the same "untitled" track and `-n` made copies.
+
 ## Working on this repo
 
 - **Models are not in git** (~29 GB across all engines). `./download-models.sh
