@@ -177,6 +177,7 @@ label.c { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .gcard.playing { border-color: var(--accent); }
 .gcard canvas { width: 100%; height: 54px; display: block; background: var(--bg); border-radius: 3px; cursor: pointer; }
 .gcard .t { display: flex; gap: 6px; align-items: baseline; justify-content: space-between; min-width: 0; }
+.tklink { cursor: pointer; } .tklink:hover { color: var(--accent); text-decoration: underline; }
 .gcard .t b { font: 600 12.5px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .gcard .meta { font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
 .gcard .p { font-size: 12px; color: var(--dim); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -282,7 +283,18 @@ tr:last-child td { border-bottom: 0; }
 #sbStatus .err { color: var(--bad); }
 .srvdown { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 8px 12px 0; padding: 8px 12px; border: 1px solid var(--bad); border-radius: var(--radius); background: rgba(255,85,85,.08); font-size: 12.5px; }
 .srvdown b { color: var(--bad); }
-.noteedit { display: flex; gap: 4px; } .noteedit textarea { min-height: 34px; } #sbStatus .busy { color: var(--warn); }
+.noteedit { display: flex; gap: 4px; }
+dialog.takedlg { width: min(980px, calc(100vw - 32px)); }
+dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
+.takedlg .snd canvas.wave { height: 90px; }
+.takedlg .snd .spec { width: 160px; height: 30px; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; font-size: 12px; }
+.kv dt { color: var(--dim); font-family: var(--mono); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.cmprow { display: grid; grid-template-columns: 28px 26px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.cmprow.on { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
+.cmprow .num { font: 700 16px var(--mono); color: var(--accent); text-align: center; }
+.cmprow .star { background: none; border: 0; font-size: 16px; color: var(--dim); padding: 0; } .cmprow .star.ref { color: var(--warn); }
+.cmprow .mrow { grid-column: 3 / -1; display: flex; flex-wrap: wrap; gap: 4px; } .noteedit textarea { min-height: 34px; } #sbStatus .busy { color: var(--warn); }
 .sb .nf { display: inline-flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
 .sb .nf label { display: inline-flex; gap: 3px; align-items: center; cursor: pointer; }
 @media (max-width: 1100px) { .sb .nf label:not(:first-child) { display: none; } }
@@ -523,6 +535,13 @@ tr:last-child td { border-bottom: 0; }
     <div id="jobList"></div>
   </section>
 
+  <section class="pane" id="p-compare" hidden>
+    <div class="paneh"><h2>Compare</h2><span class="dim mono" id="cmpCount"></span><span class="sp"></span>
+      <label class="c"><input type="checkbox" id="cmpLoop"> loop</label><button type="button" id="cmpClear">✕ Clear</button></div>
+    <p class="lede">Line up takes with <b>⚖</b> (gallery, queue, sets, find). Press <b>1</b>–<b>9</b> to switch between them <i>at the same moment</i>, Space to play or pause, ← → to step. ★ marks the reference the others are measured against.</p>
+    <div id="cmpList" style="display:grid;gap:8px"></div>
+    <div class="card" id="cmpSpecCard" hidden><h3>Spectrum <span class="dim" style="font-weight:400">· energy by frequency, each take against the ★ reference</span></h3><canvas id="cmpSpec" style="width:100%;height:180px;display:block"></canvas><div class="chips" id="cmpLegend"></div></div>
+  </section>
   <section class="pane" id="p-gallery" hidden>
     <div class="paneh"><h2>Gallery</h2><span class="dim mono" id="galCount"></span><span class="sp"></span>
       <div class="gfilter"><div class="chips" id="galEng"></div><input type="search" id="galQ" placeholder="find words, a name or a seed" aria-label="Search the gallery">
@@ -555,6 +574,9 @@ tr:last-child td { border-bottom: 0; }
       <div class="card apps"><h3>Open folders with</h3><div id="folderApps" class="apps"></div><button type="button" data-addapp="folder_apps">＋ Add a program</button></div>
     </div>
     <div><button type="button" class="render" id="saveSetup" style="width:auto;padding:7px 18px">Save setup</button> <span class="toast" id="setupToast"></span></div>
+    <div class="card" style="display:grid;gap:8px"><h3>Backups <span class="dim" style="font-weight:400">· the whole soundmon-gallery: takes, sets, presets, dropped files, the Find index</span></h3>
+      <div class="pathrow"><input id="bkKey" placeholder="a word for this backup (optional)" style="max-width:300px"><button type="button" id="bkMake">🗄 Back up now</button><button type="button" id="bkOpen" title="open the backups folder">📂</button><span class="sp"></span><button type="button" id="bkClear" title="delete every take in the gallery (backed up first)">✕ Clear gallery…</button></div>
+      <div id="bkList" class="dim">…</div></div>
   </section>
   </div>
 </main>
@@ -578,6 +600,10 @@ tr:last-child td { border-bottom: 0; }
     <div class="brright"><input id="brFilter" placeholder="filter this folder" aria-label="filter"><div id="brList" class="brlist"></div></div></div>
   <div id="brPrev"></div>
   <div class="brfoot"><span class="hint" id="brHint"></span><span class="err" id="brErr"></span><span class="sp"></span><button type="button" class="render" id="brOk">Choose</button></div>
+</dialog>
+<dialog id="takeDlg" class="browse takedlg" aria-label="Take">
+  <div class="brhead"><button type="button" id="tkPrev" title="previous take (←)">←</button><h3 id="tkTitle"></h3><button type="button" id="tkNext" title="next take (→)">→</button><span class="sp"></span><button type="button" id="tkClose" aria-label="close">✕</button></div>
+  <div id="tkBody" style="display:grid;gap:10px;padding:10px 14px;overflow-y:auto"></div>
 </dialog>
 <dialog id="sweepDlg" class="browse" aria-labelledby="swTitle" style="width:min(560px,calc(100vw - 32px))">
   <div class="brhead"><h3 id="swTitle">Sweep a setting</h3><span class="sp"></span><button type="button" id="swClose" aria-label="close">✕</button></div>
@@ -890,7 +916,7 @@ $("prompt").addEventListener("drop", async e => {                    // a .txt m
 });
 
 /* ================= tabs ================= */
-const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["find", "🔎 Find"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
+const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["find", "🔎 Find"], ["compare", "⚖ Compare"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
 let tab = store.get("tab", "gallery");
 function showTab(t) {
   if (!TABS.some(x => x[0] === t)) t = "gallery";
@@ -903,7 +929,8 @@ function showTab(t) {
   if (t === "sets") loadSets();
   if (t === "voices") drawVoices();
   if (t === "find") findStatus();
-  if (t === "setup") loadServers();
+  if (t === "compare") drawCompare();
+  if (t === "setup") { loadServers(); loadBackups(); }
   if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
 }
 addEventListener("hashchange", () => showTab(location.hash.slice(1)));
@@ -1262,6 +1289,7 @@ function outRows(j, max) {
         el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇", title: "download " + name }),
         el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
         el("button", { type: "button", text: "🧬", title: "vary this take: render new takes that start from it", onclick: () => varyTake(j, o) }),
+        cmpBtn({ url: fileUrl(j.dir, o.file), label: (j.label ? j.label + " · " : "") + name, take: j.dir + "/" + o.file, open: { dir: j.dir, file: o.file } }),
         openBtn({ dir: j.dir, file: o.file }, "open this sound in its app, a program from Setup, or its folder"))] }); }));
   if (j.outputs.length > max) outs.append(el("button", { type: "button", style: "justify-self:start", text: all ? "show fewer" : `show all ${j.outputs.length}`,
     onclick: () => { all ? QOPEN.delete(j.id) : QOPEN.add(j.id); lastQueue = ""; drawQueue(); } }));
@@ -1367,20 +1395,20 @@ $("srvDownSetup").addEventListener("click", () => showTab("setup"));
 $("srvDownHide").addEventListener("click", () => { SRVDOWN.hidden = true; $("srvDown").hidden = true; });
 
 /* ================= gallery ================= */
-let GAL = [], galEng = store.get("galEng", "all");
+let GAL = [], GALVIS = [], galEng = store.get("galEng", "all");
 async function loadGallery() { try { GAL = (await api("/api/gallery")).items; drawGallery(); } catch (e) { $("galGrid").replaceChildren(el("div", { class: "empty", text: e.message })); } }
 function drawGallery() {
   const engs = [...new Set(GAL.map(j => j.engine))];
   $("galEng").replaceChildren(...["all", ...engs].map(k => el("button", { type: "button", class: "chip", "aria-pressed": String(galEng === k), text: k === "all" ? "All" : (ENG[k]?.icon || "") + " " + (ENG[k]?.name || k),
     onclick: () => { galEng = k; store.set("galEng", k); drawGallery(); } })));
   const q = $("galQ").value.trim().toLowerCase();
-  const cards = [];
+  const cards = []; GALVIS = [];
   for (const j of GAL) {
     if (galEng !== "all" && j.engine !== galEng) continue;
     for (const o of j.outputs) {
       const hay = `${textFor(j.params, o.file)} ${o.file} ${o.seed ?? ""} ${j.params.name || ""}`.toLowerCase();
       if (q && !hay.includes(q)) continue;
-      cards.push(card(j, o));
+      GALVIS.push({ j, o }); cards.push(card(j, o, GALVIS.length - 1));
       if (cards.length >= 300) break;
     }
   }
@@ -1398,7 +1426,7 @@ function textFor(p, file) {
   }
   return lines[0];
 }
-function card(j, o) {
+function card(j, o, vi) {
   const E = ENG[j.engine] || {}, url = fileUrl(j.dir, o.file), name = o.file.split("/").pop();
   const snd = soundRow(url, name, { sub: o.seed != null ? "seed " + o.seed : "", open: { dir: j.dir, file: o.file } });
   const r = (j.ratings || {})[o.file] || 0;
@@ -1407,7 +1435,7 @@ function card(j, o) {
   const again = () => { const p = JSON.parse(JSON.stringify(j.params)); if (o.seed != null) p.seed = o.seed; p.n = 1; return p; };
   const cmd = j.command + (o.seed != null && !/--seed/.test(j.command) ? ` --seed ${o.seed}` : "");
   return el("div", { class: "card gcard" },
-    el("div", { class: "t" }, el("b", { text: name, title: o.file }), el("span", { class: "badge", text: (E.icon || "") + " " + (E.name || j.engine) })),
+    el("div", { class: "t" }, el("b", { class: "tklink", text: name, title: "open this take up close: " + o.file, onclick: () => openTake(GALVIS, vi) }), el("span", { class: "badge", text: (E.icon || "") + " " + (E.name || j.engine) })),
     snd,
     j.params.prompt ? el("div", { class: "p", text: textFor(j.params, o.file), title: j.params.prompt }) : null,
     el("div", { class: "t" }, stars, el("span", { class: "btnrow" },
@@ -1419,6 +1447,7 @@ function card(j, o) {
       ...(o.scores || []).map(s => el("a", { class: "b", href: fileUrl(j.dir, s, true), text: "⬇ " + s.split(".").pop(), title: "tracker / MIDI score" })),
       el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
       j.params.ref ? el("button", { type: "button", text: "ref ▶", title: "hear the reference this take was steered by", onclick: () => play(fileUrl(j.dir, "input-" + j.params.ref), "reference: " + j.params.ref) }) : null,
+      cmpBtn({ url, label: name, take: j.dir + "/" + o.file, open: { dir: j.dir, file: o.file } }),
       openBtn({ dir: j.dir, file: o.file }, "open this sound in its app, a program from Setup, or its folder")));
 }
 function loadSettings(p, seed) {
@@ -1551,6 +1580,8 @@ function detail(r, takes) {
       el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this take", onclick: () => findFrom({ take: t.take }, `${k} take ${tlabel(t, i)}`) }),
       el("button", { type: "button", text: "📂", title: "open this take's folder", onclick: () => api("/api/open", { target: { folder: true, dir: t.job } }).catch(e => toast(e.message, true)) }),
       openBtn({ dir: t.job, file: t.file }, "open this take in…"),
+      cmpBtn({ url: takeUrl(t), label: `${k} · take ${tlabel(t, i)}`, take: t.take, open: { dir: t.job, file: t.file } }),
+      hasNow ? cmpBtn({ url: nowUrl(k), label: `${k} · now`, open: { set_now: { id: setId, key: k } } }) : null,
       hasNow ? el("button", { type: "button", text: "↗ now", title: "open the game's current file in…", onclick: e => openMenu({ set_now: { id: setId, key: k } }, e.currentTarget) }) : null),
     el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
       try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
@@ -1779,6 +1810,7 @@ async function findSearch() {
           el("button", { type: "button", text: "🔎", title: "find sounds like this one", onclick: () => findFrom({ path: x.path }, name) }),
           el("button", { type: "button", text: "📂", title: "open its folder", onclick: () => api("/api/open", { target: { indexed: x.path } }).catch(e => toast(e.message, true)) }),
           openBtn({ path: x.path }, "open this sound in…"),
+          cmpBtn({ url, label: name, open: { path: x.path } }),
           el("button", { type: "button", text: "Copy path", onclick: e => copyText(x.path, e.target) })));
     }));
   } catch (e) { $("findResults").replaceChildren(el("div", { class: "empty", text: e.message })); }
@@ -1877,6 +1909,141 @@ $("histBtn").addEventListener("click", e => {
     onclick: () => { m.remove(); $("prompt").value = t; readForm(); queueCommand(); } })) : [el("div", { class: "dim", style: "padding:6px", text: "Nothing rendered with this engine yet." })]));
   document.body.append(m); const r = e.currentTarget.getBoundingClientRect(); m.style.left = Math.max(8, r.right - m.offsetWidth) + "px"; m.style.top = r.bottom + 4 + "px";
   setTimeout(() => document.addEventListener("click", function off(ev) { if (!m.contains(ev.target)) { m.remove(); document.removeEventListener("click", off); } }), 0);
+});
+
+/* ================= ⚖ compare: same moment, different takes ================= */
+let CMP = store.get("compare", []), cmpIdx = -1;
+const CMPCOL = ["#55ffff", "#ff55ff", "#ffff55", "#55ff55", "#ff8855", "#88aaff", "#ff5577", "#aaffaa", "#ffffff"];
+function addCompare(item) {
+  if (CMP.some(c => c.url === item.url)) { toast("Already in Compare"); return; }
+  if (CMP.length >= 9) { toast("Compare holds 9 takes (keys 1–9): remove one first", true); return; }
+  if (!CMP.length) item.ref = true;
+  CMP.push(item); store.set("compare", CMP); toast(`Compare: ${CMP.length} take${CMP.length > 1 ? "s" : ""} (⚖ tab)`);
+  if (tab === "compare") drawCompare();
+}
+const cmpBtn = item => el("button", { type: "button", text: "⚖", title: "add to Compare (switch between takes at the same moment)", onclick: () => addCompare(item) });
+function drawCompare() {
+  $("cmpCount").textContent = CMP.length ? `${CMP.length} take${CMP.length > 1 ? "s" : ""}` : "";
+  if (!CMP.length) { $("cmpList").replaceChildren(el("div", { class: "empty", text: "Nothing to compare yet. Press ⚖ on takes in the Gallery, Queue, Sets or Find." })); $("cmpSpecCard").hidden = true; return; }
+  $("cmpList").replaceChildren(...CMP.map((c, i) => {
+    const m = el("div", { class: "mrow" }, el("span", { class: "lab" }), el("span", { class: "dim mono", style: "font-size:11px", text: c.take ? "measuring…" : "" }));
+    const row = el("div", { class: "cmprow" + (i === cmpIdx ? " on" : "") },
+      el("span", { class: "num", text: i + 1, style: `color:${CMPCOL[i]}` }),
+      el("button", { type: "button", class: "star" + (c.ref ? " ref" : ""), text: "★", title: "make this the reference", onclick: () => { CMP.forEach(x => x.ref = false); c.ref = true; store.set("compare", CMP); drawCompare(); } }),
+      soundRow(c.url, c.label, { compact: true, title: c.label, open: c.open }),
+      el("span", { class: "btnrow" }, el("button", { type: "button", text: "▶ here", title: "switch to this take at the same moment (" + (i + 1) + ")", onclick: () => cmpSwitch(i) }),
+        el("button", { type: "button", text: "✕", "aria-label": "remove", onclick: () => { CMP.splice(i, 1); if (CMP.length && !CMP.some(x => x.ref)) CMP[0].ref = true; store.set("compare", CMP); drawCompare(); } })), m);
+    if (c.take) measure("/api/analyse?take=" + encodeURIComponent(c.take), m);
+    return row;
+  }));
+  drawCmpSpec();
+}
+async function drawCmpSpec() {
+  const infos = await Promise.all(CMP.map(c => soundInfo(c.url))), cv = $("cmpSpec");
+  $("cmpSpecCard").hidden = !infos.some(w => w && !w.error);
+  if ($("cmpSpecCard").hidden) return;
+  const dpr = devicePixelRatio || 1, W = cv.width = cv.clientWidth * dpr, H = cv.height = cv.clientHeight * dpr, g = cv.getContext("2d"), cs = getComputedStyle(document.documentElement);
+  g.clearRect(0, 0, W, H); g.strokeStyle = cs.getPropertyValue("--line"); g.fillStyle = cs.getPropertyValue("--dim"); g.font = `${10 * dpr}px monospace`; g.lineWidth = 1;
+  const lo = Math.log(30), hi = Math.log(22050), x = f => (Math.log(f) - lo) / (hi - lo) * W, y = db => Math.min(H, Math.max(0, -db / 72 * H));
+  for (const f of [50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]) { g.beginPath(); g.moveTo(x(f), 0); g.lineTo(x(f), H); g.stroke(); g.fillText(f >= 1000 ? f / 1000 + "k" : f, x(f) + 3 * dpr, H - 4 * dpr); }
+  for (const db of [-12, -24, -36, -48, -60]) { g.beginPath(); g.moveTo(0, y(db)); g.lineTo(W, y(db)); g.stroke(); g.fillText(db + " dB", 3 * dpr, y(db) - 3 * dpr); }
+  infos.forEach((w, i) => {
+    if (!w || w.error || w.silent) return;
+    g.strokeStyle = CMPCOL[i]; g.lineWidth = (CMP[i].ref ? 3 : 1.5) * dpr; g.globalAlpha = CMP[i].ref ? 1 : 0.85; g.beginPath();
+    w.bands.forEach((db, b) => { const X = x(w.bandF[b]), Y = y(db); b ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); g.globalAlpha = 1;
+  });
+  $("cmpLegend").replaceChildren(...CMP.map((c, i) => el("span", { class: "chip", style: `border-color:${CMPCOL[i]};color:${CMPCOL[i]}`, text: `${i + 1} ${c.ref ? "★ " : ""}${c.label}` })));
+}
+function cmpSwitch(i) {
+  // keep the playhead where it is (in seconds) and carry on in the other take
+  const c = CMP[i]; if (!c) return;
+  const t = nowKey && player.duration ? player.currentTime : 0, was = nowKey && !player.paused;
+  cmpIdx = i; document.querySelectorAll(".cmprow").forEach((r, k) => r.classList.toggle("on", k === i));
+  if (nowKey === c.url) { if (!was) player.play().catch(() => {}); return; }
+  play(c.url, `${i + 1} · ${c.label}`);
+  player.addEventListener("loadedmetadata", () => { player.currentTime = Math.min(t, Math.max(0, player.duration - 0.05)); }, { once: true });
+}
+$("cmpClear").addEventListener("click", () => { if (CMP.length && window.confirm("Empty the Compare list?")) { CMP = []; store.set("compare", CMP); drawCompare(); } });
+$("cmpLoop").addEventListener("change", e => player.loop = e.target.checked);
+document.addEventListener("keydown", e => {
+  if (tab !== "compare" || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (/^[1-9]$/.test(e.key) && CMP[+e.key - 1]) { e.preventDefault(); cmpSwitch(+e.key - 1); }
+  else if (e.key === "ArrowRight" && CMP.length) { e.preventDefault(); cmpSwitch((cmpIdx + 1) % CMP.length); }
+  else if (e.key === "ArrowLeft" && CMP.length) { e.preventDefault(); cmpSwitch((cmpIdx - 1 + CMP.length) % CMP.length); }
+});
+
+/* ================= a take, up close (pixelmon-gui's lightbox, for sound) ================= */
+let TKLIST = [], tkAt = -1;
+function openTake(list, i) {
+  TKLIST = list; tkAt = i; drawTake(); if (!$("takeDlg").open) $("takeDlg").showModal();
+}
+function drawTake() {
+  const it = TKLIST[tkAt]; if (!it) return;
+  const { j, o } = it, name = o.file.split("/").pop(), url = fileUrl(j.dir, o.file), E = ENG[j.engine] || {};
+  $("tkTitle").textContent = `${E.icon || ""} ${name}  ·  ${tkAt + 1} / ${TKLIST.length}`;
+  $("tkPrev").disabled = tkAt <= 0; $("tkNext").disabled = tkAt >= TKLIST.length - 1;
+  const meas = el("div", { class: "measure" }, el("span", { class: "lab", text: "measured" }), el("span", { class: "dim", text: "measuring…" }));
+  const sono = el("canvas", { class: "sono", title: "sonogram: time across, 63 Hz – 16 kHz up" });
+  const p = j.params, kv = el("dl", { class: "kv" });
+  const rows = [["engine", E.name || j.engine], ["prompt", textFor(p, o.file)], ["seed", o.seed ?? "—"], ["seconds", p.seconds], ["style guides", (p.styles || []).join(", ")],
+    ["format", p.format && p.format !== "none" ? p.format : ""], ["reference", p.ref ? `${p.ref} at ${p.ref_strength || 0.6}${p.ref_match ? ", tempo + key" : ""}${p.match_tone ? ", tone matched" : ""}` : ""],
+    ["mood", p.mood], ["archetype", p.archetype], ["voice", p.voice], ["bpm / key", p.bpm || p.key ? `${p.bpm || ""} ${p.key || ""}` : ""],
+    ...Object.entries(p.adv || {}).filter(([, v]) => v !== "" && v != null).map(([k, v]) => ["adv " + k, v]), ["made", new Date((j.finished || j.created) * 1000).toLocaleString()], ["job", j.dir]];
+  for (const [k, v] of rows) if (v !== "" && v != null && v !== undefined) kv.append(el("dt", { text: k }), el("dd", { text: String(v) }));
+  const again = () => { const q = JSON.parse(JSON.stringify(p)); if (o.seed != null) q.seed = o.seed; q.n = 1; return q; };
+  const cmd = j.command + (o.seed != null && !/--seed/.test(j.command) ? ` --seed ${o.seed}` : "");
+  $("tkBody").replaceChildren(
+    soundRow(url, name, { open: { dir: j.dir, file: o.file }, sub: o.seed != null ? "seed " + o.seed : "" }),
+    meas, sono,
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "Load", onclick: () => { loadSettings(p, o.seed); $("takeDlg").close(); } }),
+      el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", onclick: () => api("/api/render", again()).then(r => { toast("Queued: " + r.command); pollSoon(); }).catch(e => toast(e.message, true)) }),
+      el("button", { type: "button", text: "🧬 Vary", onclick: () => varyTake(j, o) }),
+      el("button", { type: "button", text: "⚖ Compare", onclick: () => addCompare({ url, label: name, take: j.dir + "/" + o.file, open: { dir: j.dir, file: o.file } }) }),
+      el("button", { type: "button", text: "🔎 Similar", onclick: () => { $("takeDlg").close(); findFrom({ take: j.dir + "/" + o.file }, name); } }),
+      el("button", { type: "button", text: "💾 Preset", onclick: () => savePresetFrom(p) }),
+      el("button", { type: "button", text: "Copy CLI", onclick: e => copyText(cmd, e.target) }),
+      el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
+      ...(o.scores || []).map(sc => el("a", { class: "b", href: fileUrl(j.dir, sc, true), text: "⬇ " + sc.split(".").pop() })),
+      p.ref ? el("button", { type: "button", text: "ref ▶", onclick: () => play(fileUrl(j.dir, "input-" + p.ref), "reference: " + p.ref) }) : null,
+      openBtn({ dir: j.dir, file: o.file }, "open in…"),
+      el("button", { type: "button", text: "📂", onclick: () => openThing({ folder: true, dir: j.dir }) })),
+    el("div", { class: "cmd mono", style: "font-size:11px;color:var(--dim);overflow-wrap:anywhere", text: cmd }), kv);
+  measure("/api/analyse?take=" + encodeURIComponent(j.dir + "/" + o.file), meas, sono);
+}
+$("tkPrev").addEventListener("click", () => { if (tkAt > 0) { tkAt--; drawTake(); } });
+$("tkNext").addEventListener("click", () => { if (tkAt < TKLIST.length - 1) { tkAt++; drawTake(); } });
+$("tkClose").addEventListener("click", () => $("takeDlg").close());
+$("takeDlg").addEventListener("keydown", e => {
+  if (/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  if (e.key === "ArrowLeft") { e.preventDefault(); $("tkPrev").click(); } else if (e.key === "ArrowRight") { e.preventDefault(); $("tkNext").click(); }
+  else if (e.key === " ") { e.preventDefault(); const it = TKLIST[tkAt]; if (it) play(fileUrl(it.j.dir, it.o.file), it.o.file.split("/").pop()); }
+});
+
+/* ================= backups ================= */
+async function loadBackups() {
+  try {
+    const r = await api("/api/backups");
+    $("bkList").replaceChildren(...(r.backups.length ? r.backups.map(b => el("div", { class: "grow", style: "grid-template-columns:minmax(0,1fr) auto auto auto" },
+      el("b", { class: "mono", text: b.name, title: `${b.files} files · ${new Date(b.mtime * 1000).toLocaleString()}` }),
+      el("span", { class: "dim mono", text: `${b.files} files · ${fmtBytes(b.bytes)}` }),
+      el("a", { class: "b", href: "/api/backup/download?name=" + encodeURIComponent(b.name), text: "⬇", title: "download" }),
+      el("button", { type: "button", text: "♻ Restore missing", title: "put back every file from this backup that's gone now (never overwrites)", onclick: async () => {
+        try { const x = await api("/api/backups/restore", { name: b.name }); toast(`Restored ${x.restored} file${x.restored === 1 ? "" : "s"} (${x.kept} already there)`); loadGallery(); } catch (e) { toast(e.message, true); } } })))
+      : [el("span", { text: "No backups yet." })]));
+  } catch (e) { $("bkList").textContent = e.message; }
+}
+$("bkMake").addEventListener("click", async e => {
+  const b = e.currentTarget; b.disabled = true; b.textContent = "backing up…";
+  try { const r = await api("/api/backup", { keyword: $("bkKey").value }); toast(`Backed up ${r.files} files (${fmtBytes(r.bytes)}) to ${r.name}${r.skipped ? `; skipped ${r.skipped} unreadable` : ""}`); loadBackups(); }
+  catch (err) { toast(err.message, true); } finally { b.disabled = false; b.textContent = "🗄 Back up now"; }
+});
+$("bkOpen").addEventListener("click", () => openThing({ backups: true }));
+$("bkClear").addEventListener("click", async () => {
+  const typed = window.prompt("This deletes every take in the gallery (sets, presets, dropped files and the Find index stay). A backup is made first.\n\nType CLEAR to go ahead:");
+  if (typed !== "CLEAR") { if (typed != null) toast("Not cleared: type CLEAR exactly", true); return; }
+  try { const r = await api("/api/gallery/clear", { confirm: "CLEAR", backup: true }); toast(`Removed ${r.removed} job folder${r.removed === 1 ? "" : "s"}; backup: ${r.backup}`); loadBackups(); loadGallery(); pollSoon(); }
+  catch (e) { toast(e.message, true); }
 });
 
 /* ================= styles ================= */

@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import sets as setsmod                          # noqa: E402  (gui/sets.py)
@@ -588,6 +589,123 @@ def detect_programs():
     key = lambda a: a["name"].lower()     # noqa: E731
     _DETECTED["v"] = (sorted({a["name"]: a for a in snd}.values(), key=key), sorted({a["name"]: a for a in fold}.values(), key=key))
     return _DETECTED["v"]
+
+
+# ---------------------------------------------------------------------------
+# Backups of ~/soundmon-gallery (pixelmon-gui's, for sound)
+# ---------------------------------------------------------------------------
+BACKUP_SKIP_TOP = {"backups"}
+BACKUP_SKIP_ANY = {"_analysis", "_mastered"}          # measurements and mastered previews: remade on demand
+STORED_EXT = (".ogg", ".mp3", ".opus", ".flac", ".m4a", ".zip", ".png", ".jpg")
+
+
+def backups_dir():
+    return os.path.join(GALLERY_HOME, "backups")
+
+
+def make_backup(keyword, gallery):
+    """Zip ~/soundmon-gallery (takes, sets, presets, inputs, the Find index) into
+    backups/soundmon-gallery-<keyword>-<date>.zip. Returns (path, files, bytes, skipped)."""
+    kw = re.sub(r"[^\w-]+", "-", str(keyword or "").strip()).strip("-")[:40] or "backup"
+    bk = backups_dir()
+    os.makedirs(bk, exist_ok=True)
+    base = f"soundmon-gallery-{kw}-{time.strftime('%Y-%m-%d')}"
+    path, i = os.path.join(bk, base + ".zip"), 2
+    while os.path.exists(path):
+        path, i = os.path.join(bk, f"{base}-{i}.zip"), i + 1
+    roots = [GALLERY_HOME] + ([gallery] if not os.path.realpath(gallery).startswith(os.path.realpath(GALLERY_HOME) + os.sep) else [])
+    n = skipped = 0
+    try:
+        with zipfile.ZipFile(path + ".part", "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for root in roots:
+                top = os.path.basename(os.path.normpath(root))
+                for d, dirs, files in os.walk(root):
+                    rel = os.path.relpath(d, root)
+                    dirs[:] = [x for x in dirs if x not in BACKUP_SKIP_ANY and not (rel == "." and x in BACKUP_SKIP_TOP)]
+                    for f in files:
+                        if f.endswith((".part", ".tmp")):
+                            continue
+                        full = os.path.join(d, f)
+                        if not os.path.isfile(full):
+                            skipped += 1
+                            continue
+                        try:
+                            z.write(full, os.path.normpath(os.path.join(top, rel, f)),
+                                    compress_type=zipfile.ZIP_STORED if f.lower().endswith(STORED_EXT) else zipfile.ZIP_DEFLATED)
+                            n += 1
+                        except OSError:
+                            skipped += 1
+        os.replace(path + ".part", path)
+    except BaseException:
+        if os.path.exists(path + ".part"):
+            os.remove(path + ".part")
+        raise
+    return path, n, os.path.getsize(path), skipped
+
+
+def list_backups():
+    bk = backups_dir()
+    if not os.path.isdir(bk):
+        return []
+    out = []
+    for f in sorted(os.listdir(bk), key=lambda f: -os.path.getmtime(os.path.join(bk, f))):
+        full = os.path.join(bk, f)
+        if f.endswith(".zip") and os.path.isfile(full):
+            try:
+                with zipfile.ZipFile(full) as z:
+                    n = sum(1 for i in z.infolist() if not i.is_dir())
+            except zipfile.BadZipFile:
+                continue
+            out.append({"name": f, "bytes": os.path.getsize(full), "mtime": os.path.getmtime(full), "files": n})
+    return out
+
+
+def backup_path(name):
+    full = os.path.realpath(os.path.join(backups_dir(), os.path.basename(str(name or ""))))
+    if not full.endswith(".zip") or not full.startswith(os.path.realpath(backups_dir()) + os.sep) or not os.path.isfile(full):
+        raise ValueError("no such backup")
+    return full
+
+
+def restore_backup(name, gallery):
+    """Put back everything from a backup that's missing now. Never overwrites an existing file."""
+    full = backup_path(name)
+    roots = {os.path.basename(os.path.normpath(GALLERY_HOME)): GALLERY_HOME, os.path.basename(os.path.normpath(gallery)): gallery}
+    restored = kept = 0
+    with zipfile.ZipFile(full) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            top, _, rest = info.filename.partition("/")
+            root = roots.get(top)
+            if not root or not rest:
+                continue
+            dest = os.path.realpath(os.path.join(root, rest))
+            if not dest.startswith(os.path.realpath(root) + os.sep) or os.path.relpath(dest, root).split(os.sep)[0] == "backups":
+                continue
+            if os.path.exists(dest):
+                kept += 1
+                continue
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with z.open(info) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            restored += 1
+    return {"restored": restored, "kept": kept}
+
+
+def clear_gallery(gallery):
+    """Delete every job folder in the gallery. Sets, presets, inputs, the Find index and backups live
+    elsewhere and are untouched."""
+    gallery = os.path.realpath(gallery)
+    if gallery in (HOME, os.path.realpath(GALLERY_HOME), "/"):
+        raise ValueError("refusing to clear that folder")
+    n = 0
+    for f in os.listdir(gallery):
+        p = os.path.join(gallery, f)
+        if os.path.isdir(p) and not os.path.islink(p) and os.path.isfile(os.path.join(p, "job.json")):
+            shutil.rmtree(p)
+            n += 1
+    return n
 
 
 def os_opener(is_dir):
@@ -1350,6 +1468,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(servers_report())
         if u.path == "/api/gallery":
             return self._json({"items": gallery_items(self.gallery)})
+        if u.path == "/api/backups":
+            return self._json({"backups": list_backups(), "folder": backups_dir()})
+        if u.path == "/api/backup/download":
+            try:
+                full = backup_path(urllib.parse.parse_qs(u.query).get("name", [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            return self._file(full, "application/zip", os.path.basename(full))
         if u.path == "/api/setup":
             snd, fold = detect_programs()
             return self._json(dict(load_setup(), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
@@ -1497,6 +1623,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"ok": self.jobs.cancel(u.path.rsplit("/", 1)[-1])})
             if u.path == "/api/jobs/clear":
                 return self._json(self.jobs.clear())
+            if u.path == "/api/backup":
+                path, n, size, skipped = make_backup(body.get("keyword"), self.gallery)
+                return self._json({"name": os.path.basename(path), "files": n, "bytes": size, "skipped": skipped})
+            if u.path == "/api/backups/restore":
+                return self._json(restore_backup(body.get("name"), self.gallery))
+            if u.path == "/api/gallery/clear":
+                if any(j["status"] in ("queued", "running") for j in self.jobs.snapshot()):
+                    raise ValueError("renders are still queued or running — wait for them (or clear the queue) first")
+                if str(body.get("confirm") or "") != "CLEAR":
+                    raise ValueError("type CLEAR to confirm")
+                backup = None
+                if body.get("backup", True):
+                    backup = os.path.basename(make_backup(body.get("keyword") or "before-clear", self.gallery)[0])
+                removed = clear_gallery(self.gallery)
+                self.jobs.clear()
+                return self._json({"removed": removed, "backup": backup})
             if u.path == "/api/jobs/abort":
                 return self._json(self.jobs.abort())
             if u.path == "/api/rate":
@@ -1606,6 +1748,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Only programs saved in Setup can be launched: the request names one, it can't supply a command.
                 setup, key, t = load_setup(), str(body.get("app") or "os"), body.get("target") or {}
                 is_dir = bool(t.get("folder")) or bool(t.get("indexed"))
+                if t.get("backups"):
+                    os.makedirs(backups_dir(), exist_ok=True)
+                    t = {"path": backups_dir()}
                 if t.get("path") or t.get("input") or t.get("set_now"):
                     if t.get("path") and not self._local():
                         raise ValueError("opening paths only works on the computer running soundmon-gui")
