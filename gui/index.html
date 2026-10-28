@@ -326,7 +326,7 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
 
   <div class="presetbar" style="display:flex;gap:6px">
     <select id="preset" aria-label="Presets" style="flex:1"><option value="">— presets —</option></select>
-    <button type="button" id="presetLoad">Load</button><button type="button" id="presetSave">Save…</button><button type="button" id="presetDel" title="delete this preset">✕</button>
+    <button type="button" id="presetLoad">Load</button><button type="button" id="presetSave">Save…</button><button type="button" id="presetDel" title="delete this preset">✕</button><button type="button" id="presetBundle" title="download this preset (or all of them) with the files it uses, to share or move">⬇</button><button type="button" id="presetImport" title="add presets from a bundle (.zip); nothing is overwritten">⬆</button>
   </div>
 
   <fieldset>
@@ -1867,7 +1867,11 @@ $("findK").addEventListener("change", findSearch);
 let PRESETS = [];
 async function loadPresets(sel) {
   try { PRESETS = (await api("/api/presets")).presets; } catch (e) { PRESETS = []; }
-  $("preset").replaceChildren(el("option", { value: "", text: "— presets —" }), ...PRESETS.map(p => el("option", { value: p.name, text: `${p.name}  · ${(ENG[p.engine] || {}).name || p.engine}`, selected: p.name === sel })));
+  const opt = p => el("option", { value: p.name, text: `${p.name}  · ${(ENG[p.engine] || {}).name || p.engine}`, title: p.note || "", selected: p.name === sel });
+  const folders = [...new Set(PRESETS.map(p => p.folder || ""))];
+  $("preset").replaceChildren(el("option", { value: "", text: "— presets —" }), ...PRESETS.filter(p => !p.folder).map(opt),
+    ...folders.filter(Boolean).map(f => el("optgroup", { label: "📁 " + f }, ...PRESETS.filter(p => p.folder === f).map(opt))));
+  const cur = PRESETS.find(p => p.name === $("preset").value); $("preset").title = cur && cur.note ? cur.note : "";
 }
 $("presetLoad").addEventListener("click", () => {
   const p = PRESETS.find(x => x.name === $("preset").value); if (!p) return toast("pick a preset first", true);
@@ -1886,8 +1890,21 @@ async function savePreset(snapshot, suggest) {
   const key = n => n.toLowerCase().replace(/[^\w.-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
   const clash = PRESETS.find(x => key(x.name) === key(name));
   if (clash && !window.confirm(`A preset called "${clash.name}" already exists. Replace it?`)) return;
-  try { PRESETS = (await api("/api/presets", { name, snapshot })).presets; await loadPresets(name); toast(`Saved preset ${name}`); } catch (e) { toast(e.message, true); }
+  const folders = [...new Set(PRESETS.map(p => p.folder).filter(Boolean))];
+  const folder = window.prompt(`Folder (optional)${folders.length ? " — you have: " + folders.join(", ") : ""}:`, clash ? clash.folder : "");
+  if (folder === null) return;
+  const note = window.prompt("A note (optional): what it's for, what to watch out for", clash ? clash.note : "");
+  try { PRESETS = (await api("/api/presets", { name, snapshot, folder, note: note || "" })).presets; await loadPresets(name); toast(`Saved preset ${name}`); } catch (e) { toast(e.message, true); }
 }
+$("preset").addEventListener("change", () => { const p = PRESETS.find(x => x.name === $("preset").value); $("preset").title = p && p.note ? p.note : ""; if (p && p.note) toast("📝 " + p.note); });
+$("presetBundle").addEventListener("click", () => { const n = $("preset").value; location.href = "/api/presets/bundle" + (n ? "?name=" + encodeURIComponent(n) : ""); toast(n ? `Downloading ${n} with its files` : "Downloading every preset with their files"); });
+$("presetImport").addEventListener("click", () => {
+  const inp = el("input", { type: "file", accept: ".zip" });
+  inp.onchange = async () => { const f = inp.files[0]; if (!f) return;
+    try { const r = await fetch("/api/presets/import", { method: "POST", body: f }); const j = await r.json(); if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+      await loadPresets(j.imported[0]); toast(`Imported ${j.imported.length} preset${j.imported.length > 1 ? "s" : ""}: ${j.imported.join(", ")}`); } catch (e) { toast(e.message, true); } };
+  inp.click();
+});
 function savePresetFrom(p) {
   const form = {}; for (const k of [...FIELD_IDS, ...CHIP_FIELDS]) if (p[k] !== undefined) form[k] = p[k];
   savePreset({ engine: p.engine, form, adv: p.adv || {} }, String(p.name || p.prompt || "").split("\n")[0].slice(0, 40));

@@ -1358,8 +1358,9 @@ def list_presets():
         p = _read_json(f, None)
         if p and isinstance(p.get("snapshot"), dict):
             out.append({"name": p.get("name") or os.path.splitext(os.path.basename(f))[0], "saved": p.get("saved"),
-                        "engine": p["snapshot"].get("engine"), "snapshot": p["snapshot"]})
-    return sorted(out, key=lambda p: p["name"].lower())
+                        "engine": p["snapshot"].get("engine"), "snapshot": p["snapshot"],
+                        "folder": p.get("folder") or "", "note": p.get("note") or ""})
+    return sorted(out, key=lambda p: (p["folder"].lower(), p["name"].lower()))
 
 
 def save_preset(body):
@@ -1371,8 +1372,74 @@ def save_preset(body):
         raise ValueError("nothing to save")
     if len(json.dumps(snap)) > 200000:
         raise ValueError("that preset is too big")
-    _write_json(os.path.join(PRESETS, safe_name(name, 60) + ".json"), {"name": name, "saved": time.time(), "snapshot": snap})
+    folder = re.sub(r"\s+", " ", str(body.get("folder") or "")).strip()[:40]
+    note = str(body.get("note") or "").strip()[:500]
+    _write_json(os.path.join(PRESETS, safe_name(name, 60) + ".json"),
+                {"name": name, "saved": time.time(), "snapshot": snap, "folder": folder, "note": note})
     return list_presets()
+
+
+PRESET_INPUTS = ("ref", "from_midi", "from_audio", "opl_bank")
+
+
+def preset_bundle(names):
+    """A .zip of presets plus every dropped file they use (reference, MIDI, recording, bank), so a
+    preset still works on another machine. Returns the zip bytes."""
+    import io
+    buf, have = io.BytesIO(), {p["name"]: p for p in list_presets()}
+    pick = [have[n] for n in names if n in have] if names else list(have.values())
+    if not pick:
+        raise ValueError("no such preset")
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in pick:
+            z.writestr(f"presets/{safe_name(p['name'], 60)}.json", json.dumps({k: p[k] for k in ("name", "snapshot", "folder", "note")}, indent=1))
+            for k in PRESET_INPUTS:
+                v = (p["snapshot"].get("form") or {}).get(k)
+                if v:
+                    try:
+                        z.write(input_path(v), f"inputs/{os.path.basename(v)}")
+                    except (ValueError, OSError):
+                        pass                                       # gone from inputs/: the preset still travels
+    return buf.getvalue()
+
+
+def import_bundle(data):
+    """Presets from a bundle. Never overwrites: a name that exists gets " (2)"; its files go into
+    inputs/ (the same bytes already there are reused) and the preset is pointed at them."""
+    import io
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("that isn't a preset bundle (.zip)")
+    names, have = [], {p["name"] for p in list_presets()}
+    with z:
+        files = {os.path.basename(i.filename): i for i in z.infolist() if i.filename.startswith("inputs/") and not i.is_dir()}
+        for info in z.infolist():
+            if not (info.filename.startswith("presets/") and info.filename.endswith(".json")):
+                continue
+            try:
+                p = json.loads(z.read(info))
+            except ValueError:
+                continue
+            if not isinstance(p, dict) or not isinstance(p.get("snapshot"), dict):
+                continue
+            form = p["snapshot"].setdefault("form", {})
+            for k in PRESET_INPUTS:
+                v = form.get(k)
+                if v and os.path.basename(v) in files:
+                    nm = safe_name(os.path.basename(v), 96)
+                    if nm.lower().endswith(INPUT_EXT):
+                        form[k] = store_input(nm, data=z.read(files[os.path.basename(v)]))
+            name, i = str(p.get("name") or "imported").strip()[:54] or "imported", 2
+            base = name
+            while name in have:
+                name, i = f"{base} ({i})", i + 1
+            save_preset({"name": name, "snapshot": p["snapshot"], "folder": p.get("folder"), "note": p.get("note")})
+            have.add(name)
+            names.append(name)
+    if not names:
+        raise ValueError("no presets in that bundle")
+    return names
 
 
 def delete_preset(name):
@@ -1602,6 +1669,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(dict(load_setup(), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
         if u.path == "/api/sets":
             return self._json({"sets": self.sets.list()})
+        if u.path == "/api/presets/bundle":
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                data = preset_bundle([n for n in q.get("name", []) if n])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            fn = "soundmon-presets-" + (safe_name(q["name"][0], 40) if q.get("name") else "all") + ".zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if u.path == "/api/presets":
             return self._json({"presets": list_presets()})
         if u.path == "/api/similar/status":
@@ -1691,6 +1772,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/upload":                      # raw bytes; ?filename=
             return self._upload(urllib.parse.parse_qs(u.query))
+        if u.path == "/api/presets/import":              # raw .zip bytes
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= 300 * 1024 * 1024:
+                    raise ValueError("a bundle must be under 300 MB")
+                data = self.rfile.read(n)
+                if len(data) != n:
+                    raise ValueError("the upload was cut short")
+                return self._json({"imported": import_bundle(data), "presets": list_presets()})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json({"error": "expected application/json"}, 415)
         try:
