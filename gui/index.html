@@ -1495,6 +1495,7 @@ function loadSettings(p, seed) {
 /* ================= sets ================= */
 let SETQ = "", SET_CMD = "";
 const FIXED = ["blip", "narrate"];                   // same text in, same sound out: takes are voices, not seeds
+let SKIPNOW = store.get("skipNow", false), LASTBK = "";
 let SETS = [], SET = null, setId = store.get("set", ""), selKey = null, setFilt = "all", setSig = "";
 const heard = {};                                      // key -> take heard last (not saved)
 async function loadSets(keepSel) {
@@ -1537,12 +1538,15 @@ function drawSet() {
   const ex = T.export, th = [["Engine", `${E.icon || ""} ${E.name || T.engine}`], ["Takes per key", T.engine === "narrate" && T.voices.length ? T.voices.join(", ") : T.takes],
     ["Game folder", T.game_folder || "— none (set one to export)"], ["Exports as", `<key>.${ex.encode === "same" ? "<as made>" : ex.encode}${ex.rate ? " · " + ex.rate + " Hz" : ""}${ex.mono ? " · mono" : ""}${ex.master && ex.master !== "off" ? " · mastered (" + ex.master + ")" : ""}`],
     ["Theme command", SET_CMD || "…"]];
-  const theme = el("div", { class: "card theme" }, ...th.map(([a, b]) => el("div", {}, el("span", { text: a }), el("code", { text: String(b) }))));
+  const theme = el("div", { class: "card theme" }, ...th.map(([a, b]) => el("div", {}, el("span", { text: a }), el("code", { text: String(b) }),
+    a === "Game folder" && T.game_folder ? openBtn({ path: T.game_folder, folder: true }, "open the game folder in…") : null)));
   const F = [["all", "All"], ["topick", "To pick"], ["picked", "Picked"], ["missing", "Without takes"], ["flagged", "Flagged"]];
   const q = el("input", { type: "search", id: "setQ", placeholder: "find a key or words in its prompt", "aria-label": "Find a key", value: SETQ });
   q.addEventListener("input", () => { SETQ = q.value; drawRows(); });
   const filters = el("div", { class: "filters" }, el("div", { class: "chips" }, ...F.map(([k, l]) => el("button", { type: "button", class: "chip", "aria-pressed": String(setFilt === k), text: l, onclick: () => { setFilt = k; drawSet(); } }))), q,
-    el("button", { type: "button", text: `Render ${missing} without takes`, disabled: !missing, onclick: () => renderKeys("missing") }));
+    el("label", { class: "c", title: "leave out keys whose file is already in the game folder" }, (() => { const c = el("input", { type: "checkbox" }); c.checked = SKIPNOW; c.onchange = () => { SKIPNOW = c.checked; store.set("skipNow", SKIPNOW); drawSet(); }; return c; })(), "skip keys the game has"),
+    (() => { const m = SKIPNOW ? rows.filter(r => !(takes[r.key] || []).length && !(now[r.key] || []).length).length : missing;
+      return el("button", { type: "button", text: `Render ${m} without takes`, disabled: !m, onclick: () => renderKeys("missing", SKIPNOW ? { skip_existing: true } : {}) }); })());
   const list = el("div", { id: "setRows" });
   const keys = el("div", { class: "keys", html: "<kbd>1</kbd>–<kbd>0</kbd> hear takes · <kbd>N</kbd> hear the game's current file · <kbd>P</kbd> pick what you heard · <kbd>F</kbd> flag it · <kbd>J</kbd>/<kbd>K</kbd> next / previous key · <kbd>Space</kbd> stop" });
   host.replaceChildren(pills, theme, filters, list, keys, exportBar());
@@ -1707,8 +1711,10 @@ function exportBar() {
         } catch (e) { toast(e.message, true); } } }),
       el("button", { type: "button", class: "go", text: "Export picks", disabled: !T.game_folder || !picks, onclick: async e => {
         e.target.disabled = true;
-        try { const r = await api("/api/sets/export", { id: setId }); toast(`Exported ${r.exported.length}` + (r.skipped ? `, ${r.skipped} unchanged` : "") + (r.errors.length ? `; ${r.errors.length} failed: ${r.errors[0].key}: ${r.errors[0].error}` : "") + (r.backup ? ` · backup in ${r.backup}` : ""), !!r.errors.length); loadSet(true); }
-        catch (err) { toast(err.message, true); } finally { e.target.disabled = false; } } })),
+        try { const r = await api("/api/sets/export", { id: setId }); toast(`Exported ${r.exported.length}` + (r.skipped ? `, ${r.skipped} unchanged` : "") + (r.errors.length ? `; ${r.errors.length} failed: ${r.errors[0].key}: ${r.errors[0].error}` : "") + (r.backup ? ` · backup in ${r.backup}` : ""), !!r.errors.length); LASTBK = r.backup || LASTBK; loadSet(true); }
+        catch (err) { toast(err.message, true); } finally { e.target.disabled = false; } } }),
+      T.game_folder ? openBtn({ path: T.game_folder, folder: true }, "open the game folder in…") : null,
+      LASTBK ? el("button", { type: "button", text: "📂 backup", title: "open the backup of what the last export replaced: " + LASTBK, onclick: () => openThing({ path: LASTBK }) }) : null),
     plan);
   return bar;
 }

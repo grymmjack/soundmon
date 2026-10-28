@@ -1933,7 +1933,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             keys = body.get("keys")
             if keys == "missing":
                 have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot(every=True))
-                keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"])]
+                gone = self.sets.now_files(s) if body.get("skip_existing") else {}
+                keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"]) and not gone.get(r["key"])]
                 if not keys:
                     raise ValueError(f"nothing to render — every key has takes or is rendering ({sum(busy.values())} render{'s' if sum(busy.values()) != 1 else ''} queued)"
                                      if busy else "nothing to render — every key already has takes")
