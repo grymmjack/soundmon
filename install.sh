@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible setup for soundmon. Idempotent — safe to re-run.
-# Does NOT download models (run ./download-models.sh after).
+# Does NOT download models (run ./download-models.sh --sa3 after).
 #
 # soundmon deliberately SHARES ComfyUI with pixelmon: same engine, same venv,
 # same launch script, same port. It only adds its own node + models. So if you
@@ -55,11 +55,19 @@ fi
 # 2. Link our files into place (this repo stays the source of truth)
 link() { ln -sfn "$1" "$2"; echo "   linked $2 -> $1"; }
 mkdir -p "$HOME/.local/bin" "$COMFY/custom_nodes"
-chmod +x "$REPO/bin/soundmon" "$REPO/bin/soundmon-gui" "$REPO/download-models.sh"
+chmod +x "$REPO/bin/soundmon" "$REPO/bin/soundmon-gui" "$REPO/download-models.sh" "$REPO/launch-comfyui.sh"
 link "$REPO/soundmon.py"               "$COMFY/soundmon.py"
 link "$REPO/custom_nodes/retro_sfx"    "$COMFY/custom_nodes/retro_sfx"
 link "$REPO/bin/soundmon"              "$HOME/.local/bin/soundmon"
 link "$REPO/bin/soundmon-gui"          "$HOME/.local/bin/soundmon-gui"
+# bin/soundmon starts ComfyUI with ~/launch-comfyui.sh. pixelmon's installer links its own copy;
+# without pixelmon nothing did, and the wrapper failed with "nohup: failed to run command". Link
+# soundmon's (the same script) only when there is none — never replace pixelmon's.
+if [ -e "$HOME/launch-comfyui.sh" ] || [ -L "$HOME/launch-comfyui.sh" ]; then
+    echo "   kept $HOME/launch-comfyui.sh -> $(readlink -f "$HOME/launch-comfyui.sh" 2>/dev/null || echo "$HOME/launch-comfyui.sh")"
+else
+    link "$REPO/launch-comfyui.sh"     "$HOME/launch-comfyui.sh"
+fi
 
 # 3. Reuse pixelmon's server aliases if you have them and haven't made your own.
 if [ ! -f "$REPO/servers.json" ] && [ -f "$HOME/pixelmon/servers.json" ]; then
@@ -67,7 +75,13 @@ if [ ! -f "$REPO/servers.json" ] && [ -f "$HOME/pixelmon/servers.json" ]; then
     echo "   copied pixelmon's servers.json (same boxes, same port — the farm is shared)"
 fi
 
-# 4. render group — AMD/ROCm only (compute needs /dev/kfd, gated behind this group)
+# 4. ffmpeg: --ogg/--flac/--mp3/--opus, the loudness ceiling, --master, --ref and --similar use it.
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+    echo "   ⚠ ffmpeg/ffprobe not found — install them (apt install ffmpeg / brew install ffmpeg):"
+    echo "     without them there is no loudness/true-peak ceiling, no --ogg/--flac, --ref or --master"
+fi
+
+# 5. render group — AMD/ROCm only (compute needs /dev/kfd, gated behind this group)
 if [ "$GPU" = amd ] && ! id -nG | tr ' ' '\n' | grep -qx render; then
     echo "==> adding $USER to the 'render' group (ROCm GPU access)"
     sudo usermod -aG render "$USER"
@@ -77,8 +91,10 @@ fi
 cat <<EOF
 
 ✅ install done ($GPU).
-   1) ./download-models.sh        # ~5.3 GB (Stable Audio Open 1.0 + T5)
-   2) restart ComfyUI so it picks up the retro_sfx node
+   1) ./download-models.sh --sa3  # the default engine: Stable Audio 3 + the Qwen rewriter (~14 GB)
+                                  # (--song adds songs, --list shows what's there, --help the rest)
+   2) restart ComfyUI so it picks up the retro_sfx node — WITH --force-fp32:
+         ~/launch-comfyui.sh --force-fp32     (SA3 renders static in fp16; soundmon starts it so itself)
    3) soundmon "a heavy wooden door creaking open"
    4) soundmon-gui               # the same, in a browser: http://127.0.0.1:8191
 

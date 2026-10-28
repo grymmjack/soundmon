@@ -70,6 +70,8 @@ PROGRESSIONS = {
 }
 
 NOTE_BASE = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
+NOTE_NAMES = "C C# D D# E F F# G G# A A# B".split()
+MAJOR_TYPE = ("major", "mixolydian", "lydian")      # everything else in SCALES is a minor mode
 
 # Melody rhythms as sixteenth-note durations summing to one bar.
 RHYTHMS = [
@@ -205,11 +207,18 @@ def infer_mood(text):
 
 
 def parse_key(text):
-    """'D minor' / 'f# major' / 'A' -> (root_semitone, scale_name)."""
-    t = (text or "C minor").strip().lower().replace("-", " ")
+    """'D minor' / 'f# major' / 'A' / 'Bb dorian' -> (root_semitone, scale_name).
+
+    Raises ValueError for text that names no note — "   " used to crash with an
+    IndexError and "H major" quietly became C minor.
+    """
+    t = (text if text is not None else "C minor").strip().lower().replace("-", " ")
     parts = t.split()
+    if not parts or parts[0][0] not in NOTE_BASE:
+        raise ValueError(f"--key {text!r}: expected a note A-G (with # or b) and a scale, "
+                         f"e.g. \"D minor\"")
     name = parts[0]
-    root = NOTE_BASE.get(name[0], 0)
+    root = NOTE_BASE[name[0]]
     if len(name) > 1:
         if name[1] in "#s":
             root += 1
@@ -227,6 +236,136 @@ def parse_key(text):
             scale = "minor"
             break
     return root % 12, scale
+
+
+def key_names_scale(text):
+    """True when --key spells out a scale or mode ("E major", "D dorian"), as
+    opposed to a bare root ("E")."""
+    for p in (text or "").lower().replace("-", " ").split()[1:]:
+        if p in SCALES or p.startswith(("maj", "min")) or p == "lydian":
+            return True
+    return False
+
+
+def _flag_given(*flags):
+    """Was one of these flags typed on the command line? Same test as
+    soundmon.given(): comparing a value with its default cannot tell a typed
+    `--key "C minor"` from no --key at all."""
+    return any(x == f or x.startswith(f + "=") for x in sys.argv[1:] for f in flags)
+
+
+def track_name(a):
+    """The track's name: --name, else the prompt's slug, else "untitled".
+
+    Without the prompt here, every `--chip` run with no --name was the track
+    "untitled" — so every prompt composed the identical piece.
+    """
+    import re
+    nm = getattr(a, "name", None)
+    if nm:
+        return nm
+    words = re.sub(r"[^a-z0-9]+", "_", (getattr(a, "prompt", "") or "").lower()).strip("_")[:40]
+    return words or "untitled"
+
+
+def track_identity(a):
+    """PACK + TRACK: what decides the PIECE (key, form, harmony, metre, tempo).
+
+    Identity is pack + track, not track alone: deriving it from the track name
+    only meant `level9` composed identically in every pack. The pack comes from
+    the output directory, so nothing needs a new flag and every existing caller
+    gets distinct music for free.
+    """
+    track = track_name(a)
+    _pack = (os.path.basename(os.path.normpath(a.output_to))
+             if getattr(a, "output_to", None) else "")
+    return f"{_pack}/{track}" if _pack else track
+
+
+def take_identity(track, rng):
+    """PIECE + SEED: what decides the TAKE (melody, groove, bass line, kit).
+
+    The seed used to be passed in and ignored, so `-n 4` wrote four
+    byte-identical files and --seed did nothing. A take keeps the piece's key,
+    form, chord progression, metre and tempo, and gets its own tune and groove
+    over them — enough to choose between, still recognisably one cue.
+    """
+    if rng is None:
+        return track
+    return f"{track}#take{int(rng.integers(0, 2 ** 62))}"
+
+
+MAX_SECONDS = 600.0          # --chip/--opl: ten minutes is a long game loop
+
+
+def check_seconds(a, what):
+    """--seconds as a usable length, or a one-line exit. nan/inf used to crash
+    and 1e9 used to hang composing a billion bars."""
+    s = getattr(a, "seconds", None)
+    if s is None:
+        return
+    try:
+        s = float(s)
+    except (TypeError, ValueError):
+        sys.exit(f"{what}: --seconds must be a number, got {a.seconds!r}")
+    if not math.isfinite(s) or s <= 0:
+        sys.exit(f"{what}: --seconds must be more than 0, got {a.seconds}")
+    if s > MAX_SECONDS:
+        sys.exit(f"{what}: --seconds {s:g} is too long (at most {MAX_SECONDS:g} s; "
+                 f"it loops, so render a shorter piece and repeat it)")
+
+
+def apply_format(audio, sr, a, np):
+    """Hardware format lock for the synthesis engines -> (audio, sr, bits).
+
+    Stores at the format's OWN bit depth: writing 8-bit audio into a 16-bit
+    container wastes half the file and is a lie about the data. When that
+    overrides a typed --bits, say so instead of silently ignoring it.
+    """
+    bits = a.bits
+    fmt = getattr(a, "format", "none")
+    if fmt in (None, "none"):
+        return audio, sr, bits
+    if fmt not in FORMATS:
+        sys.exit(f"unknown --format {fmt!r}. One of: {', '.join(FORMATS)}")
+    audio, sr = format_lock_np(audio, sr, fmt, np)
+    _fb = int((FORMATS.get(fmt) or {}).get("bits") or 0)
+    if _fb:
+        bits = 8 if _fb <= 8 else (16 if _fb <= 16 else 24)
+        if bits != a.bits and _flag_given("--bits") and not getattr(a, "_bits_noted", False):
+            print(f"   \u2139 --format {fmt} stores {bits}-bit audio; --bits {a.bits} ignored")
+            a._bits_noted = True
+    return audio, sr, bits
+
+
+def wav_subtype(bits):
+    return f"PCM_{bits}" if bits != 8 else "PCM_U8"
+
+
+def note_unused_writers(a, engine):
+    """--write-mod belongs to --chip and --write-rad to --opl. Accepting the
+    other one and writing nothing is how a flag silently does nothing."""
+    if engine == "chip" and getattr(a, "write_rad", False):
+        print("   \u2139 --write-rad is for --opl (an OPL tracker); --chip writes a .MOD with --write-mod")
+    if engine == "opl" and getattr(a, "write_mod", False):
+        print("   \u2139 --write-mod is for --chip (a sample tracker); --opl writes a .RAD with --write-rad")
+
+
+def fold_tail(buf, n):
+    """Wrap everything past sample `n` back onto the head, return exactly n.
+
+    A loop's last notes ring into its FIRST bar — that is where a listener hears
+    them when it repeats. Adding the release onto the head therefore makes the
+    file exactly whole bars long and the seam continuous by construction, where
+    a 0.35-0.4 s tail made every loop land late.
+    """
+    out = buf[:n].copy()
+    tail = buf[n:]
+    while len(tail):
+        k = min(len(tail), n)
+        out[:k] += tail[:k]
+        tail = tail[k:]
+    return out
 
 
 def _hz(midi):
@@ -325,43 +464,49 @@ def compose(a, np, rng):
 
     home_root, key_scale = parse_key(a.key)
 
-    # Identity is PACK + TRACK, not track alone.
-    #
-    # Deriving it from the track name only meant `level9` composed identically in
-    # every pack: same mood (same manifest description), therefore same scale,
-    # form, progression, meter and motif. Two packs then differed solely in key,
-    # tempo and timbre — which is why chiptune and adlib sounded like one piece
-    # played twice rather than two soundtracks.
-    #
-    # The pack comes from the output directory, so nothing needs a new flag and
-    # every existing caller gets distinct music for free. Still fully
-    # deterministic: the same pack+track always regenerates the same plan.
-    track = a.name or "untitled"
-    _pack = (os.path.basename(os.path.normpath(a.output_to))
-             if getattr(a, "output_to", None) else "")
-    if _pack:
-        track = f"{_pack}/{track}"
+    # Identity is PACK + TRACK (+ the take). See track_identity(): the piece —
+    # key, form, harmony, metre, tempo — comes from the pack and the track name
+    # (or the prompt, when there is no --name), and the seed picks the take: its
+    # tune and groove over that piece. Same pack + name/prompt + seed always
+    # regenerates the same bytes.
+    track = track_identity(a)
+    take = take_identity(track, rng)
 
-    # Scale: explicit override wins, then a mode spelled out in --key, else the
-    # mood's — chosen by track identity so two `solemn` tracks can differ.
+    # Scale: explicit override wins, then a scale spelled out in a TYPED --key
+    # ("E major" used to come out minor or dorian: only mode names counted),
+    # else the mood's — chosen by track identity so two `solemn` tracks differ.
+    # The untyped default "C minor" must not count, or every mood would be minor.
+    #
+    # "E major" / "D minor" fix the QUALITY and the mood still picks the mode
+    # within it: D minor + ominous stays phrygian or harmonic, E major + ominous
+    # becomes major (the mood has no major mode), D minor + heroic becomes minor.
+    # A mode name ("D dorian") is taken literally.
     explicit = getattr(a, "chip_scale", None)
+    key_typed = _flag_given("--key") or (a.key or "C minor").strip().lower() != "c minor"
+    words = (a.key or "").lower().replace("-", " ").split()[1:]
     if explicit:
         scale_name = explicit
-    elif any(w in (a.key or "").lower() for w in
-             ("dorian", "phrygian", "harmonic", "mixolydian", "pentatonic", "lydian")):
-        scale_name = key_scale
+    elif key_typed and any(w in theory.SCALES and w not in ("major", "minor") or w == "lydian"
+                           for w in words):
+        scale_name = key_scale if key_scale in theory.SCALES else "minor"
+    elif key_typed and key_names_scale(a.key):
+        same = [m for m in mood["scales"]
+                if (m in MAJOR_TYPE) == (key_scale in MAJOR_TYPE)]
+        scale_name = (theory.Ident(track, "scale:" + mname).pick(same) if same
+                      else ("major" if key_scale in MAJOR_TYPE else "minor"))
     else:
         scale_name = theory.Ident(track, "scale:" + mname).pick(mood["scales"])
     scale = theory.SCALES.get(scale_name, theory.SCALES["minor"])
 
     # The key ROTATES through closely related keys across a pack (i/iv/v/bIII/
     # bVII/bVI), weighted toward home. That is what stops 24 tracks sharing one
-    # key without scattering them into 12 unrelated ones.
+    # key without scattering them into 12 unrelated ones. (--key is the pack's
+    # HOME key; the scale it names is honoured, the root may rotate.)
     root = theory.key_for_track(track, home_root, mname)
 
     est_spb = 60.0 / max(40.0, min(300.0, a.bpm * mood["bpm"])) * 4.0
     plan = theory.plan_track(track, mood, mname, scale_name,
-                             max(4, int(round(a.seconds / est_spb))))
+                             max(4, int(round(a.seconds / est_spb))), take=take)
 
     bpm = max(40.0, min(300.0, a.bpm * plan["tempo_mul"]))
     # Bar length now follows the METER, not a hardcoded 4 beats. This is what
@@ -370,12 +515,22 @@ def compose(a, np, rng):
     steps = plan["steps"]
     spb_steps = plan["spb_steps"]
     spb = 60.0 / bpm * plan["quarters"]
-    form = plan["form"]
-    # Re-size to the REAL bar length. plan_track had to guess with a 4/4 bar, so
-    # a 2/4 track came out half as long as asked and a 12/8 one half again over.
-    want_bars = max(len(form), int(round(a.seconds / spb)))
-    bps = max(2, -(-want_bars // len(form)))          # ceil, so we never undershoot
+    form = list(plan["form"])
+    # Length in WHOLE BARS, as close to --seconds as whole bars allow. The form
+    # is played whole when there is room (bars per section >= 1, rounded, not
+    # ceiled: ceil plus a 2-bar floor made 0.5 s come out as 19 s). A request
+    # shorter than one pass of the form plays its first one or two sections —
+    # a 1-bar loop is still a loop — so the floor is ONE bar.
+    want_bars = max(1, int(round(a.seconds / spb)))
+    if want_bars < len(form):
+        # 1 or 2 bars (a 3-bar loop is a phrase nobody writes), nearest wins
+        n_short = min((1, 2, len(form)), key=lambda b: abs(b * spb - a.seconds))
+        form, bps = form[:n_short], 1
+    else:
+        bps = max(1, int(want_bars / float(len(form)) + 0.5))      # half rounds up
     bars = bps * len(form)
+    plan["bpm"] = bpm
+    plan["key_name"] = f"{NOTE_NAMES[root % 12]} {scale_name}"
 
     def deg(d, octave=0):
         o, i = divmod(d, len(scale))
@@ -387,7 +542,9 @@ def compose(a, np, rng):
     first = form[0]
     motifs, kits, basses = {}, {}, {}
     for letter, sec in plan["sections"].items():
-        mid_ = theory.Ident(track, "motif:%s:%s" % (letter, mname))
+        if letter not in form:
+            continue
+        mid_ = theory.Ident(take, "motif:%s:%s" % (letter, mname))
         # Learned interval walk when a corpus exists; hand-written contour
         # archetypes otherwise.
         m = (theory.corpus_motif(mid_, sec["rhythm"], scale_name, len(scale),
@@ -396,7 +553,7 @@ def compose(a, np, rng):
                                   mood["span"], spb_steps))
         if letter != first and sec["transform"]:
             m = theory.transform(m, sec["transform"],
-                                 theory.Ident(track, "tr:" + letter))
+                                 theory.Ident(take, "tr:" + letter))
         motifs[letter] = m
         # Per-section kit and bass style, so the B section does not merely change
         # notes — it changes groove. One bass rhythm for the whole pack was the
@@ -442,7 +599,10 @@ def compose(a, np, rng):
             # --- arp: the signature. Chord tones cycled every `arp_rate` step.
             k = 0
             for s in range(0, steps, arp_rate):
-                ev["arp"].append((bar, s, arp_rate, chord[k % len(chord)], 0.25,
+                # Clamped to the bar: a 3- or 4-step arp in a 14-step 7/8 bar ran
+                # into the next bar's first arp — two arp notes at once, which with
+                # the lead is three pulse channels on a chip that has two.
+                ev["arp"].append((bar, s, min(arp_rate, steps - s), chord[k % len(chord)], 0.25,
                                   theory.accent(s, spb_steps, 74)))
                 k += 1
 
@@ -453,7 +613,7 @@ def compose(a, np, rng):
                     break
                 if si == 0:
                     bn = theory.voice_bass(prev_bass, low,
-                                           ident=theory.Ident(track, "bass:%d" % bar))
+                                           ident=theory.Ident(take, "bass:%d" % bar))
                     prev_bass = bn
                 else:
                     bn = low[si % len(low)] if si % 2 else prev_bass
@@ -468,6 +628,10 @@ def compose(a, np, rng):
             bar += 1
 
     plan["_steps"] = steps
+    plan["form"] = tuple(form)
+    # The duty in each lead/arp event is the MOOD's choice (composed), not a
+    # placeholder the way a transcription's 0.5 is — let the renderer use it.
+    ev["_duty"] = True
     return ev, bars, spb, scale_name, plan["progs"][first], mname, mood, plan
 
 
@@ -534,6 +698,97 @@ def render(a, ev, bars, spb, np, mood=None, steps=STEPS):
     return out
 
 
+def resolve_mood(a):
+    mname = getattr(a, "mood", None)
+    if not mname or mname == "auto":
+        mname = infer_mood(getattr(a, "prompt", "") or "")
+    return mname
+
+
+def load_midi_source(a, label):
+    """--from-midi -> (notes, drums, info), or a one-line exit.
+
+    A missing, empty, truncated or non-MIDI file used to end in a traceback.
+    """
+    import midi as midimod
+    mfile = a.from_midi
+    try:
+        timed = midimod.to_timed_events(
+            mfile, seconds=a.seconds,
+            transpose=getattr(a, "transpose", 0),
+            start_frac=getattr(a, "midi_start", 0.15))
+    except (OSError, ValueError) as e:
+        sys.exit(f"{label} --from-midi {mfile}: {e}")
+    if not timed or not timed[0] and not timed[1]:
+        sys.exit(f"{label} --from-midi {mfile}: no playable notes")
+    if timed[2].get("folded"):
+        print(f"   \u2139 {timed[2]['folded']} note(s) moved by octaves into the playable range "
+              f"(MIDI {midimod.PITCH_LO}-{midimod.PITCH_HI}) after --transpose")
+    return timed
+
+
+def load_audio_source(a, np, sf, label):
+    """--from-audio -> (ev, bars, spb, analysis, scale_name), or a one-line exit.
+
+    Silence, noise, speech and other non-music used to be "transcribed" anyway
+    (a silent reference rendered a loud arpeggio); transcribe now says when it
+    finds no steady beat or key, and that is an error here, not a track.
+    """
+    import transcribe
+    src = a.from_audio
+    try:
+        got = transcribe.to_events_hi(src, np, sf, seconds=a.seconds,
+                                      beats_per_bar=4, div=4)
+    except (OSError, ValueError) as e:
+        sys.exit(f"{label} --from-audio {src}: {e}")
+    if not got:
+        sys.exit(f"{label} --from-audio {src}: no steady beat or key found — "
+                 f"it needs music with a pulse, not silence, noise or speech")
+    return got
+
+
+def out_dir(a):
+    dest = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
+    if not os.path.isdir(dest):
+        if os.path.exists(dest):
+            sys.exit(f"--output-to {dest}: that is a file, not a folder")
+        if a.create_dirs or a.output_to:
+            os.makedirs(dest, exist_ok=True)
+        else:
+            sys.exit(f"output dir does not exist: {dest} (add --create-dirs)")
+    return dest
+
+
+def base_name(a, slug, fallback):
+    """The output file stem: --name, else the prompt's slug. Through the same
+    safe-name rule as manifest keys, so `--name ../x` cannot leave --output-to."""
+    import narrate
+    raw = a.name or slug(a.prompt or fallback)
+    safe = narrate.safe_key(raw) or fallback
+    if a.name and safe != a.name:
+        print(f"   \u2139 --name {a.name!r} is not a safe file name; using {safe!r}")
+    return safe
+
+
+def takes_for(a):
+    """How many takes -n can actually make. A MIDI file or a recording plays the
+    same way every time — there is nothing for a seed to change — so `-n 4`
+    would write four identical files; make one and say so."""
+    n = max(1, int(a.number))
+    if n > 1 and (getattr(a, "from_midi", None) or getattr(a, "from_audio", None)):
+        src = "--from-midi" if getattr(a, "from_midi", None) else "--from-audio"
+        print(f"   \u2139 -n {n}: {src} plays the same notes every time, so one take is made")
+        return 1
+    return n
+
+
+def length_note(a, real_s):
+    """Whole bars cannot hit every --seconds. Say what was made instead."""
+    if _flag_given("--seconds") and abs(real_s - float(a.seconds)) > max(0.5, 0.1 * float(a.seconds)):
+        return f"  (asked {float(a.seconds):g}s; whole bars give {real_s:.1f}s)"
+    return ""
+
+
 def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     """Generate chiptune. Same contract as narrate.run()/blip.run()."""
     try:
@@ -542,15 +797,29 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     except ImportError as e:
         sys.exit(f"--chip needs numpy + soundfile: pip install soundfile numpy   ({e})")
 
-    dest = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
-    if not os.path.isdir(dest):
-        if a.create_dirs or a.output_to:
-            os.makedirs(dest, exist_ok=True)
-        else:
-            sys.exit(f"output dir does not exist: {dest} (add --create-dirs)")
+    check_seconds(a, "--chip")
+    try:
+        parse_key(a.key)
+    except ValueError as e:
+        sys.exit(f"--chip: {e}")
+    note_unused_writers(a, "chip")
+    dest = out_dir(a)
+    base = base_name(a, slug, "chiptune")
+    if getattr(a, "from_midi", None) and getattr(a, "write_midi", False):
+        print("   \u2139 --write-midi writes composed music; with --from-midi you already have the MIDI")
 
-    base = a.name or slug(a.prompt or "chiptune")
-    n_out = max(1, a.number)
+    # Sources are read ONCE: a MIDI file or a recording does not change per take.
+    mfile = getattr(a, "from_midi", None)
+    src = getattr(a, "from_audio", None)
+    mname = resolve_mood(a)
+    mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
+    if mfile:
+        tnotes, tdrums, info = load_midi_source(a, "--chip")
+    elif src:
+        import transcribe
+        got = load_audio_source(a, np, sf, "--chip")
+
+    n_out = takes_for(a)
     made = []
     for i in range(n_out):
         # soundmon's convention is --seed -1 for "random", NOT None. Treating
@@ -562,88 +831,49 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        mfile = getattr(a, "from_midi", None)
+        loop = True
+        key_name = ""
         if mfile:
             # MIDI: nothing is inferred. Pitches, durations, tempo and metre all
-            # come from the file, so this is strictly better than --from-audio
-            # when a MIDI exists. Mood still picks the voicing.
-            import midi as midimod
-            mname = getattr(a, "mood", None)
-            if not mname or mname == "auto":
-                mname = infer_mood(getattr(a, "prompt", "") or "")
-            mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
-            # EXACT timing. MIDI carries its own; quantizing it only destroys
-            # information that was already correct.
-            timed = midimod.to_timed_events(
-                mfile, seconds=a.seconds,
-                transpose=getattr(a, "transpose", 0),
-                start_frac=getattr(a, "midi_start", 0.15))
-            if not timed:
-                sys.exit(f"--from-midi: no playable notes in {mfile}")
-            tnotes, tdrums, info = timed
-            ev, bars, spb, scale_name = None, 0, info["spb"], "minor"
-            steps = STEPS; meter_s = info["timesig"]
-            print(f"   \u266a {info['title'][:38]}: {info['timesig']} "
-                  f"{info['bpm']:.0f}bpm  {info['duration']:.1f}s  "
-                  f"{info['notes']} notes  {info['drum_hits']} hits")
-        else:
-            src = getattr(a, "from_audio", None)
-        if mfile:
-            pass
-        elif src:
-            # Transcribed: the composition comes from the reference recording.
-            # Mood is still resolved, because it decides how this is VOICED —
-            # notes from SA3, timbre from the chip.
-            import transcribe
-            mname = getattr(a, "mood", None)
-            if not mname or mname == "auto":
-                mname = infer_mood(getattr(a, "prompt", "") or "")
-            mood = MOODS.get(mname, MOODS[DEFAULT_MOOD])
-            got = transcribe.to_events_hi(src, np, sf, seconds=a.seconds,
-                                          beats_per_bar=4, div=4)
-            if not got:
-                sys.exit(f"--from-audio: could not analyze {src}")
-            ev, bars, spb, ana, scale_name = got
-            steps = STEPS; meter_s = '4/4'
-            print(f"   ♪ {os.path.basename(src)}: "
-                  f"{transcribe.NOTE_NAMES[ana['root']]} {ana['mode']}  "
-                  f"{ana['bpm']:.0f}bpm  {ana['notes']} notes  "
-                  f"{ana['drum_hits']} hits")
-        else:
-            ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
-            steps = plan["_steps"]; meter_s = plan["meter"]
-        if mfile:
+            # come from the file. Mood still picks the voicing. EXACT timing —
+            # MIDI carries its own; quantizing it only destroys information.
+            ev, bars, spb, scale_name = None, 0, info["spb"], "(from MIDI)"
+            steps = STEPS; meter_s = info["timesig"]; bpm = info["bpm"]
+            loop = False            # an excerpt of a piece, not whole bars
+            if i == 0:
+                print(f"   \u266a {info['title'][:38]}: {info['timesig']} "
+                      f"{info['bpm']:.0f}bpm  {info['duration']:.1f}s  "
+                      f"{info['notes']} notes  {info['drum_hits']} hits")
             audio = render_timed(a, tnotes, tdrums, info["duration"], np, mood)
         else:
+            if src:
+                # Transcribed: the composition comes from the reference recording.
+                # Mood is still resolved, because it decides how this is VOICED.
+                ev, bars, spb, ana, scale_name = got
+                steps = STEPS; meter_s = '4/4'; bpm = ana["bpm"]
+                key_name = f"{transcribe.NOTE_NAMES[ana['root']]} {ana['mode']}"
+                if i == 0:
+                    print(f"   \u266a {os.path.basename(src)}: {key_name}  "
+                          f"{ana['bpm']:.0f}bpm  {ana['notes']} notes  "
+                          f"{ana['drum_hits']} hits")
+            else:
+                ev, bars, spb, scale_name, prog, mname, mood, plan = compose(a, np, rng)
+                steps = plan["_steps"]; meter_s = plan["meter"]; bpm = plan["bpm"]
+                key_name = plan.get("key_name", "")
             # Procedural through the same renderer: inherits --chippy arpeggios,
-            # slides and the register-based voicing. Grid positions, exact-time
-            # representation.
+            # slides and the part-based voicing. Grid positions, exact-time
+            # representation; exactly bars*spb long, so it loops on the bar.
             pnotes, pdrums = events_to_timed(ev, bars, spb, steps, mname)
-            audio = render_timed(a, pnotes, pdrums, bars * spb, np, mood)
+            audio = render_timed(a, pnotes, pdrums, bars * spb, np, mood, loop=True)
 
         # The seed goes in EVERY filename, as it does for every other engine.
         # That is the documented way to re-run a take you liked, and the pack
         # generator relies on the `<name>_*` shape to rename output to the
-        # manifest key — writing a bare `<name>.wav` made it report "nothing
-        # produced" for files that were sitting right there.
+        # manifest key.
         name = f"{base}_s{seed}"
-        # Hardware format lock, if asked. Applied here rather than in the
-        # ComfyUI node because these engines never touch the graph.
-        out_sr = SAMPLE_RATE
-        out_bits = a.bits
-        if getattr(a, "format", "none") not in (None, "none"):
-            _mod = sys.modules.get("chip") or __import__("chip")
-            audio, out_sr = _mod.format_lock_np(audio, SAMPLE_RATE, a.format, np)
-            # Store at the format's OWN bit depth. Writing 8-bit audio into a
-            # 16-bit container wastes half the file and is a lie about the data;
-            # it also stops FLAC from compressing what is really an 8-bit signal.
-            _spec = _mod.FORMATS.get(a.format) or {}
-            _fb = int(_spec.get("bits") or 0)
-            if _fb:
-                out_bits = 8 if _fb <= 8 else (16 if _fb <= 16 else 24)
+        audio, out_sr, out_bits = apply_format(audio, SAMPLE_RATE, a, np)
         path = os.path.join(dest, f"{name}.wav")
-        sf.write(path, audio, out_sr,
-                 subtype=f"PCM_{out_bits}" if out_bits != 8 else "PCM_U8")
+        sf.write(path, audio, out_sr, subtype=wav_subtype(out_bits))
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
         # FLAC before OGG: it is lossless, so for format-locked audio it is the
@@ -684,29 +914,41 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             except Exception as e:
                 print(f"   \u26a0 midi write failed: {e}")
         made.append(path)
-        print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar {meter_s:<5}{mname:<11}"
-              f"{scale_name:<11}{a.bpm*mood['bpm']:.0f}bpm  seed={seed}")
+        real_s = len(audio) / float(out_sr)
+        print(f"   \u2705 [{i+1}/{n_out}] {os.path.basename(path):<30} "
+              f"{real_s:5.1f}s  {(str(bars) + 'bar') if bars else '  -  '} {meter_s:<5}{mname:<11}"
+              f"{(key_name or scale_name):<14}{bpm:.0f}bpm  seed={seed}"
+              f"{length_note(a, real_s) if loop else ''}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}")
-    print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")
+    if not mfile:
+        print("   \u21bb loops seamlessly by construction — whole bars, no crossfade needed")
     return made
 
 
-def render_timed(a, notes, drums, duration, np, mood=None):
-    """Render exact-time MIDI notes on the 2A03 voices. No grid.
+def render_timed(a, notes, drums, duration, np, mood=None, loop=False):
+    """Render exact-time notes on the 2A03 voices. No grid.
 
     The OPL path moved to event timing but this one was left on a 16th grid, so
     91% of notes still had their onsets and lengths rounded. Same fix here: each
     note is placed at its real sample offset for its real duration.
 
-    Voice assignment is by REGISTER, which is how a 4-channel arrangement works
-    anyway: low notes take the triangle (the 2A03's bass voice), everything else
-    takes a pulse, with a thinner duty for the upper register so the melody sits
-    above the harmony instead of blending into it.
+    Voice assignment follows the PART when the notes carry one (composed music:
+    the bass part is the triangle, lead and arp are the two pulses, at the duty
+    the mood chose — so the 4-voice limit holds). A MIDI file's notes carry no
+    part, so they go by REGISTER, which is how a 4-channel arrangement works
+    anyway: low notes take the triangle, everything else a pulse, thinner in the
+    upper register so the melody sits above the harmony.
+
+    `loop`: the piece is whole bars that repeat. The file is then EXACTLY
+    `duration` long and anything ringing past the end is folded onto the head
+    (fold_tail) — where it is heard when the loop comes round. Without `loop`
+    (a MIDI excerpt) a short tail is kept so the last release is not cut.
     """
     sr = SAMPLE_RATE
-    total = int(round((duration + 0.4) * sr))       # tail for the last release
+    n_out = int(round(duration * sr))
+    tail = int(round(0.4 * sr))                     # room for the last release
+    total = n_out + tail
     buf = np.zeros(total)
     depth = (mood or {}).get("vib", 0.006)
 
@@ -726,14 +968,16 @@ def render_timed(a, notes, drums, duration, np, mood=None):
         pitch = n["pitch"]
         vel = (n.get("vel") or 100) / 127.0
         hz = 440.0 * (2.0 ** ((pitch - 69) / 12.0))
+        role = n.get("role")
 
-        if pitch < BASS_MAX_PITCH:                  # triangle bass, never arped
+        if role == "bass" or (role is None and pitch < BASS_MAX_PITCH):
+            # triangle bass, never arped
             buf[start:start + ln] += (_tri_sweep_note(hz, ln, sr, np)
                                       * _env(ln, sr, 3.0, 3.0, 0.75, np)
                                       * 0.34 * vel)
             continue
 
-        duty = 0.125 if pitch >= 72 else (0.25 if pitch >= 60 else 0.5)
+        duty = n.get("duty") or (0.125 if pitch >= 72 else (0.25 if pitch >= 60 else 0.5))
         if cfg["duty_mod"] > 1:
             duty = 0.125
         sf_from = n.get("slide_from")
@@ -743,11 +987,11 @@ def render_timed(a, notes, drums, duration, np, mood=None):
                              n.get("slide_ms", cfg["slide_ms"]), np, depth)
         else:
             vib = _vibrato(ln, sr, depth if n["dur"] > 0.35 else 0.0, 6.0, np)
-            t = np.arange(ln, dtype=np.float64) / sr
             ph = 2 * np.pi * hz * np.cumsum(vib) / sr
             w = np.where((ph / (2 * np.pi)) % 1.0 < duty, 1.0, -1.0)
         buf[start:start + ln] += w * _env(ln, sr, 2.0, 4.0, 0.55, np) * 0.20 * vel
 
+    hit_cache = {}                       # the LFSR is a per-sample Python loop: make each hit once
     for t, gm in (drums or []):
         start = int(round(t * sr))
         if start >= total:
@@ -759,12 +1003,23 @@ def render_timed(a, notes, drums, duration, np, mood=None):
         ln = min(int(dur_s * sr), total - start)
         if ln <= 4:
             continue
-        w = _lfsr_note(ln, sr, period, np) * _env(ln, sr, 1.0, dec, 0.0, np)
-        buf[start:start + ln] += w * g
+        if (kind, ln) not in hit_cache:
+            hit_cache[(kind, ln)] = _lfsr_note(ln, sr, period, np) * _env(ln, sr, 1.0, dec, 0.0, np)
+        buf[start:start + ln] += hit_cache[(kind, ln)] * g
 
-    buf = _chip_verb(buf, sr, cfg["verb"], np)
-    buf = _dc_block(buf, np, sr)          # before normalising: DC steals headroom
-    peak = float(np.abs(buf).max())
+    if loop and n_out > 0:
+        buf = fold_tail(buf, n_out)
+        buf = _chip_verb(buf, sr, cfg["verb"], np, circular=True)
+        # Primed with its own end: the filter state at sample 0 is the state it
+        # has when the loop comes round, so the seam stays continuous.
+        buf = _dc_block(buf, np, sr, prime=buf[-min(len(buf), sr):])
+    else:
+        buf = _chip_verb(buf, sr, cfg["verb"], np)
+        buf = _dc_block(buf, np, sr)      # before normalising: DC steals headroom
+        f = min(len(buf), int(0.01 * sr))  # an excerpt ends mid-note: land on zero
+        if f > 1:
+            buf[-f:] *= np.linspace(1.0, 0.0, f)
+    peak = float(np.abs(buf).max()) if len(buf) else 0.0
     if peak > 1e-9:
         buf = buf * (10.0 ** (a.normalize_db / 20.0) / peak)
     return buf
@@ -827,7 +1082,7 @@ CHIPPY = {
 }
 
 
-def _dc_block(buf, np, sr, hz=12.0):
+def _dc_block(buf, np, sr, hz=12.0, prime=None):
     """Remove DC and sub-audible drift with a one-pole high-pass.
 
     A pulse wave with duty != 50% has an inherent DC offset — a 12.5% duty square
@@ -843,18 +1098,53 @@ def _dc_block(buf, np, sr, hz=12.0):
     what the chip's own analogue stage did — not a departure from authenticity.
 
     12 Hz corner: below anything musical, above the DC we are removing.
+
+    It used to call scipy's lfilter and, without scipy, subtract the mean —
+    which does not block DC, it CREATES a step at both ends of the file (the
+    exact click this exists to prevent). This is the same filter in numpy, so
+    the result no longer depends on what is installed.
+
+    `prime`: samples that precede `buf` — for a loop, its own end. The filter
+    then starts in the state it will have when the loop comes round, so the seam
+    stays continuous instead of restarting from zero.
     """
     x = np.asarray(buf, dtype=np.float64)
+    if x.ndim > 1:
+        return np.stack([_dc_block(x[:, c], np, sr, hz,
+                                   None if prime is None else np.asarray(prime)[:, c])
+                         for c in range(x.shape[1])], axis=1)
     a = float(np.exp(-2.0 * np.pi * hz / sr))
-    # y[n] = x[n] - x[n-1] + a*y[n-1], vectorised via lfilter when available.
-    try:
-        from scipy.signal import lfilter
-        return lfilter([1.0, -1.0], [1.0, -a], x, axis=0)
-    except Exception:
-        return x - x.mean(axis=0, keepdims=True) if x.ndim > 1 else x - x.mean()
+    x_prev, y_prev = 0.0, 0.0
+    if prime is not None and len(prime):
+        _, x_prev, y_prev = _hp_one_pole(np.asarray(prime, dtype=np.float64), a, 0.0, 0.0, np)
+    y, _, _ = _hp_one_pole(x, a, x_prev, y_prev, np)
+    return y
 
 
-def _chip_verb(buf, sr, amount, np):
+def _hp_one_pole(x, a, x_prev, y_prev, np, block=2048):
+    """y[n] = x[n] - x[n-1] + a*y[n-1], vectorised in blocks.
+
+    Within a block the recursion has a closed form,
+        y[k] = a^k * (a*y_prev + sum_{j<=k} d[j] * a^-j),   d = diff(x)
+    so each block is one cumsum. 2048 keeps a^-k under ~35 at 44.1 kHz/12 Hz:
+    no overflow and no precision worth measuring (agrees with lfilter to 1e-12).
+    """
+    n = len(x)
+    y = np.empty(n)
+    if n == 0:
+        return y, x_prev, y_prev
+    d = np.diff(x, prepend=x_prev)
+    k = np.arange(block, dtype=np.float64)
+    up, down = a ** -k, a ** k
+    for s in range(0, n, block):
+        e = min(n, s + block)
+        m = e - s
+        y[s:e] = down[:m] * (y_prev * a + np.cumsum(d[s:e] * up[:m]))
+        y_prev = y[e - 1]
+    return y, float(x[-1]), float(y_prev)
+
+
+def _chip_verb(buf, sr, amount, np, circular=False):
     """Subtle multi-tap echo.
 
     A 2A03 cannot do this — but chiptune as *heard* usually has it, because
@@ -864,13 +1154,18 @@ def _chip_verb(buf, sr, amount, np):
 
     Three prime-ish taps rather than one, so it reads as space instead of as a
     slapback repeat.
+
+    `circular`: the buffer is a loop, so the echo of its end lands on its head
+    (where it is heard when the loop repeats) rather than falling off the end.
     """
     if amount <= 0:
         return buf
     out = buf.copy()
     for ms, g in ((53.0, 1.00), (97.0, 0.62), (149.0, 0.38)):
         d = int(sr * ms / 1000.0)
-        if d < len(buf):
+        if circular and 0 < d:
+            out += np.roll(buf, d) * (amount * g)
+        elif d < len(buf):
             out[d:] += buf[:-d] * (amount * g)
     return out
 
@@ -954,8 +1249,9 @@ def chippify(notes, level, sr_hint=44100):
 
     # Three registers: bass passes through, mid passes through, only the upper
     # register is eligible to be collapsed into an arpeggio.
-    passthru = [n for n in notes if n["pitch"] < ARP_MIN_PITCH]
-    top = [n for n in notes if n["pitch"] >= ARP_MIN_PITCH]
+    low = lambda n: n["pitch"] < ARP_MIN_PITCH or n.get("role") == "bass"   # noqa: E731
+    passthru = [n for n in notes if low(n)]
+    top = [n for n in notes if not low(n)]
     step = 1.0 / cfg["arp_hz"]
     out = []
 
@@ -1033,10 +1329,17 @@ def events_to_timed(ev, bars, spb, steps, mood_name, drums_only=False):
                 bar, st, dur, pitch = it[0], it[1], it[2], it[3]
                 vel = it[5] if (key != "bass" and len(it) > 5) else (
                       it[4] if (key == "bass" and len(it) > 4) else 96)
-                out.append({"id": (key, i), "t": at(bar, st),
-                            "dur": max(0.02, dur * step_s),
-                            "pitch": int(pitch), "prog": gm,
-                            "vel": int(vel) if isinstance(vel, int) else 96})
+                n = {"id": (key, i), "t": at(bar, st),
+                     "dur": max(0.02, dur * step_s),
+                     "pitch": int(pitch), "prog": gm,
+                     "vel": int(vel) if isinstance(vel, int) else 96,
+                     # The PART, so a renderer voices by role, not by guessing
+                     # from pitch: the composed bass reaches up to ~B3 and was
+                     # landing on a pulse (three pulses at once on a 2A03).
+                     "role": key}
+                if ev.get("_duty") and key != "bass" and len(it) > 4 and isinstance(it[4], float):
+                    n["duty"] = it[4]          # the mood's duty: timbre on a 2A03
+                out.append(n)
     dr = []
     kind_gm = {"k": 36, "s": 38, "h": 42}
     for bar, st, kind in ev.get("drum", []):

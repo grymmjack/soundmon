@@ -80,22 +80,30 @@ Any box already running ComfyUI for pixelmon becomes a soundmon box by running
 git clone <your-remote> ~/git/soundmon && cd ~/git/soundmon
 ./install.sh                  # links files; reuses an existing ComfyUI if present
 ./download-models.sh --sa3    # the default engine (~14 GB, ungated)
-# restart ComfyUI so it picks up the retro_sfx node
+# restart ComfyUI so it picks up the retro_sfx node:  ~/launch-comfyui.sh --force-fp32
 soundmon "a heavy wooden door creaking open"
+soundmon --version            # soundmon 0.1.0
 ```
 
 If you don't have ComfyUI yet, `install.sh` will tell you to run pixelmon's
 installer first — it builds exactly the engine soundmon needs (ComfyUI + venv +
-the right torch for your GPU).
+the right torch for your GPU). `install.sh` also links `~/launch-comfyui.sh`
+(the script `bin/soundmon` starts ComfyUI with) **only if there isn't one** —
+soundmon ships the same script pixelmon does, so it never replaces pixelmon's.
 
-`download-models.sh` fetches into `~/ComfyUI/models/`. The bare command gets the
-legacy Stable Audio Open set; the flags get the engines you actually want:
+`download-models.sh` fetches into `~/ComfyUI/models/` (or `$COMFYUI_DIR/models`).
+Flags combine (`--sa3 --song`); files you have are skipped and a cut-off download
+resumes. It ends with what is still missing and exits non-zero if anything is:
 
 | Flag | Fetches | Size |
 |---|---|---|
 | `--sa3` | **Stable Audio 3** medium + specialists + T5Gemma + **Qwen 3.5 rewriter** | ~14 GB |
 | `--song` | ACE-Step 1.5 turbo (all-in-one) | ~9.3 GB |
-| *(none)* | Stable Audio Open 1.0 + T5-base — only needed for `--engine sao` | ~5.3 GB |
+| `--sao` | Stable Audio Open 1.0 + T5-base — only needed for `--engine sao` | ~5.3 GB |
+| `--opl` | builds the Nuked OPL3 core + GM banks for `--opl`/`--oplfx` (needs a C compiler) | tiny |
+| `--all` | `--sa3 --song --sao` | ~29 GB |
+| `--list` | what's installed and what's missing — downloads nothing | — |
+| *(none)* | the legacy `--sao` set, as it always did — new boxes want `--sa3` | ~5.3 GB |
 
 > **The Qwen rewriter is not optional.** ComfyUI's official Stable Audio 3
 > workflow runs an LLM over your description *before* the audio model ever sees
@@ -122,7 +130,10 @@ noise** — buzzing, radio-scramble, no usable audio. Start ComfyUI like this:
 `bin/soundmon` passes it automatically when it starts the server itself. If
 ComfyUI is **already running** (e.g. for pixelmon's SDXL), restart it with the
 flag before generating audio. It roughly doubles VRAM and halves throughput,
-which is why it isn't simply always on.
+which is why it isn't simply always on. soundmon reads the server's launch
+arguments (`/system_stats` → `system.argv`) before an SA3 render and prints a
+`⚠ … started WITHOUT --force-fp32` warning for any box that lacks it (it still
+renders: the warning is the point).
 
 ---
 
@@ -141,7 +152,13 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | `--format NAME` | hardware format lock (rate + bit depth + channels) — `--list-formats` | `none` |
 | `--bits N` | WAV bit depth: 8 / 16 / 24 | `16` |
 | `--batch "a,b,c"` | round-robin subjects, one of each per pass, each into its own folder | — |
-| `--fast` | fewer steps: faster, rougher | off |
+| `--batch-file F` | every `key \| prompt` / `key \| seconds \| prompt` row → `key.wav` (see below) | — |
+| `--skip-existing` | with `--batch-file`: skip keys that already have a file (resume a pack) | off |
+| `--show-prompt` | print the final positive/negative prompt before rendering | off |
+| `--exact-prompt` | send the text as typed: no tail, no default negative, no Qwen rewrite | off |
+| `--dry-run` | print the ComfyUI graph(s) as JSON and exit — no server contacted | off |
+| `--no-recipe` | don't embed the recipe in the output files (see below) | off |
+| `--fast` | fewer steps on `--engine sao` and `--song`. **No effect on SA3**, which already renders in 8 steps | off |
 | `--seed N` | lock / repeat a result | random |
 | `--no-trim` | keep the model's leading/trailing silence. **Not** for loops — use `--loop` | off |
 | `--max-seconds N` | hard length cap (0 = none). Truncates — trimming only removes *silence* | `0` |
@@ -154,15 +171,53 @@ Run `soundmon --help` for the full, colorized list. The essentials:
 | `--flac` / `--mp3` / `--opus` | save compressed instead of WAV | WAV |
 | `--loop` | crossfade the tail over the head so the track loops seamlessly | off |
 | `--loop-crossfade N` | crossfade length in seconds for `--loop` | `2.0` |
-| `--server NAME[,...]` | remote ComfyUI; comma-list = render farm | local |
+| `--server NAME[,...]` | remote ComfyUI; comma-list = render farm. Also `$SOUNDMON_SERVER`, then servers.json `"_default"` | local |
+| `--version` | print the version | — |
 
-The seed is in every filename, so to make a full-quality version of a fast draft
-you liked, just re-run that seed:
+`--help` lists every flag. The seed is in every filename, so a take you liked is
+one flag away:
 
 ```bash
-soundmon "a laser blast" --fast          # prints e.g. seed=12345
-soundmon "a laser blast" --seed 12345    # same blast, full quality
+soundmon "a laser blast" -n 8            # prints e.g. seed=12345 for each
+soundmon "a laser blast" --seed 12345    # that blast again
 ```
+
+**Every file says how it was made.** The prompt, the final prompt with its
+style tail, the negative, seed, engine and model, steps/cfg/sampler, `--ref`
+and its strength, the server, and the full command line are embedded as a
+comment tag — a RIFF `LIST/INFO ICMT` chunk in WAV (samples and header
+untouched), a Vorbis comment / ID3 tag in FLAC, OGG, Opus and MP3. The CPU
+engines record their engine and command. It survives renaming and copying into a
+game folder:
+
+```bash
+ffprobe -v error -show_entries format_tags=comment -of default=nw=1:nk=1 door_s42_00001_.wav
+# {"tool":"soundmon","version":"0.1.0","engine":"sa3",...,"seed":42,...,"command":"soundmon 'a door' --seed 42"}
+```
+
+`--no-recipe` leaves it out (shipped assets that shouldn't carry prompts or paths).
+
+### A pack from a manifest (`--batch-file`)
+
+`--batch` splits on commas, and real descriptions contain commas. A manifest
+doesn't care — the same `key | text` shape `--narrate-file` and `--blip-file`
+read, so one game string table can drive narration, blips and effects:
+
+```text
+# sfx.txt
+door_open  | a heavy wooden door, creaking open
+explosion  | 3.5 | a distant explosion, rumbling
+glass breaking
+```
+
+```bash
+soundmon --batch-file sfx.txt --output-to pack --create-dirs     # pack/door_open.wav, pack/explosion.wav, …
+soundmon --batch-file sfx.txt --output-to pack --skip-existing   # only what's missing
+soundmon --batch-file sfx.txt -n 3 --server rtx,titan            # key_01..key_03 each, across the farm
+```
+
+A middle column sets that row's length; a plain line names itself. With `--ref`
+the reference sets the length, so the column is ignored.
 
 ### Stable Audio 3 (the default engine)
 
@@ -639,13 +694,37 @@ Each sound can be fine alone and still grate when a fight stacks twenty of them.
 It uses no limiter and never normalizes to full scale. Voices are left alone unless
 they're bright.
 
+**Bright sounds come out quieter, on purpose.** The make-up gain stops at +3 dB, and a
+sound with over 40 % of its energy above 10 kHz (white noise, a whistle) gets none: the
+level the EQ and low-pass took away is the treatment (NEON-CASTER's design). White noise
+goes from −14.4 to −23.3 LUFS at its loudest 400 ms; the line says
+`(bright: no make-up gain, by design)` whenever this happens.
+
 ```bash
 soundmon --master sfx/                       # -> sfx/mastered/… (never overwrites)
 soundmon --master assets/ --output-to out/   # speech/ narration/ voice/ folders are treated as voices
 soundmon --master hit.wav --master-kind sfx --flac
 ```
 
-Each line reports what changed, e.g. `above 2.5k 52%→26%  harsh 0.10→0.00s  gain +1.4 dB  peak -1.0 dBTP`.
+- **Never overwrites a source.** `--output-to` may not be the folder itself or a folder
+  inside it (except its own `mastered/`), and a file that would land on a source is
+  skipped.
+- Output is a 16-bit WAV at the source's rate and channels, named after the source.
+  When two sources share a name (`hit.wav` and `hit.flac`), the `.wav` keeps it and the
+  others keep their extension in theirs (`hit.flac.wav`).
+- Skipped when mastering a folder: `mastered/`, `takes/`, backups, folders starting with
+  `_` or `.` (soundmon-gui's `_mastered/` and `_analysis/`), and hidden files. Reads
+  WAV, FLAC, OGG, MP3, Opus, M4A and AIFF.
+- Voice or effect: the **nearest** folder that says either decides (`speech/`,
+  `narration/`, `voice/`, `vo/`, `dialog/` against `sfx/`, `fx/`, `sounds/`,
+  `effects/`, `foley/`), so `voice/demo/sfx/hit.wav` is an effect and
+  `--master game/speech` masters voices. `--master-kind` overrides it.
+- True peak is measured 4× oversampled and the written file is measured again; one
+  that lands over −1 dBTP (or an `--ogg` encode that does) is written again quieter.
+- A silent file is written as it is; an unreadable one says why (ffmpeg's reason);
+  one with NaN samples is refused.
+
+Each line reports what changed, e.g. `above 2.5k 52%→26%  harsh 0.10→0.00s  loudest -14.9→-14.9 LUFS  gain +1.4 dB  peak -1.1 dBTP`.
 On NEON-CASTER it took the effects' energy above 2.5 kHz from 34 % to 21 %. Needs
 numpy and ffmpeg, but no ComfyUI.
 
@@ -690,7 +769,11 @@ soundmon "laser zap" -n 8 --match-tone our_laser.wav              # sit with the
 - `--match-tone REF` runs after rendering. It compares the take's 1/3-octave curve
   with REF's, applies the difference (smoothed, at most ±9 dB), and sets the level to
   REF's loudest 400 ms, never past −1 dBTP. It works with every engine; for CPU engines
-  you can also do it afterwards with `--master DIR --master-like REF`.
+  you can also do it afterwards with `--master DIR --master-like REF`. It keeps the file
+  sample-exact (same length, nothing shifted — a `--loop` stays seamless) and in its own
+  sample format (8-bit stays 8-bit, 24-bit stays 24-bit). A format-locked take (8-bit,
+  or under 16 kHz: `--format amiga`, `sb`, `nes`, `gameboy`…) only has its level matched,
+  and only ever downwards, so the crush is neither smoothed nor magnified.
 - **Not yet proven on a GPU.** The graph is checked here; whether SA3's 8-step sampler
   gives good variations from an encoded reference needs an rtx run. If SA3 does badly,
   try `--engine sao`, the classic Stable Audio Open audio-to-audio.
@@ -719,11 +802,18 @@ taken from its audible part:
 - **length**.
 
 A search compares every feature on the same scale and weights timbre highest. Results
-show a 0–100 "how alike" score and which aspects match. Identical copies show once.
+show a 0–100 "how alike" score and which aspects match. Identical copies (and links to
+the same file) show once, files deleted since indexing are left out, and the query itself
+never comes back. The fingerprint doesn't depend on volume, and the score's scale comes
+from the whole index, so a near-duplicate reads high however few files `--in` leaves.
 
 The index is `~/soundmon-gallery/similar/index.json`. It skips `mastered/`, backups, and
-folders starting with `_` or `.`, and reads the first 30 s of long files. It needs numpy
-and ffmpeg, but no ComfyUI.
+folders starting with `_` or `.`, and reads the first 30 s of long files. Its summary
+counts unreadable files, silent or too-short ones, and anything skipped (dangling links,
+folders it can't read) separately; a file that failed isn't read again until it changes.
+Two `--index` runs at once are safe (a lock, and each merges the other's work). An index
+made by an older fingerprint is reset and says so: re-run `--index`. It needs numpy and
+ffmpeg, but no ComfyUI.
 
 ### Compressing output (`--ogg`)
 
@@ -752,8 +842,9 @@ CLI alone decides the output format. Encoding is well under a second.
 
 ### Render farm
 
-Identical to pixelmon's, because it's the same code — the CLI never touches the
-GPU, it just POSTs a JSON graph to `/prompt` and pulls results from `/view`.
+Built like pixelmon's — the CLI never touches the GPU, it just POSTs a JSON
+graph to `/prompt` and pulls results from `/view` — though the two have since
+diverged: soundmon's adds a circuit breaker and the robustness below.
 
 ```bash
 soundmon --batch "explosion,glass,fire" -n 30 --server rtx,local
@@ -761,20 +852,43 @@ soundmon --batch "explosion,glass,fire" -n 30 --server rtx,local
 ```
 
 Dynamic dispatch (each GPU gets its next job the moment it's free), unreachable
-boxes skipped, in-flight jobs requeued if a box drops. See pixelmon's
-[README-RENDER-FARM.md](https://github.com/grymmjack/pixelmon) for LAN/firewall
-setup — it applies verbatim.
+boxes skipped, boxes without the model skipped with the `download-models.sh`
+line that fixes them, and a `⚠` for any box whose ComfyUI isn't running
+`--force-fp32`. While it runs:
+
+- a box that fails **2 jobs in a row** (or most of its jobs) is dropped, and a
+  failed job is retried once **on another box**;
+- a box that stops answering gets **30 s** before its job moves elsewhere (one
+  missed poll is not a dead box); a box that **restarted** and forgot its job
+  gets it again;
+- an identical re-run that ComfyUI answers from its cache is re-saved — it is
+  not a failure and never counts against the box;
+- a download or post-processing error fails that one job, not the farm;
+- the same box listed twice (`rtx,192.168.1.77`) is used once.
+
+The same robustness is on a single server: a ComfyUI that restarts mid-batch is
+waited out (up to 4 minutes) and everything it forgot is sent again; a
+"poisoned" server (`object has no attribute 'model_size'`) is waited on until
+someone restarts it; one out-of-memory / loader hiccup is retried; time spent
+queued behind other people's jobs doesn't count toward the timeout; one failed
+job doesn't end the batch (the run exits non-zero at the end). Ctrl-C (or the
+GUI's Cancel) takes this run's jobs off the server's queue.
+
+With no `--server`, the target is `$SOUNDMON_SERVER`, then servers.json's
+`"_default"` (the key pixelmon reads too), then the `local` alias. See
+pixelmon's [README-RENDER-FARM.md](https://github.com/grymmjack/pixelmon) for
+LAN/firewall setup — it applies verbatim.
 
 #### Provisioning a farm box
 
-A box already running pixelmon has ComfyUI but *not* Stable Audio Open. It needs
+A box already running pixelmon has ComfyUI but *not* the audio models. It needs
 the models and the node — **not** the CLI (the client drives it). From your main
 box, per farm member:
 
 ```bash
 rsync -az --exclude '.git' --exclude 'servers.json' ~/git/soundmon/ box:git/soundmon/
-ssh box 'cd ~/git/soundmon && ./install.sh && ./download-models.sh'
-ssh box 'tmux new-session -d -s comfy "~/launch-comfyui.sh 2>&1 | tee ~/comfyui.log"'
+ssh box 'cd ~/git/soundmon && ./install.sh && ./download-models.sh --sa3'      # + --song for songs
+ssh box 'tmux new-session -d -s comfy "~/launch-comfyui.sh --force-fp32 2>&1 | tee ~/comfyui.log"'
 ```
 
 Then confirm the node and models registered:
@@ -812,19 +926,46 @@ soundmon-gui --lan           # reachable from other devices on the LAN
 soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick, else servers.json "_default")
 ```
 
-- **Every engine on one form.** Nine engine buttons at the top (SFX, Music loop, Song,
+- **Every engine on one form.** Eight engine buttons at the top (SFX, Music loop, Song,
   Chiptune, AdLib, Retro FX, Blips, Narrate); only that engine's settings show. Style
   guides, moods, archetypes, voices, keys and hardware formats are read live from
   `sounds.json`, `chip.py`, `chipfx.py`, `opl.py`, `narrate.py` and the node, so the GUI
   never offers something soundmon doesn't have. Hovering a field shows the flag's own
-  `--help` text.
+  `--help` text. 🎲 rolls a description, 🕘 brings back ones you rendered; 🎲 next to Seed
+  picks one to keep. Form sections fold (and stay folded); sliders step with the mouse wheel
+  (shift ×5), reset on middle-click, and take a typed value when you click their number.
+- **Every sound is the same player**, wherever it is listed (queue, gallery, sets, find,
+  voices, the reference you dropped): a waveform with a playhead you click to play from that
+  spot, play/pause, and what the file really is, read from its own header (length, sample
+  rate, bit depth or bitrate, channels, codec, size, peak, clipped samples) plus a small
+  spectrum showing how high its content reaches. Space plays/pauses, Esc stops.
+- **Browse… and Open on every file and folder.** Every path field and drop zone has
+  **Browse…** (a picker over your home folder, with shortcuts, a filter and a preview of
+  sounds) and every sound has **↗** (also on right-click): open it in the system's default
+  app, in a program from Setup (found automatically: Audacity, VLC, OpenMPT…), or show it in
+  its folder. With `--lan`, browsing and opening only work from the machine running the GUI.
 - **The command is always visible.** Under RENDER is the exact `soundmon …` command the
   server will run (the server builds it, so the preview can't drift). COPY CLI takes it
   to a terminal.
+  Under it, a **setup check** warns about settings that will render but probably not as
+  meant (SAO past 47 s, SA3 steps/CFG, a reference the engine ignores, a server missing the
+  model…), each with **Fix**.
 - **Queue** shows each job's progress (`✅ [i/n]` lines), log and errors. When ComfyUI
-  fails a job, the job fails in seconds with the node's own message.
-  **⛔ CANCEL AND ABORT** in the status bar stops everything and empties the render
-  server's queue.
+  fails a job, the job fails in seconds with the node's own message. A set render, a Voices
+  run or a sweep is one card with one bar and **Cancel all**. **Cancel** really stops the
+  GPU: soundmon takes its own prompts off ComfyUI's queue (and interrupts the one rendering
+  if it is its own), so a ComfyUI shared with pixelmon keeps pixelmon's work.
+  **⛔ CANCEL AND ABORT** in the status bar stops everything this GUI started.
+- **SWEEP…** renders one take per value of one setting, same seed (reference strength,
+  steps, style, format, mood, archetype, voice, BPM, key…), so you hear what a setting does.
+  **🧬** on a take renders four variations of it (the take becomes the reference).
+- **⚖ Compare** lines up to nine takes: press `1`–`9` to switch between them *at the same
+  moment*, see their loudness and an overlaid spectrum against the ★ reference. Click a
+  gallery take's name for a close-up: big waveform, measurements, sonogram, the full
+  recipe and every action, `←`/`→` through the gallery.
+- **Notifications** (status bar): a desktop notification and/or a chime when jobs finish
+  or fail, a coin per take, and when the render server goes down, comes back, gets stuck or
+  is restarted. A banner says when the server is down while a GPU engine is selected.
 - **Gallery** keeps every take with its waveform, seed, rating and the files beside it
   (`.mod`, `.rad`, `.mid`). **Load** puts a take's settings back in the form; **Again**
   renders that exact take again (same seed). Each job lives in
@@ -844,6 +985,9 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
      `.soundmon-backup/<date>/` first. It warns when a key also exists in another
      format, because the game may play that one instead.
 
+  "Skip keys the game has" leaves out keys the game folder already has a file for; each
+  key can carry a note; every row is checked against the theme before anything is queued.
+
   Takes are just gallery jobs tagged with the set and key, so a set survives
   restarts and every take keeps its seed and command.
 - **Reference** (SFX, Music, Song): drop a sound to steer the render (`--ref`), with a
@@ -851,17 +995,26 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   length" (`--ref-match`) and "match its tone" (`--match-tone`). The job keeps a copy
   of the reference, and its gallery card has **ref ▶** to hear it. A set's theme can
   carry a reference too, and a set can export **mastered like the reference**.
-- **🔎 Find** indexes the folders you choose (they're saved in Setup), then lists the
+- **🔎 Find** indexes the folders you choose (remembered), then lists the
   sounds most like the one you drop, or like any gallery take or set take (🔎 on its
   card). Each result can be played, **Use**d as the form's reference, opened in its
   folder, or have its path copied.
 - **Voices** speaks one of your lines in every Kokoro voice, so you can compare them;
   **Use** puts one in the Narrate form.
-- **Presets** (top of the form) save and load the form's settings by name.
+- **Presets** (top of the form) save and load the form's settings by name, in folders and
+  with a note; 💾 on any queue card saves that job's settings. **⬇** downloads presets as a
+  `.zip` with the files they use (reference, MIDI, bank), **⬆** imports one (never
+  overwriting).
 - **Advanced** exposes the rest (sampler, reprompt, ACE-Step's LLM, trim/normalize/fade,
   OGG quality, MIDI start). Blank means soundmon's own default.
 - **Setup** lists every `servers.json` box with its state and whether it has the models
-  each engine needs (SA3 medium, ACE-Step, T5Gemma, Qwen), and picks where GPU renders go.
+  each engine needs (SA3 medium, ACE-Step, T5Gemma, Qwen), and picks where GPU renders go
+  (it says so when `--server` overrides the pick). **Backups** zips the whole
+  `~/soundmon-gallery`, restores what's missing from one (never overwriting), and can clear
+  the gallery (after a backup).
+
+The GUI only answers its own page: a request from another site, or to a name that isn't this
+machine, is refused.
 
 Drop a `.mid` or a recording on the Chiptune / AdLib form to have it followed
 (`--from-midi`, `--from-audio`), or a `.txt` of `key | text` lines on the Blips / Narrate
@@ -1020,7 +1173,8 @@ soundmon/
 ├── README.md
 ├── AGENTS.md                  orientation for coding agents working on this repo
 ├── install.sh                 links files; reuses pixelmon's ComfyUI if present
-├── download-models.sh         fetch models: --sa3 (default engine), --song, or legacy
+├── download-models.sh         fetch models: --sa3 (default engine), --song, --sao, --opl, --all, --list
+├── launch-comfyui.sh          starts ComfyUI (GPU autodetect) — pixelmon's script; linked only if ~/ has none
 ├── soundmon.py                the CLI brains (talks to ComfyUI's API)
 ├── narrate.py                 --narrate: Kokoro TTS, in-process on CPU, no ComfyUI
 ├── blip.py                    --blip: JRPG text-box blips (synth needs no model)
@@ -1039,7 +1193,9 @@ soundmon/
 │   ├── server.py              stdlib server: job queue, gallery, setup — runs bin/soundmon
 │   ├── sets.py                Sets: manifest → takes per key → picks → export into a game
 │   └── index.html             the page (no build step, no CDN)
+├── .claude/skills/create-release/   the release checklist (selfcheck, fp32 + smoke render, tag, notes)
 ├── tools/
+│   ├── selfcheck.py           offline invariants — run after touching an engine or the job lifecycle
 │   ├── spectral-check.py      measure spectral cutoff — catches hollow output
 │   ├── stems.py               a finished track → stems, loops, one-shots, FX (INFINITE-SAMPLES.md)
 │   ├── instruments.py         the one-shots → sampler instruments: Bitwig .multisample, Renoise .xrni,
@@ -1065,7 +1221,11 @@ python tools/instruments.py "out/track - TITLE"     # stems.py runs it at the en
 `Renoise/*.xrni` (drag into Renoise's instrument list; keys as MIDI plays them) and, where
 Bitwig is installed, `Bitwig/*.bwpreset` - its own Drum Machine (a Sampler a pad) and Samplers,
 written by `tools/bwpreset.py`, which reads and writes Bitwig's binary preset format.
-`instruments.py` and `bwpreset.py` need only Python's standard library. The whole walk-through,
+`instruments.py` and `bwpreset.py` need only Python's standard library. With `--bpm`, stems.py
+takes the tempo as given and fits only where the beats fall; without it, it fits a line through
+the beat tracker's beats (the tracker's own tempo is coarse: 129.5 for a 128 bpm track). The bar's
+first beat is where the kick lands hardest, and where the harmony changes when the kick doesn't
+decide (a kick on 1 and 3, or no drums). The whole walk-through,
 from the prompt to the sampler, is [INFINITE-SAMPLES.md](INFINITE-SAMPLES.md).
 
 ### Checking output (`tools/spectral-check.py`)
@@ -1078,6 +1238,12 @@ below the 500–2000 Hz reference band:
 tools/spectral-check.py --min 20 render.wav              # WAV: expect Nyquist
 tools/spectral-check.py --min 17 assets/music/*.ogg      # OGG: Vorbis rolls off
 ```
+
+The reference band falls back to the file's loudest octave when 500–2000 Hz holds nothing
+but leakage (a pure tone under 500 Hz), and the cutoff is searched above the loudest content,
+so a pure tone reads just above its pitch. Files with NaN/inf samples fail; files too short
+or silent to measure are listed (and fail a `--min` check); M4A and anything else soundfile
+can't open is decoded with ffmpeg.
 
 > **Compare like with like.** Vorbis imposes its own rolloff, so an OGG of
 > perfect source still reads ~17 kHz — that is the codec, not a defect. And a

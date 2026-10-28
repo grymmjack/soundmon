@@ -30,10 +30,17 @@ Levels are left as they come out (nothing normalized). Separation isn't clean - 
 effects come along - so these are raw material, not studio stems.
 Needs: audio-separator[gpu], librosa, soundfile (the stems venv on the farm box).
 """
-import argparse, json, os, re, shutil, struct
-import numpy as np
-import soundfile as sf
-import librosa
+import argparse, json, os, re, shutil, struct, sys
+
+NEEDS = ("stems.py needs %s: run it with the stems venv (~/stems/.venv/bin/python stems.py ...), or make one:\n"
+         "  python3 -m venv .venv && .venv/bin/pip install torch torchaudio \"audio-separator[gpu]\" librosa soundfile\n"
+         "(INFINITE-SAMPLES.md has the whole setup)")
+try:
+    import numpy as np
+    import soundfile as sf
+    import librosa
+except ImportError as e:
+    sys.exit(NEEDS % (e.name or "numpy, soundfile and librosa"))
 
 SR = 44100
 PRETTY = {'hh': 'hats', 'other-dry': 'synth dry', 'other': 'synths + fx', 'synth-low': 'synth low', 'synth-mid': 'synth mid', 'synth-high': 'synth high',
@@ -93,7 +100,10 @@ def write_wav(path, x, loop=None, note=60, tempo=None, beats=0):
 
 # --- 1. Split: Demucs (4 and 6 parts), then the drums again
 def separate(track, work):
-    from audio_separator.separator import Separator
+    try:
+        from audio_separator.separator import Separator
+    except ImportError as e:
+        sys.exit(NEEDS % (e.name or "audio-separator"))
     out = {}
     sep = Separator(output_dir=work, output_format='WAV', sample_rate=SR, log_level=40,
                     model_file_dir=os.path.expanduser('~/stems/models'))  # (kept: /tmp is cleared)
@@ -144,30 +154,75 @@ def split_other(other):
 
 
 # --- 3. Tempo and bars: the tracker's beats, a straight line through them, the bar's first beat
-# where the kick lands hardest
-def grid(mix, kick, bpm_hint=None):
+# where the kick lands hardest. With --bpm the tempo is TAKEN as given and only the beats' phase is
+# fitted (a tracker's tempo is coarse: librosa read 129.5 for a 128 bpm track).
+def grid(mix, kick, bpm=None):
     y = mono(mix)
     env = librosa.onset.onset_strength(y=y, sr=SR, hop_length=512)
     tempo, beats = librosa.beat.beat_track(onset_envelope=env, sr=SR, hop_length=512,
-                                           start_bpm=bpm_hint or 128, units='samples')
-    tempo = float(np.atleast_1d(tempo)[0]) or 120.0
-    while tempo < 90: tempo *= 2
-    while tempo > 180: tempo /= 2
-    spb, b0 = SR * 60 / tempo, (beats[0] if len(beats) else 0)
-    if len(beats) > 8:
-        k = np.round((beats - beats[0]) / spb)
-        spb, b0 = np.polyfit(k, beats, 1)
+                                           start_bpm=bpm or 128, units='samples')
+    beats = np.asarray(beats, dtype=float)
+    if bpm:
+        spb = SR * 60 / float(bpm)
+        if len(beats):  # the phase: the circular mean of where the beats fall within a beat
+            ph = np.angle(np.mean(np.exp(2j * np.pi * beats / spb))) / (2 * np.pi) * spb
+            b0 = ph % spb
+        else:
+            b0 = 0.0
+    else:
+        tempo = float(np.atleast_1d(tempo)[0]) or 120.0
+        spb, b0 = SR * 60 / tempo, (beats[0] if len(beats) else 0.0)
+        if len(beats) > 8:
+            # the tracker's beats are consecutive: number them 0, 1, 2… (its coarse tempo, rounded,
+            # jumped by 2 after ~52 beats), fit a line, then renumber by that fit in case it skipped one
+            spb, b0 = np.polyfit(np.arange(len(beats)), beats, 1)
+            for _ in range(3):
+                k = np.round((beats - beats[0]) / spb)
+                spb, b0 = np.polyfit(k, beats, 1)
+        while SR * 60 / spb < 90: spb /= 2
+        while SR * 60 / spb > 180: spb *= 2
+    # the beats' exact place: the beat part's own onsets (backtracked, at 3 ms), near the grid
+    on = librosa.onset.onset_detect(y=mono(kick), sr=SR, hop_length=128, backtrack=True, units='samples')
+    r = ((np.asarray(on, float) - b0 + spb / 2) % spb) - spb / 2
+    r = r[np.abs(r) < spb / 8]
+    if len(r) >= 4:
+        b0 += float(np.median(r))
+    while b0 - spb >= 0:
+        b0 -= spb
+    while b0 < 0:
+        b0 += spb
+    # which beat is the bar's first: where the kick lands hardest; when two do (a kick on 1 and 3),
+    # or there are no drums (kick is the mix, whose snare is loudest), where the harmony changes most
     kenv = librosa.onset.onset_strength(y=mono(kick), sr=SR, hop_length=512)
-    best, phase = -1, 0
-    for ph in range(4):
-        t = b0 + (np.arange(64) * 4 + ph) * spb
-        t = t[(t >= 0) & (t < len(y))]
-        s = kenv[np.minimum((t / 512).astype(int), len(kenv) - 1)].sum()
-        if s > best:
-            best, phase = s, ph
+    pos = [b0 + (np.arange(int(len(y) / (4 * spb)) + 2) * 4 + ph) * spb for ph in range(4)]
+    pos = [t[(t >= 0) & (t < len(y))] for t in pos]
+
+    def at(e, t):  # (an onset envelope peaks a frame or two late, and can't see one at sample 0)
+        t = t[t >= 1024]
+        i = (t / 512).astype(int)[:, None] + np.arange(-1, 4)
+        return e[np.clip(i, 0, len(e) - 1)].max(1).mean() if len(t) else 0.0
+    ks = np.array([at(kenv, t) for t in pos])
+    cand = [ph for ph in range(4) if ks[ph] >= 0.85 * ks.max()] if ks.max() > 0 and kick is not mix else list(range(4))
+    phase = cand[0]
+    if len(cand) > 1:
+        ch = librosa.feature.chroma_stft(y=y, sr=SR, hop_length=2048)
+        w = max(1, int(spb / 2048))
+
+        def change(t):
+            f = (t / 2048).astype(int)
+            f = f[(f >= w) & (f + w <= ch.shape[1])]
+            if not len(f):
+                return 0.0
+            a = np.stack([ch[:, i - w:i].mean(1) for i in f])
+            b = np.stack([ch[:, i:i + w].mean(1) for i in f])
+            na, nb = np.linalg.norm(a, axis=1), np.linalg.norm(b, axis=1)
+            ok = (na > 1e-6) & (nb > 1e-6)                    # (silence has no harmony to change)
+            return float(np.mean(1 - (a * b).sum(1)[ok] / (na * nb)[ok])) if ok.any() else 0.0
+        phase = max(cand, key=lambda ph: change(pos[ph]))
     first = b0 + phase * spb
-    while first - 4 * spb >= 0:
+    while first - 4 * spb >= -0.02 * SR:   # (a bar line a few ms before the file's start is its start)
         first -= 4 * spb
+    first = max(first, 0.0)
     spbar = 4 * spb
     bars = [int(round(first + i * spbar)) for i in range(int((len(y) - first) / spbar) + 1)]
     return SR * 60 / spb, spbar, bars
@@ -365,6 +420,11 @@ def main():
     ap.add_argument('--name'); ap.add_argument('--title', default=''); ap.add_argument('--bpm', type=float)
     a = ap.parse_args()
     key = a.name or os.path.splitext(os.path.basename(a.track))[0]
+    key = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '-', key).strip() or 'track'  # (it starts every file name)
+    if not os.path.isfile(a.track):
+        sys.exit(f'stems.py: no such file: {a.track}')
+    if a.bpm is not None and not 20 <= a.bpm <= 400:
+        sys.exit(f'stems.py: --bpm {a.bpm:g}? give the track\'s tempo (20-400)')
     out = a.outdir
     os.makedirs(out, exist_ok=True)
     work = os.path.join(out, '.work'); os.makedirs(work, exist_ok=True)

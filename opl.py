@@ -196,8 +196,25 @@ class OPL3:
     """ctypes wrapper over the Nuked core. Writes are immediate (OPL3_WriteReg)
     rather than buffered, so the sequencer below controls timing exactly."""
 
+    # Samples rendered between a key-off and a key-on of the same channel. The
+    # chip only restarts an envelope that has REACHED its release phase, and it
+    # only gets there by running at least one sample with the key off. Off-then-
+    # on with zero samples between is therefore no note at all: --oplfx coin
+    # played one note of two, and a stolen voice kept sounding the old note.
+    RETRIGGER_GAP = 64
+
     def __init__(self, lib_path=None):
-        self.lib = ctypes.CDLL(lib_path or find_lib())
+        path = lib_path or find_lib()
+        if lib_path:
+            path = os.path.abspath(os.path.expanduser(lib_path))
+            if not os.path.isfile(path):
+                sys.exit(f"--opl-lib {lib_path}: no such file")
+        try:
+            self.lib = ctypes.CDLL(path)
+            self.lib.OPL3_Reset
+        except (OSError, AttributeError) as e:
+            sys.exit(f"--opl-lib {path}: can't load the Nuked OPL3 core ({e}). "
+                     f"Rebuild it with ./download-models.sh --opl")
         self.lib.OPL3_Reset.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         self.lib.OPL3_WriteReg.argtypes = [ctypes.c_void_p, ctypes.c_uint16,
                                            ctypes.c_uint8]
@@ -207,21 +224,55 @@ class OPL3:
         # opl3_chip is ~12 KB; over-allocate rather than depend on a struct
         # layout we do not parse. We only ever hand the core a pointer.
         self._chip = ctypes.create_string_buffer(131072)
+        self._off = set()            # channels keyed off since the last sample
+        self._rhy = 0                # last 0xBD drum-trigger bits
+        self._rhy_off = 0            # drum bits cleared since the last sample
+        self._pend = []              # gap samples owed to the next render()
         self.lib.OPL3_Reset(self._chip, SAMPLE_RATE)
         self.write(0x105, 0x01)      # OPL3 mode ("NEW" bit) — 4-op & stereo
         self.write(0x104, 0x00)      # all channels 2-operator
         self.write(0x01, 0x20)       # enable waveform select
 
     def write(self, reg, val):
-        self.lib.OPL3_WriteReg(self._chip, int(reg) & 0x1FF, int(val) & 0xFF)
+        reg, val = int(reg) & 0x1FF, int(val) & 0xFF
+        if reg == 0xBD:
+            bits = val & 0x1F
+            if bits & ~self._rhy & self._rhy_off:
+                self._gap()          # re-striking a drum it just released
+            self._rhy_off |= self._rhy & ~bits
+            self._rhy = bits
+        self.lib.OPL3_WriteReg(self._chip, reg, val)
+
+    def _raw(self, frames):
+        buf = (ctypes.c_int16 * (frames * 2))()
+        self.lib.OPL3_GenerateStream(self._chip, buf, frames)
+        return buf
+
+    def _gap(self):
+        """Run the chip briefly so a released envelope can restart. The samples
+        are not lost or added: they are owed to the next render() and taken out
+        of it, so every note still starts within 1.3 ms of its time and the
+        total length is exact."""
+        self._pend.append(bytes(self._raw(self.RETRIGGER_GAP)))
+        self._off.clear()
+        self._rhy_off = 0
 
     def render(self, frames, np):
         """Generate `frames` stereo frames, return float mono-summed array."""
         if frames <= 0:
             return np.zeros(0)
-        buf = (ctypes.c_int16 * (frames * 2))()
-        self.lib.OPL3_GenerateStream(self._chip, buf, frames)
-        a = np.frombuffer(buf, dtype="<i2").astype(np.float64) / 32768.0
+        self._off.clear()
+        self._rhy_off = 0
+        owed = b"".join(self._pend)
+        self._pend = []
+        have = len(owed) // 4
+        if have >= frames:
+            if have > frames:
+                self._pend = [owed[frames * 4:]]
+            data = owed[:frames * 4]
+        else:
+            data = owed + bytes(self._raw(frames - have))
+        a = np.frombuffer(data, dtype="<i2").astype(np.float64) / 32768.0
         return a.reshape(-1, 2).mean(axis=1)
 
     # --- higher level -------------------------------------------------------
@@ -240,12 +291,15 @@ class OPL3:
         self.write(_ch_reg(ch, 0xC0), 0x30 | ((ins.fb & 7) << 1) | (ins.con & 1))
 
     def key_on(self, ch, freq):
+        if ch in self._off:
+            self._gap()
         fnum, block = fnum_block(freq)
         self.write(_ch_reg(ch, 0xA0), fnum & 0xFF)
         self.write(_ch_reg(ch, 0xB0), 0x20 | ((block & 7) << 2) | ((fnum >> 8) & 3))
 
     def key_off(self, ch):
         self.write(_ch_reg(ch, 0xB0), 0x00)
+        self._off.add(ch)
 
     def set_four_op(self, mask):
         """Enable 4-operator mode per pair. mask bit i -> FOUR_OP_PAIRS[i]."""
@@ -351,34 +405,90 @@ def load_sbi(path):
     with open(path, "rb") as fh:
         d = fh.read()
     if d[:4] not in (b"SBI\x1a", b"2OP\x1a"):
-        raise ValueError("not an .sbi file")
+        raise ValueError("not an .sbi file (no SBI header)")
     b = d[0x24:0x24 + 11]
     if len(b) < 11:
-        raise ValueError("truncated .sbi")
+        raise ValueError(f"truncated .sbi ({len(d)} bytes; an instrument needs {0x24 + 11})")
     def unpack(o):
         av, ksltl, ardr, slrr, wv = b[o], b[o + 2], b[o + 4], b[o + 6], b[o + 8]
         return (av & 0x0F, ksltl >> 6, ksltl & 0x3F, ardr >> 4, ardr & 0x0F,
                 slrr >> 4, slrr & 0x0F, wv & 7,
                 (av >> 7) & 1, (av >> 6) & 1, (av >> 5) & 1, (av >> 4) & 1)
     fbc = b[10]
-    return Instrument(os.path.basename(path), unpack(0), unpack(1),
+    return Instrument(os.path.splitext(os.path.basename(path))[0], unpack(0), unpack(1),
                       fb=(fbc >> 1) & 7, con=fbc & 1)
 
 
 def load_bank(path):
-    """Load a bank file and return {name: Instrument}, merged over the built-ins."""
-    ext = os.path.splitext(path)[1].lower()
+    """Load --opl-bank and return {name: Instrument}, merged over the built-ins.
+
+    .sbi   one patch; it becomes the LEAD (that is almost always why you point
+           soundmon at one .sbi) and is also selectable by its file name
+    .wopl  a whole GM bank (OPL3BankEditor / libADLMIDI); it replaces DMXOPL
+           for the GM programs every part plays
+    Errors are one line: a missing, truncated or foreign file used to end in a
+    traceback.
+    """
+    p = os.path.abspath(os.path.expanduser(path))
+    ext = os.path.splitext(p)[1].lower()
+    if not os.path.exists(p):
+        sys.exit(f"--opl-bank {path}: no such file")
+    if os.path.isdir(p):
+        sys.exit(f"--opl-bank {path}: is a folder, not a bank file")
     bank = dict(INSTRUMENTS)
     if ext == ".sbi":
-        ins = load_sbi(path)
-        # A single patch replaces the lead — that is almost always why you point
-        # soundmon at one .sbi.
+        try:
+            ins = load_sbi(p)
+        except (OSError, ValueError) as e:
+            sys.exit(f"--opl-bank {path}: {e}")
         bank["lead"] = ins
+        bank[ins.name] = ins
         return bank
-    if ext in (".op2", ".wopl"):
-        sys.exit(f"{ext} bank loading is not implemented yet — use .sbi, or omit "
-                 f"--opl-bank for the built-in bank")
-    sys.exit(f"unknown bank format {ext!r} (expected .sbi)")
+    if ext == ".wopl":
+        global WOPL_BANK
+        try:
+            w = load_wopl(p)
+        except (OSError, ValueError, IndexError) as e:
+            sys.exit(f"--opl-bank {path}: {e}")
+        if not w.get("melodic") or len(w["melodic"]) < 128:
+            sys.exit(f"--opl-bank {path}: truncated WOPL bank "
+                     f"({len(w.get('melodic') or [])} of 128 melodic instruments)")
+        WOPL_BANK = w
+        return bank
+    if ext == ".op2":
+        sys.exit(f"--opl-bank {path}: .op2 bank loading is not implemented yet — use .sbi or "
+                 f".wopl, or omit --opl-bank for the built-in bank")
+    sys.exit(f"--opl-bank {path}: unknown bank format {ext or '(no extension)'!r} "
+             f"(expected .sbi or .wopl)")
+
+
+# Hand-written stand-ins for the 16 GM program families, used when NO GM bank is
+# installed (neither vendor/GENMIDI.wopl nor vendor/fmpatches.c). Without this a
+# MIDI file or the procedural parts played on unprogrammed channels: a valid,
+# normalised WAV of near-silence. The docstring's promise — music out of the box
+# with nothing to fetch — is kept by voicing each family on INSTRUMENTS.
+GM_FAMILY_VOICE = ("pluck", "mallet", "organ", "pluck", "bass", "string",
+                   "choir", "brass", "reed", "flute", "lead", "choir",
+                   "bell", "pluck", "mallet", "growl")
+
+
+def have_gm_bank():
+    return bool(load_wopl_bank() or load_gm_bank())
+
+
+def fallback_voice(prog, bank=None):
+    bank = bank or INSTRUMENTS
+    return bank.get(GM_FAMILY_VOICE[(int(prog) // 8) % 16], INSTRUMENTS["organ"])
+
+
+def program_instrument(chip, ch, ins, vel=None):
+    """A hand-written Instrument on a channel, with velocity on the CARRIER only
+    (attenuating the modulator changes timbre, not level)."""
+    chip.program(ch, ins)
+    if vel is not None:
+        add = min(24, int(round((127 - max(1, min(127, vel))) * 0.28)))
+        _m, _c = _op_pair(ch)
+        chip.write(0x40 + _c, ((ins.c[1] & 3) << 6) | min(63, (ins.c[2] & 0x3F) + add))
 
 
 def _apply_program(chip, ch, prog):
@@ -417,16 +527,7 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
 
     # Rhythm mode: the chip's own BD/SD/HH, which is what AdLib games actually
     # used for drums. Channels 6-8 become percussion and stop being melodic.
-    chip.write(0xBD, 0x20)
-    for ch, f in ((6, 90.0), (7, 240.0), (8, 640.0)):
-        fn, bl = fnum_block(f)
-        chip.write(0xA0 + ch, fn & 0xFF)
-        chip.write(0xB0 + ch, ((bl & 7) << 2) | ((fn >> 8) & 3))
-    for op in (12, 15, 16, 13, 14, 17):
-        chip.write(0x20 + op, 0x01)
-        chip.write(0x40 + op, 0x00)
-        chip.write(0x60 + op, 0xF8)
-        chip.write(0x80 + op, 0xF8)
+    _rhythm_setup(chip)
 
     # Index events by absolute 16th step so the sequencer is one pass.
     lead, arp, bass, drum = {}, {}, {}, {}
@@ -500,6 +601,48 @@ def render(a, ev, bars, spb, np, bank, voices, steps=16, gmprog=None):
     return out
 
 
+VOICE_FLAGS = (("lead", "opl_lead", "--opl-lead", "brass"),
+               ("arp", "opl_arp", "--opl-arp", "organ"),
+               ("bass", "opl_bass", "--opl-bass", "bass"))
+
+
+def pick_voices(a, bank, mname, track):
+    """{part: Instrument} for the parts that play a hand-written patch, plus a
+    label for the summary line.
+
+    Explicit choices always win: --opl-lead/--opl-arp/--opl-bass, and an .sbi
+    bank (its patch is the lead). They used to be built into a list nothing
+    read — the summary named them while the audio came from the GM bank. With no
+    GM bank installed at all, every part takes the mood's hand-written voice.
+    Otherwise parts play the mood's GM programs from the bank, as before.
+    """
+    import chip as _cm
+    mood_v = dict(zip(("lead", "arp", "bass"), voices_for(mname, track, bank)))
+    sbi = getattr(a, "opl_bank", None) and str(a.opl_bank).lower().endswith(".sbi")
+    out = {}
+    for part, attr, flag, dflt in VOICE_FLAGS:
+        chosen = getattr(a, attr, None)
+        if chosen and (_cm._flag_given(flag) or chosen != dflt):
+            out[part] = bank[chosen]
+        elif part == "lead" and sbi:
+            out[part] = bank["lead"]
+    if not have_gm_bank():
+        for part in ("lead", "arp", "bass"):
+            out.setdefault(part, mood_v[part])
+        return out, "/".join(out[p].name for p in ("lead", "arp", "bass"))
+    if not out:
+        return out, "GM " + _bank_label().split(" ")[0]
+    return out, "/".join(out[p].name if p in out else "GM" for p in ("lead", "arp", "bass"))
+
+
+def check_voice_names(a, bank):
+    """--opl-lead nonexistent used to be ignored without a word."""
+    for part, attr, flag, dflt in VOICE_FLAGS:
+        v = getattr(a, attr, None)
+        if v and v not in bank:
+            sys.exit(f"unknown {flag} {v!r}. One of: {', '.join(sorted(bank))}")
+
+
 def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     """Generate OPL3 FM music. Same contract as chip.run()."""
     try:
@@ -511,17 +654,36 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import chip as chipmod
 
+    chipmod.check_seconds(a, "--opl")
+    try:
+        chipmod.parse_key(a.key)
+    except ValueError as e:
+        sys.exit(f"--opl: {e}")
+    chipmod.note_unused_writers(a, "opl")
     bank = load_bank(a.opl_bank) if getattr(a, "opl_bank", None) else dict(INSTRUMENTS)
+    check_voice_names(a, bank)
+    OPL3(getattr(a, "opl_lib", None))          # a bad --opl-lib fails here, in one line
+    dest = chipmod.out_dir(a)
+    base = chipmod.base_name(a, slug, "opl")
+    if not have_gm_bank():
+        print("   \u2139 no GM bank in vendor/ (./download-models.sh --opl fetches DMXOPL); "
+              "using the built-in hand-written patches")
 
-    dest = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
-    if not os.path.isdir(dest):
-        if a.create_dirs or a.output_to:
-            os.makedirs(dest, exist_ok=True)
-        else:
-            sys.exit(f"output dir does not exist: {dest} (add --create-dirs)")
+    mfile = getattr(a, "from_midi", None)
+    src = getattr(a, "from_audio", None)
+    mname = chipmod.resolve_mood(a)
+    if mfile:
+        tnotes, tdrums, info = chipmod.load_midi_source(a, "--opl")
+        if any(chipmod._flag_given(f) for _, _, f, _ in VOICE_FLAGS):
+            print("   \u2139 --opl-lead/--opl-arp/--opl-bass voice composed parts; "
+                  "a MIDI file plays its own GM programs")
+        if getattr(a, "write_midi", False):
+            print("   \u2139 --write-midi writes composed music; with --from-midi you already have the MIDI")
+    elif src:
+        import transcribe
+        got = chipmod.load_audio_source(a, np, sf, "--opl")
 
-    base = a.name or slug(a.prompt or "opl")
-    n_out = max(1, a.number)
+    n_out = chipmod.takes_for(a)
     made = []
     for i in range(n_out):
         # --seed -1 means "random" in soundmon, not None. See the note in chip.py.
@@ -531,104 +693,57 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             seed = int.from_bytes(os.urandom(4), "big")
         rng = np.random.default_rng(seed)
 
-        gmprog = None
-        mfile = getattr(a, "from_midi", None)
+        loop = True
+        key_name = ""
+        track = chipmod.track_identity(a)
         if mfile:
             # MIDI: nothing is inferred. Pitches, durations, tempo and metre all
             # come from the file, so this is strictly better than --from-audio
-            # when a MIDI exists. Mood still picks the voicing.
-            import midi as midimod
-            mname = getattr(a, "mood", None)
-            if not mname or mname == "auto":
-                mname = chipmod.infer_mood(getattr(a, "prompt", "") or "")
-            # EXACT timing, no grid. See midi.to_timed_events for why.
-            timed = midimod.to_timed_events(
-                mfile, seconds=a.seconds,
-                transpose=getattr(a, "transpose", 0),
-                start_frac=getattr(a, "midi_start", 0.15))
-            if not timed:
-                sys.exit(f"--from-midi: no playable notes in {mfile}")
-            tnotes, tdrums, info = timed
-            ev, bars, spb, scale_name = None, 0, info["spb"], "minor"
-            steps = 16; meter_s = info["timesig"]
-            # Flatten (bar, step) -> absolute step, which is how render indexes.
-            load_gm_bank()
-            n_gm = len(info.get("gm_used", []))
-            print(f"   \u266a {info['title'][:38]}: {info['timesig']} "
-                  f"{info['bpm']:.0f}bpm  {info['duration']:.1f}s  "
-                  f"{info['notes']} notes  {info['drum_hits']} hits"
-                  f"  {n_gm} instr / {len(info.get('gm_drums_used', []))} perc"
-                  f" via {_bank_label()}")
-        else:
-            src = getattr(a, "from_audio", None)
-        if mfile:
-            pass
-        elif src:
-            import transcribe
-            mname = getattr(a, "mood", None)
-            if not mname or mname == "auto":
-                mname = chipmod.infer_mood(getattr(a, "prompt", "") or "")
-            got = transcribe.to_events_hi(src, np, sf, seconds=a.seconds,
-                                          beats_per_bar=4, div=4)
-            if not got:
-                sys.exit(f"--from-audio: could not analyze {src}")
-            ev, bars, spb, ana, scale_name = got
-            steps = 16; meter_s = '4/4'
-            print(f"   \u266a {os.path.basename(src)}: "
-                  f"{transcribe.NOTE_NAMES[ana['root']]} {ana['mode']}  "
-                  f"{ana['bpm']:.0f}bpm  {ana['notes']} notes  "
-                  f"{ana['drum_hits']} hits")
-        else:
-            ev, bars, spb, scale_name, _prog, mname, _mood, _plan = chipmod.compose(a, np, rng)
-            steps = _plan["_steps"]; meter_s = _plan["meter"]
-        # Voices come from the MOOD unless the caller named one explicitly.
-        # Without this, mood was inaudible on AdLib: every track was voiced
-        # brass/organ/bass and only the pitches changed.
-        track = getattr(a, "name", None) or base
-        voices = list(voices_for(mname, track, bank))
-        for i_v, (flag, dflt) in enumerate((("opl_lead", "brass"),
-                                            ("opl_arp", "organ"),
-                                            ("opl_bass", "bass"))):
-            chosen = getattr(a, flag, None)
-            if chosen and chosen != dflt and chosen in bank:
-                voices[i_v] = bank[chosen]
-        v_names = "/".join(v.name for v in voices)
-        if mfile:
-            # Event-driven, EXACT time. No grid: 91% of notes in a real file sit
-            # off a 16th boundary, and quantizing them is what made note lengths
-            # sound wrong.
+            # when a MIDI exists.
+            ev, bars, spb, scale_name = None, 0, info["spb"], "(from MIDI)"
+            steps = 16; meter_s = info["timesig"]; bpm = info["bpm"]
+            loop = False
+            if i == 0:
+                n_gm = len(info.get("gm_used", []))
+                print(f"   \u266a {info['title'][:38]}: {info['timesig']} "
+                      f"{info['bpm']:.0f}bpm  {info['duration']:.1f}s  "
+                      f"{info['notes']} notes  {info['drum_hits']} hits"
+                      f"  {n_gm} instr / {len(info.get('gm_drums_used', []))} perc"
+                      f" via {_bank_label()}")
+            voices, v_names = {}, _bank_label().split(" (")[0]
+            # EXACT time, no grid: 91% of notes in a real file sit off a 16th.
             audio = render_timed(a, tnotes, tdrums, info["duration"], np,
                                  load_wopl_bank(), with_drums=bool(tdrums))
         else:
+            if src:
+                ev, bars, spb, ana, scale_name = got
+                steps = 16; meter_s = '4/4'; bpm = ana["bpm"]
+                key_name = f"{transcribe.NOTE_NAMES[ana['root']]} {ana['mode']}"
+                if i == 0:
+                    print(f"   \u266a {os.path.basename(src)}: {key_name}  "
+                          f"{ana['bpm']:.0f}bpm  {ana['notes']} notes  "
+                          f"{ana['drum_hits']} hits")
+            else:
+                ev, bars, spb, scale_name, _prog, mname, _mood, _plan = chipmod.compose(a, np, rng)
+                steps = _plan["_steps"]; meter_s = _plan["meter"]; bpm = _plan["bpm"]
+                key_name = _plan.get("key_name", "")
+            # Voices: explicit flags/.sbi, else the mood's GM programs from the
+            # bank, else (no bank) the mood's hand-written patches. The take's
+            # identity picks among the mood's options.
+            voices, v_names = pick_voices(a, bank, mname,
+                                          chipmod.take_identity(track, np.random.default_rng(seed)))
             # PROCEDURAL through the same renderer, so it inherits the DMXOPL
             # bank, level calibration, 18-channel polyphony, the GM percussion kit
-            # and --chippy. The notes stay on their grid; only their positions are
-            # expressed in seconds.
-            import chip as _cm
-            pnotes, pdrums = _cm.events_to_timed(ev, bars, spb, steps, mname)
-            dur = bars * spb
-            audio = render_timed(a, pnotes, pdrums, dur, np, load_wopl_bank(),
-                                 with_drums=bool(pdrums))
+            # and --chippy. Exactly bars*spb long: it loops on the bar.
+            pnotes, pdrums = chipmod.events_to_timed(ev, bars, spb, steps, mname)
+            audio = render_timed(a, pnotes, pdrums, bars * spb, np, load_wopl_bank(),
+                                 with_drums=bool(pdrums), voices=voices, loop=True)
 
         # Seed in every filename — see the note in chip.py.
         name = f"{base}_s{seed}"
-        # Hardware format lock, if asked. Applied here rather than in the
-        # ComfyUI node because these engines never touch the graph.
-        out_sr = SAMPLE_RATE
-        out_bits = a.bits
-        if getattr(a, "format", "none") not in (None, "none"):
-            _mod = sys.modules.get("chip") or __import__("chip")
-            audio, out_sr = _mod.format_lock_np(audio, SAMPLE_RATE, a.format, np)
-            # Store at the format's OWN bit depth. Writing 8-bit audio into a
-            # 16-bit container wastes half the file and is a lie about the data;
-            # it also stops FLAC from compressing what is really an 8-bit signal.
-            _spec = _mod.FORMATS.get(a.format) or {}
-            _fb = int(_spec.get("bits") or 0)
-            if _fb:
-                out_bits = 8 if _fb <= 8 else (16 if _fb <= 16 else 24)
+        audio, out_sr, out_bits = chipmod.apply_format(audio, SAMPLE_RATE, a, np)
         path = os.path.join(dest, f"{name}.wav")
-        sf.write(path, audio, out_sr,
-                 subtype=f"PCM_{out_bits}" if out_bits != 8 else "PCM_U8")
+        sf.write(path, audio, out_sr, subtype=chipmod.wav_subtype(out_bits))
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
         # FLAC before OGG: it is lossless, so for format-locked audio it is the
@@ -639,7 +754,6 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         if getattr(a, "write_rad", False):
             import rad as _radw
-            import chip as _cm
             import midi as _mm
             if ev is not None:
                 # The plan's own steps-per-bar, which is not always 16 \u2014 a 6/8
@@ -649,9 +763,9 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             else:
                 # Let the source pick the line grid. RAD allows 100 patterns of 64
                 # lines, so the cap is 6400 lines rather than the MOD's 8192.
-                glines = _cm.best_grid(tnotes, spb,
-                                       cap_rows=_radw.MAX_PATTERNS * _radw.LINES)
-                gev, gbars = _cm.timed_to_grid(tnotes, tdrums, spb, glines)
+                glines = chipmod.best_grid(tnotes, spb,
+                                           cap_rows=_radw.MAX_PATTERNS * _radw.LINES)
+                gev, gbars = chipmod.timed_to_grid(tnotes, tdrums, spb, glines)
             lead_gm, arp_gm, bass_gm = _mm.MOOD_GM.get(mname,
                                                        _mm.MOOD_GM["mysterious"])
             rp = os.path.splitext(path)[0] + ".rad"
@@ -677,12 +791,16 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             except Exception as e:
                 print(f"   \u26a0 midi write failed: {e}")
         made.append(path)
-        print(f"   ✅ [{i+1}/{n_out}] {os.path.basename(path):<30} "
-              f"{len(audio)/SAMPLE_RATE:5.1f}s  {bars}bar {meter_s:<5}{mname:<11}"
-              f"{scale_name:<11}{v_names:<20}seed={seed}")
+        real_s = len(audio) / float(out_sr)
+        print(f"   \u2705 [{i+1}/{n_out}] {os.path.basename(path):<30} "
+              f"{real_s:5.1f}s  {(str(bars) + 'bar') if bars else '  -  '} {meter_s:<5}{mname:<11}"
+              f"{(key_name or scale_name):<14}{bpm:.0f}bpm  {v_names:<20}seed={seed}"
+              f"{chipmod.length_note(a, real_s) if loop else ''}")
 
-    print(f"   all done  |  {len(made)} file(s) in {dest}  ({SAMPLE_RATE} Hz, OPL3 native)")
-    print("   ↻ loops seamlessly by construction — whole bars, no crossfade needed")
+    print(f"   all done  |  {len(made)} file(s) in {dest}  ({out_sr} Hz"
+          f"{', OPL3 native' if out_sr == SAMPLE_RATE else ', format-locked'})")
+    if not mfile:
+        print("   \u21bb loops seamlessly by construction — whole bars, no crossfade needed")
     return made
 
 
@@ -740,6 +858,9 @@ def load_wopl(path):
                 "rhythm": (flags & 0x38) >> 3, "fixed_note": bool(flags & 0x40),
                 "fbc1": fbc1, "fbc2": fbc2, "ops": ops}
 
+    need = pos + (mbanks + pbanks) * 128 * ins_size
+    if len(data) < need:
+        raise ValueError(f"truncated WOPL bank ({len(data)} of {need} bytes)")
     out = {"melodic": [], "percussion": [], "version": version,
            "name": os.path.basename(path)}
     for _ in range(mbanks):
@@ -973,7 +1094,21 @@ class Allocator:
                 self.free.append(ch)
         return got
 
-    def note_on(self, pitch, prog, hz, vel=None, nid=None):
+    def note_on(self, pitch, prog, hz, vel=None, nid=None, voice=None):
+        """`voice`: a hand-written Instrument that overrides the GM program —
+        --opl-lead/--opl-arp/--opl-bass, an .sbi, or the no-bank fallback."""
+        if voice is None and not have_gm_bank():
+            voice = fallback_voice(prog)
+        if voice is not None:
+            chans = self._take(1)
+            if not chans:
+                return None
+            program_instrument(self.chip, chans[0], voice, vel)
+            self.chip.key_on(chans[0], hz)
+            self.age += 1
+            key = nid if nid is not None else ("p", pitch, self.age)
+            self.busy[key] = (self.age, pitch, chans)
+            return chans
         ins = None
         if self.wopl and 0 <= prog < len(self.wopl["melodic"]):
             ins = self.wopl["melodic"][prog]
@@ -1062,14 +1197,7 @@ def render_poly(a, poly, drums, bars, spb, np, steps, wopl, with_drums=True,
                       reserve_drums=bool(with_drums and not use_kit))
 
     if with_drums and not use_kit:
-        chip.write(0xBD, 0x20)
-        for ch, fq in ((6, 90.0), (7, 240.0), (8, 640.0)):
-            fn, bl = fnum_block(fq)
-            chip.write(_ch_reg(ch, 0xA0), fn & 0xFF)
-            chip.write(_ch_reg(ch, 0xB0), ((bl & 7) << 2) | ((fn >> 8) & 3))
-        for op in (12, 15, 16, 13, 14, 17):
-            chip.write(0x20 + op, 0x01); chip.write(0x40 + op, 0x00)
-            chip.write(0x60 + op, 0xF8); chip.write(0x80 + op, 0xF8)
+        _rhythm_setup(chip)
 
     # Every note gets a unique id. Matching note_off by PITCH was the last
     # source of holes: 47% of consecutive same-pitch pairs overlap after
@@ -1206,26 +1334,65 @@ def calibration_trim(prog):
     return _CAL[prog] if (_CAL and 0 <= prog < len(_CAL)) else 0
 
 
-def render_timed(a, notes, drums, duration, np, wopl, with_drums=True):
+def _rhythm_setup(chip):
+    """OPL rhythm mode: the chip's own BD/SD/HH on channels 6-8, which is what
+    AdLib games used for drums when they had no percussion bank."""
+    chip.write(0xBD, 0x20)
+    for ch, fq in ((6, 90.0), (7, 240.0), (8, 640.0)):
+        fn, bl = fnum_block(fq)
+        chip.write(_ch_reg(ch, 0xA0), fn & 0xFF)
+        chip.write(_ch_reg(ch, 0xB0), ((bl & 7) << 2) | ((fn >> 8) & 3))
+    # The six drum operators are REGISTER offsets 0x10-0x15 (channels 6-8's
+    # modulators, then carriers: BD mod, HH, TT, BD car, SD, CY). They were
+    # written as 12-17 decimal — 0x0C-0x11 — which programmed two channel-3/4
+    # operators and left kick, snare, tom and cymbal on reset values: only the
+    # hi-hat (0x11) ever sounded, kick and snare measured -72 dB.
+    for op in (0x10, 0x11, 0x12, 0x13, 0x14, 0x15):
+        chip.write(0x20 + op, 0x01); chip.write(0x40 + op, 0x00)
+        chip.write(0x60 + op, 0xF8); chip.write(0x80 + op, 0xF8)
+    # Both speakers on for the three drum channels. In OPL3 mode a channel with
+    # neither output bit set is silent — kick and snare were, measured -72 dB.
+    for ch in (6, 7, 8):
+        chip.write(_ch_reg(ch, 0xC0), 0x30)
+
+
+_RHY_BIT = {"k": 0x10, "s": 0x08, "h": 0x01}
+
+
+def render_timed(a, notes, drums, duration, np, wopl, with_drums=True,
+                 voices=None, loop=False):
     """Event-driven rendering at EXACT times — no grid, no quantization.
 
     render_poly() steps a fixed 16th grid, which forces every onset and length to
     the nearest step. Here the schedule is built from real note times and the chip
     is advanced only as far as the next event, so timing is sample-accurate and
     expressive gate times survive.
+
+    `voices`: {part: Instrument} for notes that carry a "role" (composed music) —
+    what --opl-lead/--opl-arp/--opl-bass and an .sbi bank choose. Parts without
+    an entry play their GM program from the installed bank; with NO bank
+    installed every note falls back to the hand-written INSTRUMENTS and the
+    drums to OPL rhythm mode, so --opl makes music without the download.
+
+    `loop`: whole bars that repeat — the file is exactly `duration` long and the
+    final release is folded onto the head (chip.fold_tail) instead of appended.
     """
     sr = SAMPLE_RATE
+    voices = voices or {}
     chip = OPL3(getattr(a, "opl_lib", None))
     use_kit = bool(with_drums and drums and wopl and wopl.get("percussion"))
-    alloc = Allocator(chip, wopl, reserve_drums=False)
+    use_rhythm = bool(with_drums and drums and not use_kit)
+    alloc = Allocator(chip, wopl, reserve_drums=use_rhythm)
+    if use_rhythm:
+        _rhythm_setup(chip)
 
     # Chip idiom, if asked: chords become fast arpeggios and leaps get slides.
     # Period-correct for AdLib too — DOS drivers arpeggiated constantly even
     # though an OPL3 can hold a chord.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import chip as _chipmod
     level = getattr(a, "chippy", "off") or "off"
     if level != "off":
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import chip as _chipmod
         notes = _chipmod.chippify(notes, level)
 
     ev = []
@@ -1235,39 +1402,70 @@ def render_timed(a, notes, drums, duration, np, wopl, with_drums=True):
     if use_kit:
         for t, gm in drums:
             ev.append((t, 2, gm))
+    elif use_rhythm:
+        for t, gm in drums:
+            ev.append((t, 3, _RHY_BIT[_chipmod.GM_DRUM_KIND.get(gm, "h")]))
+            # Release the trigger shortly after, so the next hit is a new edge.
+            ev.append((t + 0.005, -1, None))
     ev.sort(key=lambda e: (e[0], e[1]))
 
     hz = lambda p: 440.0 * (2.0 ** ((p - 69) / 12.0))
     out = []
     now = 0.0
+    done = 0                                            # samples rendered so far
+    rhy = 0
+    end_t = duration if loop else None
     for t, kind, payload in ev:
+        if end_t is not None and t >= end_t and kind in (0, 2, 3):
+            continue                                    # a loop has no notes past its end
         if t > now:
-            nsamp = int(round((t - now) * sr)) - int(round(0.0))
+            nsamp = int(round(t * sr)) - done
             if nsamp > 0:
                 out.append(chip.render(nsamp, np))
+                done += nsamp
                 now = t
         if kind == 0:
             alloc.note_on(payload["pitch"], payload["prog"],
-                          hz(payload["pitch"]), payload["vel"], payload["id"])
+                          hz(payload["pitch"]), payload["vel"], payload["id"],
+                          voice=voices.get(payload.get("role")))
         elif kind == 1:
             alloc.note_off(payload["id"])
-        else:
+        elif kind == 2:
             alloc.perc_on(payload)
-    tail = duration - now
-    if tail > 0:
-        out.append(chip.render(int(round(tail * sr)), np))
+        elif kind == 3:
+            rhy |= payload
+            chip.write(0xBD, 0x20 | rhy)
+        else:
+            rhy = 0
+            chip.write(0xBD, 0x20)
+    n_body = int(round(duration * sr))
+    if n_body > done:
+        out.append(chip.render(n_body - done, np))
+        done = n_body
     alloc.all_off()
-    # Let the final release ring out rather than truncating it.
+    chip.write(0xBD, 0x20)
+    # Let the final release ring out rather than truncating it: appended for an
+    # excerpt, folded onto the head for a loop.
     out.append(chip.render(int(0.35 * sr), np))
 
     audio = np.concatenate(out) if out else np.zeros(1)
-    import chip as _dcm
-    audio = _dcm._dc_block(audio, np, sr)
-    if level != "off":
-        import chip as _chipmod
-        cfg = _chipmod.CHIPPY.get(level, _chipmod.CHIPPY["off"])
-        audio = _chipmod._chip_verb(audio, sr, cfg["verb"], np)
-    peak = float(np.abs(audio).max())
+    if loop and n_body > 0:
+        audio = _chipmod.fold_tail(audio, n_body)
+        if level != "off":
+            cfg = _chipmod.CHIPPY.get(level, _chipmod.CHIPPY["off"])
+            audio = _chipmod._chip_verb(audio, sr, cfg["verb"], np, circular=True)
+        audio = _chipmod._dc_block(audio, np, sr, prime=audio[-min(len(audio), sr):])
+    else:
+        audio = _chipmod._dc_block(audio, np, sr)
+        if level != "off":
+            cfg = _chipmod.CHIPPY.get(level, _chipmod.CHIPPY["off"])
+            audio = _chipmod._chip_verb(audio, sr, cfg["verb"], np)
+        # An excerpt ends wherever --seconds cut it, often mid-release: land on
+        # zero instead of clicking.
+        f = min(len(audio), int(0.01 * sr))
+        if f > 1:
+            audio[-f:] *= np.linspace(1.0, 0.0, f)
+    peak = float(np.abs(audio).max()) if len(audio) else 0.0
     if peak > 1e-9:
         audio = audio * (10.0 ** (a.normalize_db / 20.0) / peak)
     return audio

@@ -91,19 +91,288 @@ def main():
           abs(float(chip._dc_block(x, np, 44100)[2048:].mean())) < 0.02,
           "a 12.5% duty pulse sits at a mean of -0.75")
 
+    # --- CPU engines: findings from the 2026-10-28 test pass ------------------
+    # Every one of these shipped a valid, normalised file that was silently wrong.
+    import opl as _opl
+    import narrate as _nar
+    import transcribe as _tr
+    from types import SimpleNamespace as _NS
+
+    def _ca(**k):
+        d = dict(mood="mysterious", prompt="a crypt", name=None, output_to="/tmp/packA",
+                 key="C minor", chip_scale=None, bpm=120, seconds=8.0, chip_arp=0,
+                 chippy="off", normalize_db=-1.0, opl_lib=None)
+        d.update(k)
+        return _NS(**d)
+
+    def _plan(_cfg, seed):
+        ev, bars, spb, sc, _p, mname, md, plan = chip.compose(_cfg, np, np.random.default_rng(seed))
+        return ev, bars, spb, sc, mname, md, plan
+
+    # The prompt and the seed feed identity: with no --name every prompt composed
+    # one piece, and -n 4 wrote four byte-identical files.
+    e1 = _plan(_ca(prompt="a crypt"), 1)[0]
+    e2 = _plan(_ca(prompt="the old tomb"), 1)[0]
+    e3 = _plan(_ca(prompt="a crypt"), 2)[0]
+    e1b = _plan(_ca(prompt="a crypt"), 1)[0]
+    check("--chip: prompt and seed change the music, same inputs repeat it",
+          e1["lead"] != e2["lead"] and e1["lead"] != e3["lead"] and e1 == e1b,
+          "prompt A/B, seed 1/2, and a repeat of A+1")
+
+    # Whole bars, exactly: the release tail is folded onto the head, so the loop
+    # lands on the bar (a 0.35-0.4 s tail made every loop late).
+    lens = []
+    for mood in ("heroic", "ominous", "playful"):
+        _cfg = _ca(mood=mood, chippy="max")
+        ev, bars, spb, sc, mname, md, plan = _plan(_cfg, 3)
+        pn, pd = chip.events_to_timed(ev, bars, spb, plan["_steps"], mname)
+        y1 = chip.render_timed(_cfg, pn, pd, bars * spb, np, md, loop=True)
+        y2 = _opl.render_timed(_cfg, pn, pd, bars * spb, np, _opl.load_wopl_bank(),
+                               with_drums=bool(pd), loop=True)
+        lens.append((len(y1) - int(round(bars * spb * chip.SAMPLE_RATE)),
+                     len(y2) - int(round(bars * spb * _opl.SAMPLE_RATE))))
+    check("--chip/--opl files are exactly whole bars", all(l == (0, 0) for l in lens),
+          f"samples over bars*spb (chip, opl): {lens}")
+
+    # 2A03 voice limit: two pulses, one triangle. The composed bass reaches B3 and
+    # used to land on a pulse (three pulses at once); arps ran over the bar line.
+    worst, duty_ok = 0, True
+    for mood in chip.MOODS:
+        ev, bars, spb, sc, mname, md, plan = _plan(_ca(mood=mood, seconds=10), 1)
+        pn, _pd = chip.events_to_timed(ev, bars, spb, plan["_steps"], mname)
+        def _poly(ns):
+            ts = sorted([(n["t"], 1) for n in ns] + [(n["t"] + n["dur"] - 1e-9, -1) for n in ns])
+            c = m = 0
+            for _t, dd in ts:
+                c += dd
+                m = max(m, c)
+            return m
+        worst = max(worst, _poly([n for n in pn if n.get("role") != "bass"]))
+        duty_ok &= all(n.get("duty") == chip.DUTIES[md["duty"]] for n in pn if n.get("role") == "lead")
+    check("--chip keeps the 2A03 limit (<= 2 pulses) and plays the mood's duty",
+          worst <= 2 and duty_ok, f"max pulses at once {worst}, lead duty from mood: {duty_ok}")
+
+    # --key "E major" used to come out minor/dorian.
+    sc = _plan(_ca(key="E major", mood="ominous"), 1)[3]
+    check("--key names the scale", sc == "major", f"--key 'E major' -> {sc}")
+
+    # Short --seconds: the floor was 8 bars (0.5 s -> 19 s).
+    _ev, bars, spb, *_r = _plan(_ca(seconds=0.5), 1)
+    check("--chip --seconds 0.5 makes 1-2 bars", bars <= 2, f"{bars} bars, {bars * spb:.1f}s")
+
+    # DC blocking must not depend on scipy: the fallback subtracted the mean,
+    # which CREATES a step at both ends of the file.
+    x = np.random.default_rng(5).standard_normal(5000) + 0.3
+    aa = float(np.exp(-2 * np.pi * 12.0 / 44100))
+    ref, xp, yp = np.empty(5000), 0.0, 0.0
+    for i in range(5000):
+        yp = x[i] - xp + aa * yp
+        xp = x[i]
+        ref[i] = yp
+    check("_dc_block is the one-pole high-pass, without scipy",
+          float(np.abs(chip._dc_block(x, np, 44100) - ref).max()) < 1e-9, "vs a per-sample loop")
+
+    # No GM bank installed: --opl used to render unprogrammed channels (raw peak
+    # 1 LSB, normalised up to a full-scale hiss). Simulate a bare vendor/.
+    _w, _g = _opl.WOPL_BANK, _opl.GM_BANK
+    _opl.WOPL_BANK, _opl.GM_BANK = {}, []
+    try:
+        ch = _opl.OPL3()
+        _opl.Allocator(ch, None).note_on(60, 0, 261.6, 100, 1)
+        lvl = 20 * np.log10(np.abs(ch.render(20000, np)).max() + 1e-12)
+        dr = _opl.render_timed(_NS(opl_lib=None, chippy="off", normalize_db=0.0), [],
+                               [(i * 0.25, (36, 38, 42)[i % 3]) for i in range(6)],
+                               1.5, np, None, with_drums=True, loop=True)
+        hits = [20 * np.log10(np.sqrt(np.mean(dr[int(i * 0.25 * 49716):int(i * 0.25 * 49716) + 2400] ** 2)) + 1e-12)
+                for i in range(6)]
+    finally:
+        _opl.WOPL_BANK, _opl.GM_BANK = _w, _g
+    check("--opl without a GM bank plays the built-in patches and drums",
+          lvl > -40 and min(hits) > -30, f"one note {lvl:.1f} dBFS raw, kick/snare/hat hits {[round(h) for h in hits]} dB")
+
+    # --opl-lead/arp/bass must reach the audio (they only reached the summary).
+    _cfg = _ca(mood="heroic")
+    ev, bars, spb, sc, mname, md, plan = _plan(_cfg, 1)
+    pn, pd = chip.events_to_timed(ev, bars, spb, plan["_steps"], mname)
+    va = _opl.render_timed(_cfg, pn, pd, bars * spb, np, _opl.load_wopl_bank(), voices={"lead": _opl.INSTRUMENTS["bell"]}, loop=True)
+    vb = _opl.render_timed(_cfg, pn, pd, bars * spb, np, _opl.load_wopl_bank(), voices={"lead": _opl.INSTRUMENTS["flute"]}, loop=True)
+    check("--opl-lead changes the audio", not np.allclose(va, vb), "bell vs flute lead")
+
+    # An OPL envelope only restarts from its release phase: key-off then key-on
+    # with no samples between played the first note of --oplfx coin and nothing else.
+    import chipfx as _fx
+    y = _fx.render_opl("coin", 44100, 44100, np.random.default_rng(3), np, _opl)
+    db = lambda s: 20 * np.log10(np.sqrt(np.mean(s ** 2)) + 1e-12)     # noqa: E731
+    jump = db(y[22050 + 64:22050 + 64 + 882]) - db(y[22050 - 882:22050])
+    check("--oplfx retriggers each note of a sequence", jump > 6, f"second coin note attack {jump:+.1f} dB")
+
+    # File names: --name and manifest keys never leave --output-to.
+    with tempfile.TemporaryDirectory() as td:
+        mf = os.path.join(td, "m.txt")
+        with open(mf, "w") as fh:
+            fh.write("[Group]\n../escape | hello\n.hidden | there\nsub/dir | x\n")
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            keys = [k for k, _ in _nar.parse_lines(mf)]
+        with open(mf, "w") as fh:
+            fh.write("ok | one\nok | two\n")
+        try:
+            _nar.parse_lines(mf)
+            dup = False
+        except SystemExit:
+            dup = True
+    check("manifest keys are safe file names; [Group] skipped; clashing keys refused",
+          keys == ["escape", "hidden", "sub_dir"] and dup, f"keys {keys}, duplicate refused: {dup}")
+
+    # --from-audio / --ref: non-music returns None instead of an invented tempo and
+    # key, and a real loop reads at its true tempo (was 115 for 120, 88 for 174)
+    # and its own key (minor loops read as their relative major).
+    with tempfile.TemporaryDirectory() as td:
+        sr = 22050
+        def _loop(bpm, root, minor=True, bars=8):
+            beat, n = 60.0 / bpm, int(bars * 4 * 60.0 / bpm * sr)
+            x = np.zeros(n)
+            sc = [0, 2, 3, 5, 7, 8, 10] if minor else [0, 2, 4, 5, 7, 9, 11]
+            prog = [0, 5, 2, 6] if minor else [0, 4, 5, 3]
+            f = lambda m: 440 * 2 ** ((m - 69) / 12)                      # noqa: E731
+            rr = np.random.default_rng(bpm)
+            for b in range(bars * 4):
+                s, L = int(b * beat * sr), int(beat * sr)
+                tt = np.arange(min(L, n - s)) / sr
+                d = prog[(b // 4) % 4]
+                for k in (0, 2, 4):
+                    m = root + 60 + sc[(d + k) % 7] + 12 * ((d + k) // 7)
+                    x[s:s + len(tt)] += 0.08 * np.sin(2 * np.pi * f(m) * tt) * np.exp(-tt * 1.5)
+                x[s:s + len(tt)] += 0.25 * np.sin(2 * np.pi * f(root + 36 + sc[d]) * tt) * np.exp(-tt * 4)
+                x[s:s + len(tt)] += (0.6 * np.sin(2 * np.pi * 55 * tt * np.exp(-tt * 8)) * np.exp(-tt * 18)
+                                     if b % 2 == 0 else 0.3 * rr.standard_normal(len(tt)) * np.exp(-tt * 25))
+                for h in (0, L // 2):
+                    hl = min(1000, n - s - h)
+                    if hl > 0:
+                        x[s + h:s + h + hl] += 0.05 * np.diff(np.concatenate([[0], rr.standard_normal(hl)])) \
+                            * np.exp(-np.arange(hl) / sr * 60)
+            return 0.9 * x / np.abs(x).max()
+        cases = []
+        for bpm, root, minor in ((120, 0, False), (174, 4, True), (60, 9, True)):
+            p = os.path.join(td, f"m{bpm}.wav")
+            sf.write(p, _loop(bpm, root, minor), sr)
+            r = _tr.analyze(p, np, sf)
+            cases.append(bool(r) and abs(r["bpm"] - bpm) < 1.5 and r["root"] == root
+                         and r["mode"] == ("minor" if minor else "major"))
+        nonmusic = []
+        for nm, x in (("silence", np.zeros(sr * 6)),
+                      ("noise", 0.3 * np.random.default_rng(1).standard_normal(sr * 6))):
+            p = os.path.join(td, nm + ".wav")
+            sf.write(p, x, sr)
+            nonmusic.append(_tr.analyze(p, np, sf) is None)
+    check("transcribe reads tempo and key, and refuses non-music",
+          all(cases) and all(nonmusic),
+          f"120 C maj / 174 E min / 60 A min correct: {cases}; silence, noise -> None: {nonmusic}")
+
+    # --blip honours --format (gameboy still wrote 24 kHz PCM_16), and a line
+    # with no letters fails instead of writing silence as a success.
+    with tempfile.TemporaryDirectory() as td:
+        r = subprocess.run([PY, SM, "Hello there", "--blip", "--format", "gameboy", "--no-open",
+                            "--output-to", td], capture_output=True, text=True)
+        made = [f for f in os.listdir(td) if f.endswith(".wav")]
+        info = sf.info(os.path.join(td, made[0])) if made else None
+        r2 = subprocess.run([PY, SM, "!!! ... ???", "--blip", "--no-open", "--output-to",
+                             os.path.join(td, "s")], capture_output=True, text=True)
+    check("--blip applies --format; a silent line exits non-zero",
+          info is not None and info.samplerate == 8192 and info.subtype == "PCM_U8" and r2.returncode != 0,
+          f"{info.samplerate if info else '-'} Hz {info.subtype if info else '-'}; silent line exit {r2.returncode}")
+
     # A ComfyUI job that raises gets status "error" and NO outputs. Waiting for
     # outputs alone sat out the full 30-minute timeout on every dead job.
     sys.path.insert(0, HERE)
     import soundmon as _smj
-    err = {"outputs": {}, "status": {"status_str": "error", "completed": False,
-           "messages": [["execution_error", {"node_type": "CLIPLoader",
-                                             "exception_message": "missing model"}]]}}
-    running = {"outputs": {}, "status": {"status_str": "success", "completed": False}}
-    empty = {"outputs": {}, "status": {"status_str": "success", "completed": True}}
-    check("a failed ComfyUI job is seen as failed, not still running",
-          bool(_smj._job_error(err)) and "CLIPLoader" in _smj._job_error(err)
-          and _smj._job_error(running) is None and bool(_smj._job_error(empty)),
-          f"error -> {_smj._job_error(err)!r}")
+    def entry(status, outputs=None, msgs=()):
+        return {"outputs": outputs or {}, "status": dict(status, messages=list(msgs))}
+
+    def xerr(node, msg, etype=""):
+        return entry({"status_str": "error", "completed": False},
+                     msgs=[["execution_error", {"node_type": node, "exception_message": msg, "exception_type": etype}]])
+    saved = {"12": {"audio": [{"filename": "x_00001_.wav", "subfolder": "soundmon", "type": "output"}]}}
+    cases = {
+        "error": xerr("CLIPLoader", "missing model"),
+        "pending": entry({"status_str": "success", "completed": False}),
+        "ok": entry({"status_str": "success", "completed": True}, saved),
+        # an identical re-run ComfyUI answers from its cache: success, nothing saved. NOT a failure
+        "cached": entry({"status_str": "success", "completed": True}),
+        "poisoned": xerr("KSampler", "'NoneType' object has no attribute 'model_size'", "AttributeError"),
+        "transient": xerr("CheckpointLoaderSimple", "list index out of range", "IndexError"),
+    }
+    got = {want: _smj.classify(e)[0] for want, e in cases.items()}
+    got["transient(oom)"] = _smj.classify(xerr("KSampler", "CUDA out of memory. Tried to allocate"))[0]
+    got["pending(None)"] = _smj.classify(None)[0]
+    check("the job classifier: failed, cached-empty, poisoned, transient, pending, done",
+          all(k.split("(")[0] == v for k, v in got.items())
+          and "CLIPLoader" in _smj._job_error(cases["error"]) and _smj._job_error(cases["cached"]) is None,
+          f"{got}")
+    fg = {"12": {"class_type": "SaveSFX", "inputs": {"filename_prefix": "soundmon/door_s7", "bit_depth": "16"}},
+          "3": {"class_type": "KSampler", "inputs": {"seed": 7}}}
+    fc = _smj.fresh_copy(fg)
+    pre = fc["12"]["inputs"]["filename_prefix"]
+    check("fresh_copy re-saves under a new folder, same file name, nothing else changed",
+          pre.startswith("soundmon/rerun-") and pre.endswith("/door_s7") and fc["3"] == fg["3"]
+          and fg["12"]["inputs"]["filename_prefix"] == "soundmon/door_s7", pre)
+
+    # Target resolution: --server > $SOUNDMON_SERVER > servers.json "_default" > the `local` alias,
+    # and the `local` alias is repointable (not a literal 127.0.0.1).
+    pt = _smj.pick_target
+    old_servers = dict(_smj.SERVERS)
+    _smj.SERVERS.update(local="http://10.0.0.9:8188", rtx="http://192.168.1.77:8188")
+    order = [pt("a", "b", "c"), pt(None, "b", "c"), pt("", "", "c"), pt(None, "", "")]
+    res = [_smj.resolve_server(x) for x in ("rtx", "local", "box:9000", "http://h:7/")]
+    _smj.SERVERS.clear()
+    _smj.SERVERS.update(old_servers)
+    check("server choice: --server > $SOUNDMON_SERVER > _default > local; aliases resolve",
+          order == ["a", "b", "c", ""] and res == ["http://192.168.1.77:8188", "http://10.0.0.9:8188",
+                                                   "http://box:9000", "http://h:7"], f"{order} {res}")
+    check("given() tells a typed default from no flag at all",
+          _smj.given("--seconds", argv=["x", "--seconds", "10"]) and _smj.given("--lufs", argv=["--lufs=-23"])
+          and _smj.given("-n", argv=["-n5"]) and not _smj.given("--seconds", argv=["x", "--seconds-x"])
+          and not _smj.given("--seconds", argv=["x"]), "")
+
+    # --help must mention every flag (28 were missing once).
+    import contextlib
+    import io
+    import re as _re
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _smj.print_help()
+    hidden = [o for act in _smj.build_parser()._actions for o in act.option_strings
+              if not _re.search(_re.escape(o) + r"(?![\w-])", buf.getvalue())]
+    check("--help mentions every flag", not hidden, f"missing: {hidden}")
+
+    # The wrapper must never start ComfyUI for a command that doesn't render on it: every --list-*,
+    # --version, --dry-run and the CPU engines (it matches --flag and --flag=VALUE alike).
+    import re as _re2
+    wrap = open(os.path.join(HERE, "bin", "soundmon"), encoding="utf-8").read()
+    block = wrap[wrap.index("needs_server=1"):wrap.index("needs_server=0 ;;")]
+    skip = set(_re2.findall(r"--[a-z][a-z0-9-]*|-h\b", block))
+    want = {o for act in _smj.build_parser()._actions for o in act.option_strings if o.startswith("--list-")}
+    want |= {"--version", "--dry-run", "--help", "--chip", "--opl", "--chipfx", "--oplfx", "--blip", "--blip-file",
+             "--narrate", "--narrate-file", "--record", "--record-file", "--master", "--index", "--similar",
+             "--from-midi", "--from-audio"}
+    check("bin/soundmon never starts ComfyUI for listings, --version, --dry-run or a CPU engine",
+          want <= skip and '"${arg%%=*}"' in wrap, f"missing from its skip-list: {sorted(want - skip)}")
+
+    # --batch-file rows: key | prompt, key | seconds | prompt, plain lines, commas inside prompts.
+    with tempfile.TemporaryDirectory() as bt:
+        mf = os.path.join(bt, "m.txt")
+        with open(mf, "w") as f:
+            f.write("# pack\ndoor_open | a heavy door, creaking open\nboom | 3.5 | an explosion, far away\n"
+                    "glass breaking\n../evil | x\n")
+        rows = _smj.parse_batch_file(mf)
+    check("--batch-file parses keys, per-row seconds and comma prompts; keys can't escape",
+          rows == [("door_open", None, "a heavy door, creaking open"), ("boom", 3.5, "an explosion, far away"),
+                   ("glass_breaking", None, "glass breaking"), ("evil", None, "x")], f"{rows}")
+    # one rule with manifest keys (narrate.safe_key): separators become "_", they're never followed
+    check("--name can't leave --output-to", _smj.safe_name("../../etc/x") == "etc_x"
+          and "/" not in _smj.safe_name("a/b/c") and len(_smj.safe_name("y" * 300)) <= 80,
+          _smj.safe_name("../../etc/x"))
 
     # --ref: both AI graphs must start from the encoded reference instead of silence:
     # node "9" (the empty latent) gone, LoadAudio -> VAEEncodeAudio (the checkpoint's own
@@ -128,6 +397,17 @@ def main():
                    and "_ref_" in g["12"]["inputs"]["filename_prefix"])
     check("--ref wires LoadAudio -> VAEEncodeAudio -> KSampler at --ref-strength (SFX + song)",
           all(okg), f"sfx/song ok: {okg}")
+
+    # Everything after the server works on a WAV: the graph always ends in SaveSFX, whatever the
+    # output format (a server-side FLAC/MP3 got WAV data written back under its name).
+    ga.song = False
+    saves = []
+    for fl in ("flac", "mp3", "opus"):
+        setattr(ga, fl, True)
+        saves.append(_smj.build_graph(ga, 1)["12"]["class_type"])
+        setattr(ga, fl, False)
+    check("the server always saves WAV (SaveSFX); --flac/--mp3/--opus are encoded last, client-side",
+          saves == ["SaveSFX"] * 3, f"{saves}")
 
     # Mastering must calm a bright sound without ever pushing it past -1 dBTP:
     # the chain has no limiter on purpose, so the gain step is the only guard.
@@ -196,6 +476,65 @@ def main():
                 ranks.append(all(n.startswith(kind) for n in top))
             check("--similar ranks a sound's own kind first", all(ranks),
                   f"zap/thud/pad top-2 own kind: {ranks}")
+
+            # match_tone is sample-exact: firequalizer's 10 ms linear-phase delay (and its 10 ms
+            # tail) are trimmed, so a click stays on its sample and a --loop stays seamless. In
+            # place, twice: it used to grow 20 ms a run. And it keeps the source's sample format.
+            n_ = 44100
+            xc = 0.05 * np.sin(2 * np.pi * 300 * np.arange(n_) / 44100)
+            xc[5000] = 0.8
+            clk = os.path.join(mt, "click.wav")
+            sf.write(clk, xc, 44100, subtype="PCM_24")
+            _ms.match_tone(clk, clk, dark)
+            _ms.match_tone(clk, clk, dark)
+            y_, _ = sf.read(clk)
+            check("--match-tone keeps length, alignment and format (twice in place)",
+                  len(y_) == n_ and abs(int(np.argmax(np.abs(y_))) - 5000) <= 1 and sf.info(clk).subtype == "PCM_24",
+                  f"{len(y_) - n_:+d} samples, click at {int(np.argmax(np.abs(y_))) - 5000:+d}, {sf.info(clk).subtype}")
+
+            # --master never writes onto a source, and same-name sources don't collide.
+            import argparse as _ap
+            src_d = os.path.join(mt, "src")
+            os.makedirs(os.path.join(src_d, "sub"))
+            sf.write(os.path.join(src_d, "x.wav"), x * 0.5, 44100)
+            sf.write(os.path.join(src_d, "sub", "x.wav"), xc, 44100)
+            sf.write(os.path.join(src_d, "hit.wav"), xc, 44100)
+            sf.write(os.path.join(src_d, "hit.flac"), x * 0.5, 44100)
+            keep = open(os.path.join(src_d, "sub", "x.wav"), "rb").read()
+            ma = _ap.Namespace(master=src_d, master_like=None, master_kind="auto", output_to=os.path.join(src_d, "sub"),
+                               flac=False, ogg=False, keep_wav=False, ogg_quality=5)
+            refused = False
+            try:
+                _ms.run(ma, "x")
+            except SystemExit:
+                refused = True
+            ma.output_to = None
+            plan = sorted(os.path.relpath(d, src_d) for _, _, d in _ms._plan(list(_ms._walk(src_d)), src_d,
+                                                                               os.path.join(src_d, "mastered")))
+            check("--master never overwrites a source; hit.wav + hit.flac don't collide",
+                  refused and open(os.path.join(src_d, "sub", "x.wav"), "rb").read() == keep
+                  and len(set(plan)) == len(plan) == 4 and "mastered/hit.flac.wav" in plan,
+                  f"output inside the source refused: {refused}; planned {plan}")
+
+            # analyse() on silence (the GUI measures whatever is dropped on it) returns sanely.
+            sil = os.path.join(mt, "silence.wav")
+            sf.write(sil, np.zeros(4410), 44100)
+            a_ = _ms.analyse(sil, sonogram=True)
+            check("analyse() on silence: flagged, finite, no traceback",
+                  a_.get("silent") and all(np.isfinite(a_["bands"])) and np.isfinite(a_["tilt"])
+                  and a_["sonogram"]["cols"] >= 1 and _ms.chain(a_)[0] == ["anull"],
+                  f"silent={a_.get('silent')} tilt={a_['tilt']} lufs={a_['lufs']}")
+
+            # similar.py's fingerprint doesn't depend on volume (near-silent mel bands used to count).
+            z0 = os.path.join(lib, "zap0.wav")
+            zq = os.path.join(mt, "zap_quiet.wav")
+            zz, _ = sf.read(z0)
+            sf.write(zq, zz * 0.25, 44100)
+            dv = float(np.abs(np.array(_sim.features(z0)) - np.array(_sim.features(zq))).max())
+            top = ix.search(zq, k=1)
+            check("--similar: fingerprint volume-invariant, a -12 dB copy reads as near-identical",
+                  dv < 0.1 and top and os.path.basename(top[0]["path"]) == "zap0.wav" and top[0]["score"] >= 90,
+                  f"max feature change {dv:.3f}; top {top[0]['score'] if top else None}%")
 
     # --- tracker output -----------------------------------------------------
     # These four were ALL shipped broken and all were invisible to inspection:
@@ -331,13 +670,30 @@ def main():
         # THE ONE THAT KEEPS BREAKING: the loudness ceiling must not apply to
         # music, and the override must be set ABOVE the engine hand-offs, which
         # return early (AGENTS.md gotcha 10).
-        p, err = _render(tmp, "--chip", "--bpm", "120")
+        p, err = _render(tmp, "--chip", "--bpm", "120", "--seed", "7")
         if check("--chip renders", p, err):
             au, sr = sf.read(p, always_2d=True)
             m = au[:, 0]
-            peak = 20 * np.log10(max(abs(m).max(), 1e-9))
-            check("--chip is NOT held down by the LUFS ceiling", peak > -2.0,
-                  f"peak {peak:.2f} dBFS (a -16 LUFS ceiling lands near -3)")
+            import master as _msl
+            # What the engine is HANDED, captured in-process — decisive whatever the piece's own
+            # loudness: no -16 LUFS ceiling on music (+inf = none; the override must sit ABOVE the
+            # hand-off), and a real render still under the -1 dBTP ceiling ("no LUFS ceiling" once
+            # meant no true-peak ceiling either: chip moods shipped at +0.8 dBTP).
+            seen = {}
+            real_run, argv0 = chip.run, sys.argv
+            chip.run = lambda a, *x, **k: seen.update(lufs=a.lufs_target, tp=a.true_peak) or []
+            try:
+                for extra, key in (((), "default"), (("--lufs=-20",), "asked")):
+                    sys.argv = ["soundmon", "x", "--chip", "--no-open", "--no-recipe", *extra]
+                    _smj.main()
+                    seen[key] = seen.pop("lufs")
+            finally:
+                chip.run, sys.argv = real_run, argv0
+            tp = _msl.loudness(p)[1]
+            check("--chip is NOT held down by the LUFS ceiling, but stays <= -1 dBTP",
+                  seen.get("default") == float("inf") and seen.get("asked") == -20.0 and tp <= -0.95,
+                  f"LUFS ceiling handed to the engine: {seen.get('default')} (asked: {seen.get('asked')}), "
+                  f"true peak {tp:.2f} dBTP")
             check("--chip output carries no DC", abs(float(m.mean())) < 0.02,
                   f"dc {float(m.mean()):+.4f}")
 
@@ -415,6 +771,62 @@ def main():
                 check("FLAC is bit-identical to its WAV", same,
                       f"{len(x1)} vs {len(x2)} frames, "
                       f"max diff {float(np.abs(x1[:min(len(x1),len(x2)),0] - x2[:min(len(x1),len(x2)),0]).max()):.2e}")
+
+    import shutil as _sh2
+    if _sh2.which("ffmpeg"):
+        import master as _mq
+        with tempfile.TemporaryDirectory() as tt:
+            # Short files keep the TRUE-PEAK ceiling. Below 0.4 s the LUFS integration is skipped, and
+            # that skip used to skip the -1 dBTP cap too: a 0.3 s square peak-normalized to -1 dBFS
+            # (a chipfx blip) shipped at +1.1 dBTP.
+            sr = 44100
+            t = np.arange(int(sr * 0.3)) / sr
+            sq = os.path.join(tt, "sq.wav")
+            sf.write(sq, np.sign(np.sin(2 * np.pi * 440 * t)) * 10 ** (-1 / 20), sr, subtype="PCM_16")
+            before = _mq.loudness(sq)[1]
+            _smj.loudness_normalize(sq, float("inf"), -1.0)
+            after = _mq.loudness(sq)[1]
+            check("a 0.3 s full-scale square is pulled under -1 dBTP (no LUFS, true peak still capped)",
+                  after <= -0.95, f"{before:+.1f} -> {after:+.1f} dBTP")
+
+            # The recipe rides in the file and changes no sample: WAV gets a LIST/INFO chunk (8- and
+            # 24-bit headers untouched), FLAC/OGG a comment tag.
+            rec = {"tool": "soundmon", "prompt": "a door, creaking — slowly", "seed": 7, "command": "soundmon x"}
+            okr, why = True, []
+            for sub, ext in (("PCM_U8", "wav"), ("PCM_24", "wav"), ("PCM_16", "flac")):
+                f = os.path.join(tt, f"r_{sub}.{ext}")
+                sf.write(f, 0.5 * np.sin(2 * np.pi * 220 * t), sr, subtype=sub)
+                raw0, info0 = sf.read(f, dtype="int32")[0], sf.info(f)
+                hdr0 = open(f, "rb").read(44)
+                _smj.tag_file(f, rec)
+                raw1, info1 = sf.read(f, dtype="int32")[0], sf.info(f)
+                back = _smj.read_recipe(f) or {}
+                same = (np.array_equal(raw0, raw1) and info0.subtype == info1.subtype
+                        and (ext != "wav" or open(f, "rb").read(36)[8:36] == hdr0[8:36]))
+                okr &= same and back.get("prompt") == rec["prompt"] and back.get("seed") == 7
+                why.append(f"{sub}:{'same' if same else 'CHANGED'}/{'tag' if back else 'no tag'}")
+            ogg = _smj.to_ogg(os.path.join(tt, "r_PCM_16.flac"), 5, keep=True)
+            _smj.tag_file(ogg, rec)
+            okr &= (_smj.read_recipe(ogg) or {}).get("seed") == 7
+            check("the recipe is embedded (WAV 8/24-bit, FLAC, OGG) without touching the audio", okr,
+                  " ".join(why))
+
+            # OGG: never silent at a low quality (the native encoder writes silence at -q:a 0), and a
+            # mono file keeps its level (the -ac 2 upmix cost 3 dB).
+            mono = os.path.join(tt, "mono.wav")
+            t2 = np.arange(sr * 2) / sr
+            sf.write(mono, 0.5 * np.sign(np.sin(2 * np.pi * 330 * t2)), sr, subtype="PCM_16")
+
+            def mean_db(path):
+                import re
+                r = subprocess.run(["ffmpeg", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+                                   capture_output=True, text=True).stderr
+                m = re.findall(r"mean_volume:\s*(-?[\d.]+)", r)
+                return float(m[-1]) if m else -99.0
+            w = mean_db(mono)
+            o = mean_db(_smj.to_ogg(mono, 0, keep=True))
+            check("--ogg-quality 0 isn't silent, and mono OGG keeps the WAV's level", abs(o - w) < 1.0,
+                  f"WAV {w:.1f} dB, OGG q0 {o:.1f} dB")
 
     width = max(len(n) for n, _, _ in RESULTS)
     bad = 0

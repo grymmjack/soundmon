@@ -42,6 +42,10 @@ PAUSES = {".": 4.0, "!": 4.0, "?": 4.0, "…": 5.0,
 
 VOWELS = set("aeiouyAEIOUY")
 
+BLIP_MIN_HZ = 40.0           # below this a 50 ms blip is a click
+BLIP_MAX_FRAC = 0.45         # of the sample rate: stay under Nyquist (0.5)
+PITCH_RANGE = 36.0           # --blip-pitch, semitones either way of A4
+
 
 def _char_semitones(ch, jitter):
     """Pitch offset for one character, in semitones.
@@ -114,6 +118,10 @@ def _synth_line(text, a, np):
             pieces.append(np.zeros(int(sr * slot)))
             continue
         hz = base_hz * (2.0 ** (_char_semitones(ch, a.blip_jitter) / 12.0))
+        # Keep every blip audible and representable: --blip-pitch/--blip-jitter
+        # at their extremes reached past Nyquist (it folds back as a wrong, lower
+        # note) or down to a few Hz (a click, not a blip).
+        hz = min(max(hz, BLIP_MIN_HZ), BLIP_MAX_FRAC * sr)
         b = _blip(hz, dur, sr, a.blip_wave, np, seed=ord(ch))
         pad = int(sr * slot) - len(b)
         pieces.append(np.concatenate([b, np.zeros(pad)]) if pad > 0 else b[:int(sr * slot)])
@@ -146,18 +154,27 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
 
     if a.blip_wave not in WAVES:
         sys.exit(f"unknown --blip-wave {a.blip_wave!r}. Choose from: {', '.join(WAVES)}")
+    import math
+    for flag, v, lo, hi in (("--blip-pitch", a.blip_pitch, -PITCH_RANGE, PITCH_RANGE),
+                            ("--blip-rate", a.blip_rate, 1.0, 60.0),
+                            ("--blip-duty", a.blip_duty, 0.05, 1.0),
+                            ("--blip-jitter", a.blip_jitter, 0.0, 24.0)):
+        if v is None or not math.isfinite(float(v)) or not lo <= float(v) <= hi:
+            sys.exit(f"--blip: {flag} must be {lo:g}..{hi:g}, got {v}")
 
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import chip as _cm
     src = getattr(a, "blip_file", None) or a.narrate_file
-    items = narrate.parse_lines(src) if src else [(a.name or slug(a.prompt), a.prompt)]
+    if src:
+        items = narrate.parse_lines(src)   # keys made safe, duplicates refused, [Groups] skipped
+    else:
+        if not (a.prompt or "").strip():
+            sys.exit("--blip: nothing to say — give a line of text or --blip-file FILE")
+        items = [(_cm.base_name(a, slug, "blip"), a.prompt)]
     if not items:
         sys.exit(f"--blip: nothing to read in {src}")
 
-    dest = os.path.abspath(os.path.expanduser(a.output_to)) if a.output_to else os.getcwd()
-    if not os.path.isdir(dest):
-        if a.create_dirs or a.output_to:
-            os.makedirs(dest, exist_ok=True)
-        else:
-            sys.exit(f"output dir does not exist: {dest} (add --create-dirs)")
+    dest = _cm.out_dir(a)
 
     pipeline = None
     if a.blip_style == "voice":
@@ -175,21 +192,31 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         print(f"\U0001f7e2 blip/synth  {a.blip_wave}  |  {len(items)} line(s)  |  "
               f"{a.blip_rate:g} ch/s  |  pitch {a.blip_pitch:+g} st  |  no model")
 
-    made = []
+    made, silent = [], []
     for i, (key, text) in enumerate(items, 1):
         audio = (_voice_line(text, a, np, pipeline) if a.blip_style == "voice"
                  else _synth_line(text, a, np))
         if audio is None or not len(audio):
-            print(f"   ⚠ [{i}/{len(items)}] {key}: nothing generated, skipped")
+            print(f"   \u26a0 [{i}/{len(items)}] {key}: nothing generated, skipped")
+            silent.append(key)
             continue
 
         peak = float(np.abs(audio).max())
-        if peak > 1e-6:                      # same -1 dBFS target as every other engine
-            audio = audio * ((10.0 ** (a.normalize_db / 20.0)) / peak)
+        if peak <= 1e-6:
+            # Only punctuation, spaces or symbols ("!!! ... ???", emoji): there
+            # is no letter to blip, so the "line" is pure silence. Writing it as
+            # a ✅ success made a pack that looked complete and played nothing.
+            print(f"   \u26a0 [{i}/{len(items)}] {key}: no letters or digits to blip "
+                  f"in {text[:40]!r} — skipped")
+            silent.append(key)
+            continue
+        audio = audio * ((10.0 ** (a.normalize_db / 20.0)) / peak)   # same -1 dBFS target
 
+        # Hardware format lock, as --chipfx does. --format was accepted and
+        # ignored here: `--format gameboy` still wrote 24 kHz 16-bit.
+        audio, out_sr, out_bits = _cm.apply_format(audio, SAMPLE_RATE, a, np)
         path = os.path.join(dest, f"{key}.wav")
-        sf.write(path, audio, SAMPLE_RATE,
-                 subtype=f"PCM_{a.bits}" if a.bits != 8 else "PCM_U8")
+        sf.write(path, audio, out_sr, subtype=_cm.wav_subtype(out_bits))
         if getattr(a, "lufs_target", None) is not None and loudness_normalize:
             loudness_normalize(path, a.lufs_target, a.true_peak)
         # FLAC before OGG: lossless, and for a square-wave text-box voice a lossy
@@ -201,7 +228,14 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
         elif getattr(a, "ogg", False) and to_ogg:
             path = to_ogg(path, a.ogg_quality, a.keep_wav)
         made.append(path)
-        print(f"   ✅ [{i}/{len(items)}] {key:<28} {len(audio)/SAMPLE_RATE:5.2f}s  "
+        print(f"   \u2705 [{i}/{len(items)}] {key:<28} {len(audio)/float(out_sr):5.2f}s  "
               f"{text[:52]}{'…' if len(text) > 52 else ''}")
 
     print(f"   all done  |  {len(made)} file(s) in {dest}")
+    if silent:
+        msg = f"--blip: {len(silent)} line(s) made no sound: {', '.join(silent[:8])}" \
+              f"{' …' if len(silent) > 8 else ''}"
+        if not made:
+            sys.exit(msg)
+        print(f"   \u26a0 {msg}")
+    return made

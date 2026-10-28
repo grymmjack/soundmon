@@ -70,10 +70,25 @@ def parse(path):
     drums  : list of (tick, kind)
     tempo_map : list of (tick, microseconds_per_quarter)
     """
+    if not os.path.exists(path):
+        raise ValueError("no such file")
+    if os.path.isdir(path):
+        raise ValueError("is a folder, not a MIDI file")
     with open(path, "rb") as fh:
         data = fh.read()
+    if not data:
+        raise ValueError("empty file")
     if data[:4] != b"MThd":
-        raise ValueError("not a Standard MIDI File")
+        raise ValueError("not a Standard MIDI File (no MThd header)")
+    if len(data) < 14:
+        raise ValueError("truncated MIDI header")
+    try:
+        return _parse(data)
+    except (IndexError, struct.error) as e:
+        raise ValueError(f"corrupt or truncated MIDI data ({e})") from None
+
+
+def _parse(data):
     hlen = struct.unpack(">I", data[4:8])[0]
     fmt, ntrks, division = struct.unpack(">HHH", data[8:14])
     if division & 0x8000:
@@ -457,6 +472,9 @@ def to_timed_events(path, seconds=None, transpose=0, start_frac=0.0):
     Returns (notes, drums, info) where notes are dicts with real start/duration in
     seconds, and drums are (time, gm_note).
     """
+    import math
+    if seconds is not None and (not math.isfinite(float(seconds)) or float(seconds) <= 0):
+        raise ValueError(f"--seconds must be more than 0, got {seconds}")
     notes, drums, tpb, tempo_map, timesig = parse(path)
     if not notes and not drums:
         return None
@@ -470,13 +488,16 @@ def to_timed_events(path, seconds=None, transpose=0, start_frac=0.0):
     t1 = t0 + seconds if seconds else total
 
     out = []
+    folded = 0
     for nid, (st, en, pitch, vel, chan, prog) in enumerate(notes):
         a, b = t_of(st), t_of(en)
         if b <= t0 or a >= t1:
             continue
+        p, f = fold_pitch(pitch + transpose)
+        folded += f
         out.append({"id": nid, "t": max(0.0, a - t0),
                     "dur": max(0.005, min(b, t1) - max(a, t0)),
-                    "pitch": pitch + transpose, "prog": prog, "vel": vel})
+                    "pitch": p, "prog": prog, "vel": vel})
     dr = [(t_of(tk) - t0, note) for tk, note in drums
           if t0 <= t_of(tk) < t1]
 
@@ -486,5 +507,21 @@ def to_timed_events(path, seconds=None, transpose=0, start_frac=0.0):
             "drum_hits": len(dr), "tempo_changes": len(tempo_map),
             "gm_used": sorted({n["prog"] for n in out}),
             "gm_drums_used": sorted({d[1] for d in dr}),
-            "title": os.path.basename(path), "exact": True}
+            "title": os.path.basename(path), "exact": True, "folded": folded}
     return out, dr, info
+
+
+# The playable range: piano A0..C8. Above it a pulse at 44.1 kHz aliases into a
+# different, lower note and the OPL's F-number range tops out near 6 kHz; below
+# it is a click. --transpose 100 used to put notes at ~200 kHz.
+PITCH_LO, PITCH_HI = 21, 108
+
+
+def fold_pitch(p):
+    """Move an out-of-range note by octaves into PITCH_LO..PITCH_HI -> (pitch, moved?)."""
+    q = int(p)
+    while q > PITCH_HI:
+        q -= 12
+    while q < PITCH_LO:
+        q += 12
+    return q, int(q != p)

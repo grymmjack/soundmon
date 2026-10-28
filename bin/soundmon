@@ -3,43 +3,95 @@
 # Makes sure the ComfyUI server is up, then hands your description to soundmon.py.
 set -euo pipefail
 
-COMFY="$HOME/ComfyUI"
+COMFY="${COMFYUI_DIR:-$HOME/ComfyUI}"
 PY="$COMFY/.venv/bin/python"
 URL="http://127.0.0.1:8188"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
 
 up() { curl -fsS "$URL/system_stats" >/dev/null 2>&1; }
 
-# Help, listings and the CPU-only engines don't touch the GPU — never start the
-# server. --narrate runs Kokoro in-process and --record is a microphone and a
-# terminal; neither has anything for ComfyUI to do, so waiting up to 90s for it
-# (or failing outright on a box that has no ComfyUI at all) is pure obstruction.
+# Help, listings, the version, a dry run and the CPU-only engines don't touch the GPU — never start
+# the server. --narrate runs Kokoro in-process and --record is a microphone and a terminal; neither
+# has anything for ComfyUI to do, so waiting up to 90s for it (or failing outright on a box that has
+# no ComfyUI at all) is pure obstruction. Each flag is matched alone AND in its --flag=VALUE form
+# (argparse takes both; `--blip-file=x` used to start ComfyUI and wait 90 s).
 needs_server=1
-case " $* " in
-    *" -h "*|*" --help "* \
-    |*" --list-formats "*|*" --list-styles "*|*" --list-keys "* \
-    |*" --list-voices "*|*" --list-devices "*|*" --list-moods "* \
-    |*" --narrate "*|*" --narrate-file "* \
-    |*" --blip "*|*" --blip-file "*|*" --chip "*|*" --opl "*|*" --from-audio "*|*" --from-midi "*|*" --write-midi "*|*" --write-mod "*|*" --write-rad "*|*" --chippy "*|*" --chipfx "*|*" --oplfx "* \
-    |*" --record "*|*" --record-file "*|*" --master "*|*" --index "*|*" --similar "*) needs_server=0 ;;
-esac
+for arg in "$@"; do
+    case "${arg%%=*}" in
+        -h|--help|--version|--dry-run \
+        |--list-formats|--list-styles|--list-keys|--list-voices|--list-devices|--list-moods \
+        |--narrate|--narrate-file|--blip|--blip-file|--chip|--opl|--from-audio|--from-midi \
+        |--write-midi|--write-mod|--write-rad|--chippy|--chipfx|--oplfx \
+        |--record|--record-file|--master|--index|--similar) needs_server=0 ;;
+    esac
+done
 [ "$#" -eq 0 ] && needs_server=0
 
-# A remote render target (--server NAME|HOST, or $SOUNDMON_SERVER) is managed elsewhere
-# (e.g. another box on the LAN) — don't try to start a local ComfyUI for it.
+# Which box will soundmon.py talk to? The same order it uses: --server (either form) >
+# $SOUNDMON_SERVER > servers.json "_default" > the "local" alias. A remote target is managed
+# elsewhere (another box on the LAN) — only a ComfyUI on THIS machine is ever started here.
 TARGET="${SOUNDMON_SERVER:-}"
 prev=""
 for arg in "$@"; do
     [ "$prev" = "--server" ] && TARGET="$arg"
+    case "$arg" in --server=*) TARGET="${arg#--server=}" ;; esac
     prev="$arg"
 done
-if [ -n "$TARGET" ]; then
-    case "$TARGET" in
-        local|localhost|127.0.0.1*|http://127.0.0.1*|http://localhost*) ;;
+
+# Resolve aliases with servers.json — the file soundmon.py reads, next to it in the repo — and
+# print the first member of the (possibly comma-separated) target that is on this machine, or
+# nothing. A repointed "local" alias and "_default" are both honoured, so the wrapper probes the box
+# soundmon.py will actually use instead of a hard-coded 127.0.0.1:8188.
+PYRES="$(command -v python3 || true)"; [ -x "$PY" ] && PYRES="$PY"
+LOCAL_URL=""
+if [ -n "$PYRES" ]; then
+    LOCAL_URL="$("$PYRES" - "$TARGET" "$REPO/servers.json" <<'EOF' 2>/dev/null || true
+import json, sys, urllib.parse
+target, path = sys.argv[1], sys.argv[2]
+try:
+    j = json.load(open(path, encoding="utf-8"))
+except Exception:
+    j = {}
+servers = {k: v for k, v in j.items() if not k.startswith("_")}
+servers.setdefault("local", "http://127.0.0.1:8188")
+target = target.strip() or str(j.get("_default") or "").strip() or "local"
+for v in target.split(","):
+    v = v.strip()
+    if not v:
+        continue
+    u = servers.get(v, v)
+    u = u if "://" in u else "http://" + u
+    p = urllib.parse.urlparse(u)
+    if p.hostname in ("127.0.0.1", "localhost", "::1"):
+        print(f"{p.scheme}://{p.hostname}:{p.port or 8188}")
+        break
+EOF
+)"
+else
+    case "${TARGET:-local}" in local|localhost|127.0.0.1*|localhost:*|http://127.0.0.1*|http://localhost*) LOCAL_URL="$URL" ;; esac
+fi
+
+if [ -z "$LOCAL_URL" ]; then
+    needs_server=0                       # every target is another machine
+else
+    URL="$LOCAL_URL"
+    # Only the default ComfyUI (:8188) is started for you; anything else on this machine (a second
+    # ComfyUI, a test server) is managed elsewhere — soundmon.py says so if it isn't up.
+    case "$URL" in
+        http://127.0.0.1:8188|http://localhost:8188) ;;
         *) needs_server=0 ;;
     esac
 fi
 
 if [ "$needs_server" = 1 ] && ! up; then
+    LAUNCH="$HOME/launch-comfyui.sh"
+    if [ ! -x "$LAUNCH" ]; then
+        echo "[soundmon] ComfyUI isn't running on $URL, and there's no $LAUNCH to start it." >&2
+        echo "[soundmon] Get it with:  $REPO/install.sh   (links soundmon's launch-comfyui.sh; pixelmon's installer links its own)" >&2
+        echo "[soundmon] or start ComfyUI yourself:  cd $COMFY && .venv/bin/python main.py --force-fp32" >&2
+        exit 1
+    fi
     echo "[soundmon] ComfyUI server isn't running — starting it (first run ~15s)..."
     # --force-fp32 is REQUIRED for Stable Audio 3. ComfyUI defaults audio models
     # to fp16 (StableAudio3 declares no supported_inference_dtypes), and fp16
@@ -48,14 +100,22 @@ if [ "$needs_server" = 1 ] && ! up; then
     # It is NOT free: fp32 roughly doubles VRAM and halves throughput, which
     # matters for pixelmon's SDXL on the same shared ComfyUI. So it is applied
     # only when soundmon starts the server itself. If ComfyUI is already running
-    # for pixelmon, restart it with --force-fp32 before generating audio.
-    nohup "$HOME/launch-comfyui.sh" --force-fp32 >"$COMFY/server.log" 2>&1 &
+    # for pixelmon, restart it with --force-fp32 before generating audio
+    # (soundmon.py warns when it sees a server without it).
+    nohup "$LAUNCH" --force-fp32 >"$COMFY/server.log" 2>&1 &
+    launcher=$!
     for _ in $(seq 1 90); do
         up && break
+        # The launcher died (bad venv, port taken, missing GPU libs): say so now, not after 90 s.
+        if ! kill -0 "$launcher" 2>/dev/null; then
+            echo "[soundmon] ComfyUI exited while starting. Last lines of $COMFY/server.log:" >&2
+            tail -n 15 "$COMFY/server.log" >&2 || true
+            exit 1
+        fi
         sleep 1
     done
     if ! up; then
-        echo "[soundmon] server didn't come up. Check $COMFY/server.log" >&2
+        echo "[soundmon] server didn't come up in 90s. Check $COMFY/server.log" >&2
         exit 1
     fi
     echo "[soundmon] server ready."

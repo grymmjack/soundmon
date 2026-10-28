@@ -369,6 +369,9 @@ def drum_preset(path, pads, creator='soundmon', comment='', tags=''):
 
 if __name__ == '__main__':
     import sys
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
+        sys.stderr.write('usage: bwpreset.py FILE.bwpreset [...]   (checks each one reads and writes back byte for byte)\n')
+        sys.exit(0 if sys.argv[1:] else 2)
     ok = bad = 0
     for f in sys.argv[1:]:
         try:
@@ -379,3 +382,4 @@ if __name__ == '__main__':
         except Exception as e:
             bad += 1; print('FAIL', f, e)
     print('round trip ok', ok, 'bad', bad)
+    sys.exit(1 if bad else 0)

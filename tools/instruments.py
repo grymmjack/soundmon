@@ -56,7 +56,8 @@ def key_name(n):
 
 
 def wav_info(path):
-    """(frames, loop start, loop end or None) from a WAV's fmt, data and smpl chunks"""
+    """(frames, loop) from a WAV's fmt, data and smpl chunks: loop is (start, end) in frames, end
+    exclusive, or None when it has no loop"""
     with open(path, 'rb') as f:
         data = f.read()
     pos, frames, align, loop = 12, 0, 4, None
@@ -175,9 +176,29 @@ def loop_of(outdir, rel):
     return wav_info(os.path.join(outdir, rel))[1]
 
 
+def safe(name):
+    """a name as part of a file name: no path separators or characters Windows refuses"""
+    return re.sub(r'[\\/:*?"<>|\x00-\x1f]', '-', name).strip() or 'track'
+
+
 def build(outdir):
-    d = json.load(open(os.path.join(outdir, 'stems.json')))
-    key, title = d['key'], d.get('title', '')
+    """Write OUTDIR/5 Instruments/ from OUTDIR/stems.json. Raises ValueError for a folder that isn't
+    one stems.py made."""
+    sj = os.path.join(outdir, 'stems.json')
+    if not os.path.isdir(outdir):
+        raise ValueError('no such folder')
+    if not os.path.isfile(sj):
+        raise ValueError('no stems.json in it - give the folder stems.py made')
+    try:
+        with open(sj, encoding='utf-8') as f:
+            d = json.load(f)
+        name, title = str(d['key']), d.get('title', '')
+    except (ValueError, KeyError, TypeError) as e:
+        raise ValueError('stems.json is unreadable (%s)' % e)
+    key = safe(name)
+    missing = [o['file'] for o in d.get('oneshots', []) if not os.path.isfile(os.path.join(outdir, o['file']))]
+    if missing:
+        raise ValueError('%d one-shot(s) listed in stems.json are missing, e.g. %s' % (len(missing), missing[0]))
     inst = os.path.join(outdir, '5 Instruments')
     os.makedirs(inst, exist_ok=True)
     shots = d.get('oneshots', [])
@@ -267,14 +288,23 @@ def build(outdir):
 
 
 def main(argv):
-    if not argv or argv[0] in ('-h', '--help'):
+    if argv and argv[0] in ('-h', '--help'):
         print(__doc__)
         return 0
+    if not argv:
+        sys.stderr.write('usage: instruments.py OUTDIR [...]   (a folder stems.py made; -h for more)\n')
+        return 2
+    failed = 0
     for outdir in argv:
-        made = build(outdir)
+        try:
+            made = build(outdir)
+        except (ValueError, OSError) as e:
+            print('%s: %s' % (outdir, e), file=sys.stderr)
+            failed += 1
+            continue
         print('%s: %d instruments' % (outdir, len(made)))
         for p in made: print('   ', os.path.basename(p))
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':

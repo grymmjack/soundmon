@@ -27,12 +27,14 @@ import random
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import sets as setsmod                          # noqa: E402  (gui/sets.py)
@@ -53,6 +55,7 @@ AUDIO_EXT = (".wav", ".flac", ".ogg", ".mp3", ".opus")
 SCORE_EXT = (".mod", ".rad", ".mid")
 INPUT_EXT = (".mid", ".midi", ".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a", ".sbi", ".txt")
 HOME = os.path.realpath(os.path.expanduser("~"))
+LAN = False          # --lan: other devices can reach the page, so disk browsing / opening stays with this machine
 IS_WIN, IS_MAC = sys.platform.startswith("win"), sys.platform == "darwin"
 
 # Engines: what the form calls them -> how soundmon is told, and what they need.
@@ -312,6 +315,14 @@ def server_poisoned(name=None):
     return None
 
 
+def _gpu_work():
+    jobs = getattr(Handler, "jobs", None)
+    if not jobs:
+        return False
+    with jobs.lock:
+        return any(j["status"] in ("queued", "running") and ENGINES.get(j["engine"], {}).get("gpu") for j in jobs.jobs.values())
+
+
 def watch_server():
     """Check the render server every few seconds so polls never wait on a dead one; restart it
     (servers.json "_restart") when it is down, stuck, or poisoned."""
@@ -335,7 +346,8 @@ def watch_server():
         why = ("is stuck: prompts waiting, nothing running" if stuck
                else f"fails every prompt ({poisoned['error']})" if poisoned
                else f"hasn't answered for {DOWN_AFTER}s" if down_since and time.time() - down_since >= DOWN_AFTER else None)
-        if why and restart_command(name) and time.time() - last_restart.get(name, 0) >= RESTART_EVERY:
+        # only while this GUI has GPU work for it: a box shut down on purpose isn't restarted forever
+        if why and restart_command(name) and _gpu_work() and time.time() - last_restart.get(name, 0) >= RESTART_EVERY:
             last_restart[name] = time.time()
             head = None
             restart_server(name, why)
@@ -429,6 +441,285 @@ def home_path(path, must_exist=True):
     return full
 
 
+OPENABLE = (".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a", ".mid", ".midi", ".mod", ".rad", ".xm", ".it",
+            ".s3m", ".sbi", ".txt", ".csv", ".json", ".md", ".zip", ".png", ".gif", ".pdf", ".bwpreset", ".multisample", ".xrni")
+DISK_AUDIO = (".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a")
+
+
+def browse(path, kind="any", exts=None, hidden=False, gallery=None):
+    """One folder of the user's home for the Browse dialog: sub-folders, then files (filtered by
+    extension), breadcrumbs back to home, and shortcuts. Home-confined like every other path here."""
+    full = home_path(path or "~")
+    if os.path.isfile(full):
+        full = os.path.dirname(full)
+    dirs, files = [], []
+    try:
+        with os.scandir(full) as it:
+            for e in it:
+                if not hidden and e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir():
+                        dirs.append(e.name)
+                    elif kind != "dir" and e.is_file() and (not exts or e.name.lower().endswith(exts)):
+                        st = e.stat()
+                        files.append({"name": e.name, "size": st.st_size, "mtime": int(st.st_mtime)})
+                except OSError:
+                    continue
+    except OSError as e:
+        raise ValueError(f"can't read {full}: {e.strerror or e}")
+    dirs.sort(key=str.lower)
+    files.sort(key=lambda f: f["name"].lower())
+    crumbs, p = [], full
+    while True:
+        crumbs.append({"name": "~" if p == HOME else os.path.basename(p), "path": p})
+        if p == HOME or os.path.dirname(p) == p:
+            break
+        p = os.path.dirname(p)
+    places = [{"name": "Home", "path": HOME}]
+    for label, d in (("Gallery", gallery), ("Dropped files", INPUTS), ("Music", "~/Music"), ("Downloads", "~/Downloads"),
+                     ("Desktop", "~/Desktop"), ("Documents", "~/Documents"), ("git", "~/git")):
+        if d and os.path.isdir(os.path.expanduser(d)):
+            places.append({"name": label, "path": os.path.realpath(os.path.expanduser(d))})
+    setup = load_setup()
+    for f in setup.get("similar_folders", []) + [g.get("path", "") for g in setup.get("game_folders", [])]:
+        try:
+            d = home_path(f)
+        except ValueError:
+            continue
+        if os.path.isdir(d) and all(x["path"] != d for x in places):
+            places.append({"name": os.path.basename(d) or d, "path": d})
+    cap = 3000
+    return {"path": full, "home": HOME, "parent": None if full == HOME else os.path.dirname(full), "crumbs": crumbs[::-1],
+            "dirs": dirs[:cap], "files": files[:cap], "more": max(0, len(dirs) + len(files) - 2 * cap), "places": places,
+            "sep": os.sep}
+
+
+def _desktop_entries():
+    """Linux: every installed app's .desktop entry (pixelmon-gui's scan)."""
+    dirs = [os.path.expanduser("~/.local/share/applications"), "/usr/local/share/applications", "/usr/share/applications",
+            os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
+            "/var/lib/flatpak/exports/share/applications", "/var/lib/snapd/desktop/applications"]
+    seen, out = set(), []
+    for d in dirs:
+        for f in sorted(glob.glob(os.path.join(d, "*.desktop"))):
+            if os.path.basename(f) in seen:
+                continue
+            seen.add(os.path.basename(f))
+            e, sect = {}, None
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line.startswith("["):
+                            sect = line
+                        elif sect == "[Desktop Entry]" and "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            e.setdefault(k.strip(), v.strip())
+            except OSError:
+                continue
+            if e.get("Type") == "Application" and e.get("Exec") and e.get("NoDisplay", "").lower() != "true" \
+                    and e.get("Hidden", "").lower() != "true":
+                out.append(e)
+    return out
+
+
+def _desktop_app(e):
+    try:
+        parts = shlex.split(e["Exec"])
+    except ValueError:
+        return None
+    parts = [x for x in parts if x not in ("%i", "%c", "%k")]
+    args = ["{}" if x in ("%f", "%F", "%u", "%U") else x for x in parts[1:]]
+    if "{}" not in args:
+        args.append("{}")
+    return {"name": e.get("Name", parts[0]), "exec": parts[0], "args": shlex.join(args).replace("'{}'", "{}")}
+
+
+def _mac_app(name, bundle):
+    for root in ("/Applications", os.path.expanduser("~/Applications"), "/System/Applications"):
+        for app in glob.glob(os.path.join(root, bundle)):
+            return {"name": name, "exec": "open", "args": f"-a {shlex.quote(os.path.splitext(os.path.basename(app))[0])} {{}}"}
+    return None
+
+
+def _win_app(name, *patterns):
+    roots = [os.environ.get(v, "") for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "ProgramW6432")]
+    for pat in patterns:
+        if not any(ch in pat for ch in "\\/*"):
+            w = shutil.which(pat)
+            if w:
+                return {"name": name, "exec": w, "args": "{}"}
+            continue
+        for r in [x for x in roots if x]:
+            hits = sorted(glob.glob(os.path.join(r, pat)))
+            if hits:
+                return {"name": name, "exec": hits[-1], "args": "{}"}
+    return None
+
+
+_DETECTED = {}
+
+
+def detect_programs():
+    """Sound programs and file managers installed here, offered in Setup's "Add a program" (cached)."""
+    if "v" in _DETECTED:
+        return _DETECTED["v"]
+    snd, fold = [], []
+    if IS_MAC:
+        for n, b in (("Audacity", "Audacity.app"), ("ocenaudio", "ocenaudio.app"), ("VLC", "VLC.app"), ("REAPER", "REAPER*.app"),
+                     ("Logic Pro", "Logic Pro*.app"), ("GarageBand", "GarageBand.app"), ("Bitwig Studio", "Bitwig Studio.app"),
+                     ("Renoise", "Renoise*.app"), ("OpenMPT", "OpenMPT*.app"), ("MuseScore", "MuseScore*.app"), ("QuickTime Player", "QuickTime Player.app")):
+            a = _mac_app(n, b)
+            if a:
+                snd.append(a)
+        fold.append({"name": "Finder", "exec": "open", "args": "{}"})
+    elif IS_WIN:
+        for n, *pats in (("Audacity", r"Audacity\Audacity.exe"), ("ocenaudio", r"ocenaudio\ocenaudio.exe"), ("VLC", r"VideoLAN\VLC\vlc.exe"),
+                         ("REAPER", r"REAPER (x64)\reaper.exe", r"REAPER\reaper.exe"), ("Bitwig Studio", r"Bitwig Studio\Bitwig Studio.exe"),
+                         ("Renoise", r"Renoise*\Renoise.exe"), ("OpenMPT", r"OpenMPT\OpenMPT.exe"), ("MilkyTracker", r"MilkyTracker\milkytracker.exe"),
+                         ("MuseScore", r"MuseScore*\bin\MuseScore*.exe")):
+            a = _win_app(n, *pats)
+            if a:
+                snd.append(a)
+        fold.append({"name": "Explorer", "exec": "explorer", "args": "{}"})
+    else:
+        for e in _desktop_entries():
+            mimes = [m for m in e.get("MimeType", "").split(";") if m]
+            a = _desktop_app(e)
+            if not a:
+                continue
+            if any(m.startswith("audio/") or m in ("application/ogg", "audio/x-wav", "audio/midi") for m in mimes):
+                snd.append(a)
+            if "inode/directory" in mimes or "FileManager" in e.get("Categories", ""):
+                fold.append(a)
+        have = {a["exec"] for a in snd}
+        for n, x, args in (("Audacity", "audacity", "{}"), ("mpv", "mpv", "--force-window {}"), ("ffplay", "ffplay", "-autoexit {}"),
+                           ("sox play", "play", "{}"), ("MilkyTracker", "milkytracker", "{}"), ("SchismTracker", "schismtracker", "{}")):
+            if x not in have and shutil.which(x):
+                snd.append({"name": n, "exec": x, "args": args})
+    key = lambda a: a["name"].lower()     # noqa: E731
+    _DETECTED["v"] = (sorted({a["name"]: a for a in snd}.values(), key=key), sorted({a["name"]: a for a in fold}.values(), key=key))
+    return _DETECTED["v"]
+
+
+# ---------------------------------------------------------------------------
+# Backups of ~/soundmon-gallery (pixelmon-gui's, for sound)
+# ---------------------------------------------------------------------------
+BACKUP_SKIP_TOP = {"backups"}
+BACKUP_SKIP_ANY = {"_analysis", "_mastered"}          # measurements and mastered previews: remade on demand
+STORED_EXT = (".ogg", ".mp3", ".opus", ".flac", ".m4a", ".zip", ".png", ".jpg")
+
+
+def backups_dir():
+    return os.path.join(GALLERY_HOME, "backups")
+
+
+def make_backup(keyword, gallery):
+    """Zip ~/soundmon-gallery (takes, sets, presets, inputs, the Find index) into
+    backups/soundmon-gallery-<keyword>-<date>.zip. Returns (path, files, bytes, skipped)."""
+    kw = re.sub(r"[^\w-]+", "-", str(keyword or "").strip()).strip("-")[:40] or "backup"
+    bk = backups_dir()
+    os.makedirs(bk, exist_ok=True)
+    base = f"soundmon-gallery-{kw}-{time.strftime('%Y-%m-%d')}"
+    path, i = os.path.join(bk, base + ".zip"), 2
+    while os.path.exists(path):
+        path, i = os.path.join(bk, f"{base}-{i}.zip"), i + 1
+    roots = [GALLERY_HOME] + ([gallery] if not os.path.realpath(gallery).startswith(os.path.realpath(GALLERY_HOME) + os.sep) else [])
+    n = skipped = 0
+    try:
+        with zipfile.ZipFile(path + ".part", "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+            for root in roots:
+                top = os.path.basename(os.path.normpath(root))
+                for d, dirs, files in os.walk(root):
+                    rel = os.path.relpath(d, root)
+                    dirs[:] = [x for x in dirs if x not in BACKUP_SKIP_ANY and not (rel == "." and x in BACKUP_SKIP_TOP)]
+                    for f in files:
+                        if f.endswith((".part", ".tmp")):
+                            continue
+                        full = os.path.join(d, f)
+                        if not os.path.isfile(full):
+                            skipped += 1
+                            continue
+                        try:
+                            z.write(full, os.path.normpath(os.path.join(top, rel, f)),
+                                    compress_type=zipfile.ZIP_STORED if f.lower().endswith(STORED_EXT) else zipfile.ZIP_DEFLATED)
+                            n += 1
+                        except OSError:
+                            skipped += 1
+        os.replace(path + ".part", path)
+    except BaseException:
+        if os.path.exists(path + ".part"):
+            os.remove(path + ".part")
+        raise
+    return path, n, os.path.getsize(path), skipped
+
+
+def list_backups():
+    bk = backups_dir()
+    if not os.path.isdir(bk):
+        return []
+    out = []
+    for f in sorted(os.listdir(bk), key=lambda f: -os.path.getmtime(os.path.join(bk, f))):
+        full = os.path.join(bk, f)
+        if f.endswith(".zip") and os.path.isfile(full):
+            try:
+                with zipfile.ZipFile(full) as z:
+                    n = sum(1 for i in z.infolist() if not i.is_dir())
+            except zipfile.BadZipFile:
+                continue
+            out.append({"name": f, "bytes": os.path.getsize(full), "mtime": os.path.getmtime(full), "files": n})
+    return out
+
+
+def backup_path(name):
+    full = os.path.realpath(os.path.join(backups_dir(), os.path.basename(str(name or ""))))
+    if not full.endswith(".zip") or not full.startswith(os.path.realpath(backups_dir()) + os.sep) or not os.path.isfile(full):
+        raise ValueError("no such backup")
+    return full
+
+
+def restore_backup(name, gallery):
+    """Put back everything from a backup that's missing now. Never overwrites an existing file."""
+    full = backup_path(name)
+    roots = {os.path.basename(os.path.normpath(GALLERY_HOME)): GALLERY_HOME, os.path.basename(os.path.normpath(gallery)): gallery}
+    restored = kept = 0
+    with zipfile.ZipFile(full) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            top, _, rest = info.filename.partition("/")
+            root = roots.get(top)
+            if not root or not rest:
+                continue
+            dest = os.path.realpath(os.path.join(root, rest))
+            if not dest.startswith(os.path.realpath(root) + os.sep) or os.path.relpath(dest, root).split(os.sep)[0] == "backups":
+                continue
+            if os.path.exists(dest):
+                kept += 1
+                continue
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with z.open(info) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            restored += 1
+    return {"restored": restored, "kept": kept}
+
+
+def clear_gallery(gallery):
+    """Delete every job folder in the gallery. Sets, presets, inputs, the Find index and backups live
+    elsewhere and are untouched."""
+    gallery = os.path.realpath(gallery)
+    if gallery in (HOME, os.path.realpath(GALLERY_HOME), "/"):
+        raise ValueError("refusing to clear that folder")
+    n = 0
+    for f in os.listdir(gallery):
+        p = os.path.join(gallery, f)
+        if os.path.isdir(p) and not os.path.islink(p) and os.path.isfile(os.path.join(p, "job.json")):
+            shutil.rmtree(p)
+            n += 1
+    return n
+
+
 def os_opener(is_dir):
     if IS_MAC:
         return {"name": "Finder" if is_dir else "system default", "exec": "open", "args": "{}"}
@@ -520,10 +811,24 @@ ADV = {
 }
 
 
-def adv_argv(adv):
+_GPU, _SA = ("sfx", "music", "song"), ("sfx", "music")
+ADV_SCOPE = {   # which engines each Advanced override means something to (others leave it out)
+    **{k: _SA for k in ("engine", "sa3_size", "text_encoder", "reprompt_model", "reprompt_temp")},
+    **{k: _GPU for k in ("steps", "cfg", "fast", "sampler", "scheduler", "base", "negative", "trim", "max_seconds",
+                         "threshold_db", "fade_ms")},
+    **{k: ("song",) for k in ("llm_cfg", "temperature", "top_p", "top_k", "min_p", "no_audio_codes", "song_base")},
+    "loop_crossfade": ("music", "song"), "midi_start": ("chip", "opl"), "transpose": ("chip", "opl"),
+}
+
+
+def adv_argv(adv, eng=None):
     out = []
-    for k, v in (adv or {}).items():
+    if not isinstance(adv, dict):
+        raise ValueError("advanced settings must be an object")
+    for k, v in adv.items():
         if k not in ADV or v in (None, "", False):
+            continue
+        if eng and k in ADV_SCOPE and eng not in ADV_SCOPE[k]:
             continue
         flag, kind, extra = ADV[k]
         if kind == "flag":
@@ -547,6 +852,37 @@ def adv_argv(adv):
             out += [flag, s]
         elif kind == "text":
             out += [flag, str(v).strip()[:extra]]
+    return out
+
+
+def preflight(p):
+    """Things that will render, but probably not the way you meant (pixelmon-gui's setup check):
+    [{"msg", "fix": {field: value} | None, "adv": {field: value} | None}]."""
+    eng, adv, out = p.get("engine") or "sfx", p.get("adv") if isinstance(p.get("adv"), dict) else {}, []
+    gpu = ENGINES.get(eng, {}).get("gpu")
+    sao = adv.get("engine") == "sao"
+    try:
+        secs = float(p.get("seconds") or 0)
+    except (TypeError, ValueError):
+        secs = 0
+    if eng in ("sfx", "music") and sao and secs > 47:
+        out.append({"msg": "Stable Audio Open stops at 47 s.", "fix": {"seconds": "47"}})
+    if eng in ("sfx", "music") and not sao and (adv.get("steps") or adv.get("cfg")):
+        out.append({"msg": "SA3 is distilled for 8 steps at CFG 1; other values tend to sound worse, not better.", "adv": {"steps": "", "cfg": ""}})
+    if eng in ("sfx", "music") and not sao and p.get("reprompt") is False:
+        out.append({"msg": "SA3 was trained on rewritten descriptions: without the Qwen rewrite it usually sounds flatter.", "fix": {"reprompt": True}})
+    if eng in ("chip", "opl") and p.get("loop"):
+        out.append({"msg": "Chiptune and AdLib loop by construction; the loop crossfade isn't applied to them.", "fix": {"loop": False}})
+    if p.get("ref") and not gpu:
+        out.append({"msg": "The reference only steers SFX, Music and Song; this engine ignores it.", "fix": {"ref": ""}})
+    if (p.get("ref_match") or p.get("match_tone")) and not p.get("ref") and gpu:
+        out.append({"msg": "Tempo/key and tone matching need a reference sound — drop one in Reference.", "fix": {"ref_match": False, "match_tone": False}})
+    if gpu and SERVER_STATE.get("up"):
+        m = server_models(render_server().split(",")[0]) or {}
+        need = "ace" if eng == "song" else ("sao" if sao else "sa3")
+        if m and m.get(need) is False:
+            out.append({"msg": f"{render_server().split(',')[0]} doesn't have the {'ACE-Step' if need == 'ace' else 'SAO' if need == 'sao' else 'SA3 medium'} model — "
+                               f"provision it (./download-models.sh {'--song' if need == 'ace' else '--sa3' if need == 'sa3' else ''}) or pick another server in Setup.", "fix": None})
     return out
 
 
@@ -641,7 +977,7 @@ def build_argv(p, meta, jdir=None):
             if "\n" in prompt:
                 raise ValueError("one description per render — use a Set for a list of sounds")
             argv.insert(1, prompt)
-        lim = {"sfx": (0.03, 120), "music": (1, 120), "song": (1, 1000), "chip": (2, 600), "opl": (2, 600), "fx": (0.03, 10)}[eng]
+        lim = {"sfx": (1, 120), "music": (1, 120), "song": (1, 1000), "chip": (2, 600), "opl": (2, 600), "fx": (0.03, 10)}[eng]
         if (p.get("adv") or {}).get("engine") == "sao" and eng in ("sfx", "music"):
             lim = (lim[0], 47)
         secs = num("seconds", float, *lim)
@@ -651,7 +987,10 @@ def build_argv(p, meta, jdir=None):
         if takes > 1:
             argv += ["-n", str(takes)]
         if E["gpu"]:
-            styles = [s for s in (p.get("styles") or []) if s]
+            styles = p.get("styles") or []
+            if not isinstance(styles, list):
+                raise ValueError("styles must be a list")
+            styles = [str(s) for s in styles if s]
             bad = [s for s in styles if s not in meta["styles"]["styles"]]
             if bad:
                 raise ValueError(f"unknown style guide(s): {', '.join(bad)}")
@@ -723,7 +1062,10 @@ def build_argv(p, meta, jdir=None):
             if p.get("match_tone"):
                 argv += ["--match-tone", ref]
         if E["gpu"]:
-            srv = [s.strip() for s in (p.get("servers") or []) if str(s).strip()]
+            srv = p.get("servers") or []
+            if not isinstance(srv, list):
+                raise ValueError("servers must be a list")
+            srv = [str(s).strip() for s in srv if str(s).strip()]
             for s in srv:
                 if not re.fullmatch(r"[\w.:/\-\[\]]{1,200}", s):
                     raise ValueError(f"bad render server {s!r}")
@@ -751,13 +1093,13 @@ def build_argv(p, meta, jdir=None):
                     raise ValueError
             except ValueError:
                 raise ValueError("loudness must be 'off' or -40..0 LUFS")
-        if lufs != "-16":
+        if lufs != "-16" or eng in ("chip", "opl"):      # chip/opl default to no ceiling: say it
             argv += ["--lufs", lufs]
     enc = choice("encode", list(ENCODES), "wav")
     if enc in ("mp3", "opus") and not E["gpu"]:
         raise ValueError(f"{enc.upper()} is only made by the GPU engines — pick WAV, FLAC or OGG")
     argv += ENCODES[enc]
-    argv += adv_argv(p.get("adv"))
+    argv += adv_argv(p.get("adv") or {}, eng)
     argv.append("--no-open")
     return argv, files, takes
 
@@ -817,14 +1159,19 @@ class JobQueue:
         jid = time.strftime("%Y%m%d-%H%M%S-") + f"{random.randrange(16**4):04x}"
         jdir = os.path.join(self.gallery, jid)
         os.makedirs(jdir, exist_ok=True)
-        for key in ("from_midi", "from_audio", "opl_bank", "ref"):  # the job keeps its own copy: reproducible later
-            if params.get(key):
-                shutil.copy2(input_path(params[key]), os.path.join(jdir, "input-" + os.path.basename(params[key])))
         argv, files, takes = build_argv(params, meta, jdir)
+        # the job keeps its own copy of every input it USES (an engine that ignores a stale reference
+        # left in the form mustn't need it): reproducible later, whatever happens to inputs/
         for key in ("from_midi", "from_audio", "opl_bank", "ref"):
             if params.get(key):
-                src = input_path(params[key])
-                argv = [os.path.join(jdir, "input-" + os.path.basename(src)) if a == src else a for a in argv]
+                try:
+                    src = input_path(params[key])
+                except ValueError:
+                    continue
+                if src in argv:
+                    dst = os.path.join(jdir, "input-" + os.path.basename(src))
+                    shutil.copy2(src, dst)
+                    argv = [dst if a == src else a for a in argv]
         for name, text in files.items():
             with open(os.path.join(jdir, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
@@ -851,38 +1198,43 @@ class JobQueue:
             if not job:
                 return False
             if job["status"] == "queued":
-                job["status"] = "cancelled"
+                job["status"], job["finished"] = "cancelled", time.time()
             elif job["status"] == "running" and self.current == jid and self.proc:
+                # SIGTERM: soundmon takes its own prompts off ComfyUI's queue and interrupts the one
+                # rendering if it is ours, so the GPU stops too (and other tools' prompts survive)
                 job["status"] = "cancelled"
+                job["log"].append("⛔ cancelled from the GUI")
                 self.proc.terminate()
-            return True
+            else:
+                return True
+        self._save(job)
+        return True
 
     def clear(self):
-        """Clear the Queue tab: cancel waiting jobs, forget finished ones (their files stay in the gallery)."""
-        cancelled = removed = 0
+        """Clear finished jobs from the Queue tab (their files stay in the gallery). Waiting and
+        running jobs are left alone: cancelling is Cancel's job, not Clear's."""
+        removed = 0
         with self.lock:
             for jid in list(self.order):
-                job = self.jobs[jid]
-                if job["status"] == "queued":
-                    job["status"] = "cancelled"
-                    cancelled += 1
-                elif job["status"] == "running":
-                    continue
-                self.order.remove(jid)
-                del self.jobs[jid]
-                removed += 1
-        return {"cancelled": cancelled, "removed": removed}
+                if self.jobs[jid]["status"] in ("done", "failed", "cancelled"):
+                    self.order.remove(jid)
+                    del self.jobs[jid]
+                    removed += 1
+        return {"cancelled": 0, "removed": removed}
 
-    def abort(self):
-        """⛔ CANCEL AND ABORT: cancel every waiting job, stop the running one, then empty the render
-        server's ComfyUI queue and interrupt what it's sampling (every server of a farm list)."""
+    def abort(self, whole_server=False):
+        """⛔ CANCEL AND ABORT: cancel every waiting job and stop the running one. The running soundmon
+        removes its own prompts from ComfyUI on the way out (SIGTERM), so a ComfyUI shared with
+        pixelmon or another soundmon keeps their work. whole_server=True also empties the render
+        servers' entire queues and interrupts whatever they're sampling (the old, blunt behaviour)."""
         servers = set(render_server().split(","))
-        proc, cancelled = None, 0
+        proc, cancelled, touched = None, 0, []
         with self.lock:
             for jid in self.order:
                 job = self.jobs[jid]
                 if job["status"] == "queued":
-                    job["status"] = "cancelled"
+                    job["status"], job["finished"] = "cancelled", time.time()
+                    touched.append(job)
                     cancelled += 1
                 elif job["status"] == "running":
                     argv = job["argv"]
@@ -893,12 +1245,16 @@ class JobQueue:
                         proc = self.proc
                         proc.terminate()
                         cancelled += 1
-        if proc:                                         # let soundmon exit first, so it can't send one more prompt
+        for job in touched:
+            self._save(job)
+        if proc:                                         # let soundmon clean up and exit first
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=8)
             except subprocess.TimeoutExpired:
                 proc.kill()
         comfy = {}
+        if not whole_server:
+            return {"cancelled": cancelled, "servers": comfy, "scoped": True}
         for name in sorted(s.strip() for s in servers if s.strip()):
             url = server_url(name)
             if not url or url in comfy.values():
@@ -913,9 +1269,31 @@ class JobQueue:
                 comfy[name] = f"unreachable ({e})"
         return {"cancelled": cancelled, "servers": comfy}
 
-    def snapshot(self):
+    def snapshot(self, every=False):
+        """The Queue tab's view: every waiting/running job plus the latest 60 finished ones
+        (every=True: all of them, for questions like "which keys of this set are pending?")."""
         with self.lock:
-            return [dict(self.jobs[j], log=self.jobs[j]["log"][-40:]) for j in self.order[-60:]]
+            ids = self.order if every else [j for j in self.order if self.jobs[j]["status"] in ("queued", "running")] + \
+                [j for j in self.order if self.jobs[j]["status"] not in ("queued", "running")][-60:]
+            ids = sorted(ids, key=self.order.index)
+            return [dict(self.jobs[j], log=self.jobs[j]["log"][-40:]) for j in ids]
+
+    def recover(self):
+        """At start-up: jobs a previous soundmon-gui left "queued" or "running" (it was stopped or
+        crashed) are marked as interrupted, and whatever takes they finished are kept."""
+        n = 0
+        for f in glob.glob(os.path.join(self.gallery, "*", "job.json")):
+            job = _read_json(f, None)
+            if not isinstance(job, dict) or job.get("status") not in ("queued", "running"):
+                continue
+            outs = scan_outputs(os.path.dirname(f))
+            job.update(status="done" if outs and job["status"] == "running" and len(outs) >= (job.get("total") or 1) else "failed",
+                       outputs=outs, finished=job.get("finished") or time.time(),
+                       error=None if outs and len(outs) >= (job.get("total") or 1) else
+                       f"soundmon-gui stopped while this job was {job['status']}" + (f" ({len(outs)} take{'s' if len(outs) != 1 else ''} finished)" if outs else ""))
+            _write_json(f, job)
+            n += 1
+        return n
 
     def _save(self, job):
         d = os.path.join(self.gallery, job["dir"])
@@ -980,8 +1358,9 @@ def list_presets():
         p = _read_json(f, None)
         if p and isinstance(p.get("snapshot"), dict):
             out.append({"name": p.get("name") or os.path.splitext(os.path.basename(f))[0], "saved": p.get("saved"),
-                        "engine": p["snapshot"].get("engine"), "snapshot": p["snapshot"]})
-    return sorted(out, key=lambda p: p["name"].lower())
+                        "engine": p["snapshot"].get("engine"), "snapshot": p["snapshot"],
+                        "folder": p.get("folder") or "", "note": p.get("note") or ""})
+    return sorted(out, key=lambda p: (p["folder"].lower(), p["name"].lower()))
 
 
 def save_preset(body):
@@ -993,8 +1372,74 @@ def save_preset(body):
         raise ValueError("nothing to save")
     if len(json.dumps(snap)) > 200000:
         raise ValueError("that preset is too big")
-    _write_json(os.path.join(PRESETS, safe_name(name, 60) + ".json"), {"name": name, "saved": time.time(), "snapshot": snap})
+    folder = re.sub(r"\s+", " ", str(body.get("folder") or "")).strip()[:40]
+    note = str(body.get("note") or "").strip()[:500]
+    _write_json(os.path.join(PRESETS, safe_name(name, 60) + ".json"),
+                {"name": name, "saved": time.time(), "snapshot": snap, "folder": folder, "note": note})
     return list_presets()
+
+
+PRESET_INPUTS = ("ref", "from_midi", "from_audio", "opl_bank")
+
+
+def preset_bundle(names):
+    """A .zip of presets plus every dropped file they use (reference, MIDI, recording, bank), so a
+    preset still works on another machine. Returns the zip bytes."""
+    import io
+    buf, have = io.BytesIO(), {p["name"]: p for p in list_presets()}
+    pick = [have[n] for n in names if n in have] if names else list(have.values())
+    if not pick:
+        raise ValueError("no such preset")
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in pick:
+            z.writestr(f"presets/{safe_name(p['name'], 60)}.json", json.dumps({k: p[k] for k in ("name", "snapshot", "folder", "note")}, indent=1))
+            for k in PRESET_INPUTS:
+                v = (p["snapshot"].get("form") or {}).get(k)
+                if v:
+                    try:
+                        z.write(input_path(v), f"inputs/{os.path.basename(v)}")
+                    except (ValueError, OSError):
+                        pass                                       # gone from inputs/: the preset still travels
+    return buf.getvalue()
+
+
+def import_bundle(data):
+    """Presets from a bundle. Never overwrites: a name that exists gets " (2)"; its files go into
+    inputs/ (the same bytes already there are reused) and the preset is pointed at them."""
+    import io
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("that isn't a preset bundle (.zip)")
+    names, have = [], {p["name"] for p in list_presets()}
+    with z:
+        files = {os.path.basename(i.filename): i for i in z.infolist() if i.filename.startswith("inputs/") and not i.is_dir()}
+        for info in z.infolist():
+            if not (info.filename.startswith("presets/") and info.filename.endswith(".json")):
+                continue
+            try:
+                p = json.loads(z.read(info))
+            except ValueError:
+                continue
+            if not isinstance(p, dict) or not isinstance(p.get("snapshot"), dict):
+                continue
+            form = p["snapshot"].setdefault("form", {})
+            for k in PRESET_INPUTS:
+                v = form.get(k)
+                if v and os.path.basename(v) in files:
+                    nm = safe_name(os.path.basename(v), 96)
+                    if nm.lower().endswith(INPUT_EXT):
+                        form[k] = store_input(nm, data=z.read(files[os.path.basename(v)]))
+            name, i = str(p.get("name") or "imported").strip()[:54] or "imported", 2
+            base = name
+            while name in have:
+                name, i = f"{base} ({i})", i + 1
+            save_preset({"name": name, "snapshot": p["snapshot"], "folder": p.get("folder"), "note": p.get("note")})
+            have.add(name)
+            names.append(name)
+    if not names:
+        raise ValueError("no presets in that bundle")
+    return names
 
 
 def delete_preset(name):
@@ -1128,6 +1573,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _trusted(self):
+        """Refuse requests that didn't come from this GUI's own page.
+
+        Host must be this server by IP or localhost: a web page can point its own domain at
+        127.0.0.1 (DNS rebinding) and would otherwise be "same origin" with the GUI. A browser's
+        Origin/Referer, when present, must match Host: another site's page can't drive the GUI.
+        Tools without those headers (curl) are fine."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = host.rsplit(":", 1)[0].strip("[]") if host.count(":") <= 1 or host.startswith("[") else host
+        ip_literal = bool(re.fullmatch(r"[\d.]+|[0-9a-f:]+", name))
+        if not (name in ("localhost", "127.0.0.1", "::1") or (LAN and (ip_literal or name in (socket.gethostname().lower(), socket.gethostname().lower() + ".local")))):
+            return False
+        src = self.headers.get("Origin") or self.headers.get("Referer")
+        if src and src != "null":
+            p = urllib.parse.urlparse(src)
+            if (p.netloc or "").lower() != host:
+                return False
+        return True
+
+    def _local(self):
+        """Is the browser on this machine? Always true unless --lan opened the page to other devices."""
+        return not LAN or self.client_address[0] in ("127.0.0.1", "::1") or self.client_address[0].startswith("127.")
+
     def _file(self, path, ctype, download=None):
         """Serve a file, honouring Range so the browser can seek long music."""
         try:
@@ -1155,8 +1623,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(end - start + 1 if size else 0))
             if rng and size:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            if download:
-                self.send_header("Content-Disposition", f'attachment; filename="{download}"')
+            if download:                                   # ASCII fallback + RFC 5987 for any other name
+                plain = re.sub(r'[^\x20-\x7e]|["\\]', "_", download)
+                self.send_header("Content-Disposition", f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(download)}")
             self.end_headers()
             fh.seek(start)
             left = end - start + 1 if size else 0
@@ -1168,6 +1637,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 left -= len(chunk)
 
     def do_GET(self):
+        if not self._trusted():
+            return self._json({"error": "forbidden: open soundmon-gui from its own address"}, 403)
         u = urllib.parse.urlparse(self.path)
         if u.path in ("/", "/index.html"):
             return self._file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
@@ -1185,10 +1656,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(servers_report())
         if u.path == "/api/gallery":
             return self._json({"items": gallery_items(self.gallery)})
+        if u.path == "/api/backups":
+            return self._json({"backups": list_backups(), "folder": backups_dir()})
+        if u.path == "/api/backup/download":
+            try:
+                full = backup_path(urllib.parse.parse_qs(u.query).get("name", [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            return self._file(full, "application/zip", os.path.basename(full))
         if u.path == "/api/setup":
-            return self._json(load_setup())
+            snd, fold = detect_programs()
+            return self._json(dict(load_setup(), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
         if u.path == "/api/sets":
             return self._json({"sets": self.sets.list()})
+        if u.path == "/api/presets/bundle":
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                data = preset_bundle([n for n in q.get("name", []) if n])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            fn = "soundmon-presets-" + (safe_name(q["name"][0], 40) if q.get("name") else "all") + ".zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if u.path == "/api/presets":
             return self._json({"presets": list_presets()})
         if u.path == "/api/similar/status":
@@ -1199,6 +1693,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    "setup_folders": load_setup()["similar_folders"]})
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
+        if u.path in ("/api/browse", "/api/disk/file") and not self._local():
+            return self._json({"error": "browsing this computer's files only works on the computer running soundmon-gui"}, 403)
+        if u.path == "/api/browse":                    # the Browse dialog: one folder under home
+            q = urllib.parse.parse_qs(u.query)
+            exts = tuple(e.strip().lower() for e in (q.get("ext") or [""])[0].split(",") if e.strip()) or None
+            try:
+                return self._json(browse((q.get("path") or ["~"])[0], (q.get("kind") or ["any"])[0], exts,
+                                         (q.get("hidden") or [""])[0] == "1", self.gallery))
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if u.path == "/api/disk/file":                 # hear an audio file picked in Browse (audio only, under home)
+            try:
+                p = home_path(urllib.parse.parse_qs(u.query).get("path", [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            ext = os.path.splitext(p)[1].lower()
+            if not os.path.isfile(p) or ext not in DISK_AUDIO:
+                return self._json({"error": "only audio files can be played"}, 404)
+            return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
+        if u.path == "/api/input":                     # hear a file dropped on the form (reference, recording)
+            try:
+                p = input_path(urllib.parse.parse_qs(u.query).get("name", [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            ext = os.path.splitext(p)[1].lower()
+            return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
         if u.path == "/api/similar/file":              # play a Find result: only files in the index
             p = urllib.parse.parse_qs(u.query).get("path", [""])[0]
             if p not in find_index().data["files"] or not os.path.isfile(p):
@@ -1214,7 +1734,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     ext = os.path.splitext(full)[1].lower()
                     return self._file(full, AUDIO_TYPES.get(ext) or "application/octet-stream")
                 return self._json({"set": s, "takes": self.sets.takes(s["id"]), "now": self.sets.now_files(s),
-                                   "pending": self.sets.pending(s["id"], self.jobs.snapshot())})
+                                   "pending": self.sets.pending(s["id"], self.jobs.snapshot(every=True))})
             except ValueError as e:
                 return self._json({"error": str(e)}, 404 if u.path == "/api/set/now" else 400)
         if u.path == "/api/analyse":
@@ -1236,18 +1756,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
         if u.path.startswith("/files/"):
             rel = urllib.parse.unquote(u.path[len("/files/"):])
+            if "\x00" in rel:
+                return self._json({"error": "not found"}, 404)
             full = os.path.realpath(os.path.join(self.gallery, rel))
             if not full.startswith(os.path.realpath(self.gallery) + os.sep) or not os.path.isfile(full):
                 return self._json({"error": "not found"}, 404)
             ext = os.path.splitext(full)[1].lower()
-            dl = os.path.basename(full) if "download" in urllib.parse.parse_qs(u.query) else None
+            dl = os.path.basename(full) if "download" in urllib.parse.parse_qs(u.query, keep_blank_values=True) else None
             return self._file(full, AUDIO_TYPES.get(ext) or mimetypes.guess_type(full)[0] or "application/octet-stream", dl)
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._trusted():
+            return self._json({"error": "forbidden: open soundmon-gui from its own address"}, 403)
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/upload":                      # raw bytes; ?filename=
             return self._upload(urllib.parse.parse_qs(u.query))
+        if u.path == "/api/presets/import":              # raw .zip bytes
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= 300 * 1024 * 1024:
+                    raise ValueError("a bundle must be under 300 MB")
+                data = self.rfile.read(n)
+                if len(data) != n:
+                    raise ValueError("the upload was cut short")
+                return self._json({"imported": import_bundle(data), "presets": list_presets()})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             return self._json({"error": "expected application/json"}, 415)
         try:
@@ -1255,32 +1790,86 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._json({"error": "bad json"}, 400)
+        if not isinstance(body, dict):
+            return self._json({"error": "expected a JSON object"}, 400)
         try:
             if u.path == "/api/command":                 # the exact command RENDER would run
                 try:                                     # half-typed forms are normal here: answer, don't fail
                     argv, _, takes = build_argv(body, load_meta())
                 except ValueError as e:
                     return self._json({"invalid": str(e)})
-                return self._json({"command": command_text(argv), "takes": takes})
+                return self._json({"command": command_text(argv), "takes": takes, "warnings": preflight(body)})
             if u.path == "/api/render":
                 group, label = body.pop("group", None), body.pop("label", None)
                 job = self.jobs.add(body, group=group, label=label)
                 return self._json({"jobs": [job["id"]], "command": job["command"]})
+            if u.path == "/api/sweep":
+                # same seed, one setting varied over a few values: one labelled job per value, one queue card
+                base, field, values = dict(body.get("params") or {}), str(body.get("field") or ""), body.get("values")
+                if not re.fullmatch(r"(adv\.)?[a-z_]{1,30}", field):
+                    raise ValueError("pick a setting to sweep")
+                if not isinstance(values, list) or not 2 <= len(values) <= 24:
+                    raise ValueError("give 2 to 24 values, separated by commas")
+                seed = str(base.get("seed") or "").strip()
+                if not seed.isdigit():
+                    seed = str(random.randrange(1, 2 ** 31))
+                base.update(seed=seed, n=1)
+                variants = []
+                for v in values:
+                    q = json.loads(json.dumps(base))
+                    v = v.strip() if isinstance(v, str) else v
+                    if field.startswith("adv."):
+                        q.setdefault("adv", {})[field[4:]] = v
+                    elif field == "styles":
+                        q["styles"] = [x for x in str(v).split("+") if x]
+                    else:
+                        q[field] = v
+                    try:
+                        build_argv(q, load_meta())
+                    except ValueError as e:
+                        raise ValueError(f"{field} = {v}: {e}")
+                    variants.append((q, f"{field.split('.')[-1]} = {v}"))
+                group = f"sweep:{field.split('.')[-1]}:{time.strftime('%H%M%S')}"
+                ids = [self.jobs.add(q, group=group, label=lab)["id"] for q, lab in variants]
+                return self._json({"group": group, "jobs": ids, "seed": seed})
+            if u.path == "/api/input/from-take":         # 🧬 vary: a gallery take becomes a reference
+                src = self.jobs.gallery_path(body.get("dir"), body.get("file"))
+                return self._json({"file": store_input(safe_name(os.path.basename(src), 96), src=src)})
             if u.path.startswith("/api/cancel/"):
                 return self._json({"ok": self.jobs.cancel(u.path.rsplit("/", 1)[-1])})
             if u.path == "/api/jobs/clear":
                 return self._json(self.jobs.clear())
+            if u.path == "/api/backup":
+                path, n, size, skipped = make_backup(body.get("keyword"), self.gallery)
+                return self._json({"name": os.path.basename(path), "files": n, "bytes": size, "skipped": skipped})
+            if u.path == "/api/backups/restore":
+                return self._json(restore_backup(body.get("name"), self.gallery))
+            if u.path == "/api/gallery/clear":
+                if any(j["status"] in ("queued", "running") for j in self.jobs.snapshot()):
+                    raise ValueError("renders are still queued or running — wait for them (or clear the queue) first")
+                if str(body.get("confirm") or "") != "CLEAR":
+                    raise ValueError("type CLEAR to confirm")
+                backup = None
+                if body.get("backup", True):
+                    backup = os.path.basename(make_backup(body.get("keyword") or "before-clear", self.gallery)[0])
+                removed = clear_gallery(self.gallery)
+                self.jobs.clear()
+                return self._json({"removed": removed, "backup": backup})
             if u.path == "/api/jobs/abort":
-                return self._json(self.jobs.abort())
+                return self._json(self.jobs.abort(bool(body.get("whole_server"))))
             if u.path == "/api/rate":
                 return self._json({"ratings": rate(self.gallery, body.get("dir"), body.get("file"), body.get("stars", 0))})
             if u.path == "/api/setup":
-                return self._json(save_setup(body))
+                snd, fold = detect_programs()
+                return self._json(dict(save_setup(body), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
             if u.path == "/api/presets":
                 return self._json({"presets": save_preset(body)})
             if u.path == "/api/similar/index":
                 folders = body.get("folders")
                 if isinstance(folders, list):
+                    for f in folders:                          # check before saving: a bad path never sticks
+                        if not os.path.isdir(home_path(f)):
+                            raise ValueError(f"not a folder: {f}")
                     save_setup({"similar_folders": folders})
                 try:
                     return self._json({"job": find_start(load_setup()["similar_folders"])})
@@ -1308,17 +1897,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except LookupError as e:
                     return self._json({"error": str(e)}, 501)
                 return self._json({"query": os.path.basename(q), "results": idx.search(q, k, within=within or None)})
+            if u.path == "/api/input/from-path":        # Browse picked a file on disk: copy it in, like a drop
+                if not self._local():
+                    raise ValueError("picking files from this computer only works on the computer running soundmon-gui")
+                p = home_path(body.get("path"))
+                if not os.path.isfile(p):
+                    raise ValueError("pick a file, not a folder")
+                name = safe_name(os.path.basename(p), 96)
+                if not name.lower().endswith(INPUT_EXT):
+                    raise ValueError(f"not a file soundmon reads: {os.path.basename(p)} (MIDI, WAV/FLAC/OGG/MP3, .sbi or .txt)")
+                if os.path.getsize(p) > 200 * 1024 * 1024:
+                    raise ValueError("file must be under 200 MB")
+                res = {"file": store_input(name, src=p), "from": p}
+                if name.lower().endswith(".txt"):
+                    with open(p, encoding="utf-8", errors="replace") as fh:
+                        res["text"] = fh.read(200000)
+                return self._json(res)
             if u.path == "/api/similar/use":            # a Find result becomes a reference (copied into inputs)
                 p = body.get("path")
                 if p not in find_index().data["files"] or not os.path.isfile(p):
                     raise ValueError("that file isn't in the index")
-                os.makedirs(INPUTS, exist_ok=True)
                 name = safe_name(os.path.basename(p), 96)
                 if not name.lower().endswith(INPUT_EXT):
                     name += ".wav"
-                out = unique_path(INPUTS, name)
-                shutil.copy2(p, out)
-                return self._json({"file": os.path.basename(out)})
+                return self._json({"file": store_input(name, src=p)})
             if u.path == "/api/presets/delete":
                 return self._json({"presets": delete_preset(body.get("name"))})
             if u.path == "/api/voices":
@@ -1359,7 +1961,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Only programs saved in Setup can be launched: the request names one, it can't supply a command.
                 setup, key, t = load_setup(), str(body.get("app") or "os"), body.get("target") or {}
                 is_dir = bool(t.get("folder")) or bool(t.get("indexed"))
-                if t.get("indexed"):                        # a Find result: open the folder it is in
+                if t.get("backups"):
+                    os.makedirs(backups_dir(), exist_ok=True)
+                    t = {"path": backups_dir()}
+                if t.get("path") or t.get("input") or t.get("set_now"):
+                    if t.get("path") and not self._local():
+                        raise ValueError("opening paths only works on the computer running soundmon-gui")
+                    # any file or folder under home (a path field, a Browse pick, a Find result, the game's file)
+                    if t.get("input"):
+                        path = input_path(t["input"])
+                    elif t.get("set_now"):
+                        path = self.sets.now_path(self.sets.load(t["set_now"].get("id")), t["set_now"].get("key"))
+                    else:
+                        path = home_path(t["path"])
+                    if t.get("reveal") and os.path.isfile(path):
+                        path = os.path.dirname(path)
+                    is_dir = os.path.isdir(path)
+                    if not is_dir and not path.lower().endswith(OPENABLE):
+                        raise ValueError("only sound, music and text files open from here (never programs or scripts)")
+                elif t.get("indexed"):                        # a Find result: open the folder it is in
                     if t["indexed"] not in find_index().data["files"]:
                         raise ValueError("that file isn't in the index")
                     path = os.path.dirname(t["indexed"])
@@ -1383,6 +2003,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"opened": path, "with": app.get("name")})
         except ValueError as e:
             return self._json({"error": str(e)}, 400)
+        except (TypeError, AttributeError, KeyError) as e:         # a field of the wrong type or shape
+            return self._json({"error": f"bad request: {type(e).__name__}: {e}"}, 400)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1402,17 +2024,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s = self.sets.load(body.get("id"))
             keys = body.get("keys")
             if keys == "missing":
-                have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot())
-                keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"])]
+                have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot(every=True))
+                gone = self.sets.now_files(s) if body.get("skip_existing") else {}
+                keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"]) and not gone.get(r["key"])]
+                if not keys:
+                    raise ValueError(f"nothing to render — every key has takes or is rendering ({sum(busy.values())} render{'s' if sum(busy.values()) != 1 else ''} queued)"
+                                     if busy else "nothing to render — every key already has takes")
             if not isinstance(keys, list) or not keys:
-                raise ValueError("nothing to render — every key already has takes")
+                raise ValueError("nothing to render — pick some keys")
             if len(keys) > 1000:
                 raise ValueError("at most 1000 keys at once")
             jobs, voices = [], s["theme"].get("voices") if s["theme"]["engine"] == "narrate" and body.get("seed") is None else None
-            for k in keys:
+            todo, bad = [], []
+            for k in keys:                                # check every render first: all of them queue, or none
                 for v in (voices or [None]):
                     p = self.sets.render_params(s, k, n=body.get("n"), seed=body.get("seed"), voice=v)
-                    jobs.append(self.jobs.add(p, group=f"set:{s['id']}", label=k)["id"])
+                    try:
+                        build_argv(json.loads(json.dumps(p)), load_meta())
+                    except ValueError as e:
+                        bad.append(f"{k}: {e}")
+                        break
+                    todo.append((p, k))
+            if bad:
+                raise ValueError(f"nothing queued: {len(bad)} key{'s' if len(bad) > 1 else ''} won't render — " + "; ".join(bad[:6]) + (" …" if len(bad) > 6 else ""))
+            for p, k in todo:
+                jobs.append(self.jobs.add(p, group=f"set:{s['id']}", label=k)["id"])
             return {"jobs": jobs}
         if act == "export":
             s = self.sets.load(body.get("id"))
@@ -1438,22 +2074,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _upload(self, q):
         """A MIDI / reference audio / OPL bank / manifest dropped on the form -> INPUTS (never overwrites)."""
         fname = safe_name((q.get("filename") or ["input.mid"])[0], 96)
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json({"error": "bad Content-Length"}, 400)
         if not fname.lower().endswith(INPUT_EXT):
             return self._json({"error": f"not a file soundmon reads: {fname} (MIDI, WAV/FLAC/OGG/MP3, .sbi or .txt)"}, 400)
-        if not 0 < n <= 200 * 1024 * 1024:
+        if n <= 0:
+            return self._json({"error": f"{fname} is empty"}, 400)
+        if n > 200 * 1024 * 1024:
             return self._json({"error": "file must be under 200 MB"}, 400)
         data = self.rfile.read(n)
+        if len(data) != n:
+            return self._json({"error": f"the upload of {fname} was cut short ({len(data)} of {n} bytes)"}, 400)
         if fname.lower().endswith((".mid", ".midi")) and data[:4] != b"MThd":
             return self._json({"error": f"{fname} isn't a MIDI file"}, 400)
-        os.makedirs(INPUTS, exist_ok=True)
-        out = unique_path(INPUTS, fname)
-        with open(out, "wb") as f:
-            f.write(data)
-        res = {"file": os.path.basename(out)}
+        res = {"file": store_input(fname, data=data)}
         if fname.lower().endswith(".txt"):
             res["text"] = data.decode("utf-8", "replace")[:200000]
         return self._json(res)
+
+
+def store_input(name, data=None, src=None):
+    """Put a dropped/picked file in INPUTS under a safe name. If the very same bytes are already
+    there (the same file dropped again, a Find result used twice), reuse that one instead of
+    piling up name-1, name-2 copies."""
+    import hashlib
+    os.makedirs(INPUTS, exist_ok=True)
+    if data is None:
+        with open(src, "rb") as fh:
+            data = fh.read()
+    digest, size = hashlib.sha1(data).hexdigest(), len(data)
+    stem, ext = os.path.splitext(name)
+    for f in os.listdir(INPUTS):
+        full = os.path.join(INPUTS, f)
+        if f.lower().endswith(ext.lower()) and os.path.isfile(full) and os.path.getsize(full) == size:
+            with open(full, "rb") as fh:
+                if hashlib.sha1(fh.read()).hexdigest() == digest:
+                    return f
+    out = unique_path(INPUTS, name)
+    with open(out, "wb") as fh:
+        fh.write(data)
+    return os.path.basename(out)
 
 
 def unique_path(d, fname):
@@ -1476,7 +2138,10 @@ def main():
     ap.add_argument("--gallery", default=os.path.expanduser("~/soundmon-gallery/gui"),
                     help="where renders + job.json records go (default ~/soundmon-gallery/gui)")
     args = ap.parse_args()
-    GALLERY_HOME = os.path.dirname(os.path.normpath(os.path.expanduser(args.gallery)))
+    # The gallery's state (inputs, sets, presets, setup) lives beside it only in the standard layout
+    # <home>/gui; any other --gallery keeps ~/soundmon-gallery, instead of littering the folder's parent
+    g = os.path.normpath(os.path.expanduser(args.gallery))
+    GALLERY_HOME = os.path.dirname(g) if os.path.basename(g) == "gui" else os.path.expanduser("~/soundmon-gallery")
     INPUTS = os.path.join(GALLERY_HOME, "inputs")
     SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
     SETS_ROOT = os.path.join(GALLERY_HOME, "sets")
@@ -1485,8 +2150,13 @@ def main():
     os.makedirs(args.gallery, exist_ok=True)
     Handler.gallery = os.path.realpath(os.path.expanduser(args.gallery))
     Handler.jobs = JobQueue(Handler.gallery)
+    n = Handler.jobs.recover()
+    if n:
+        print(f"[soundmon-gui] marked {n} job(s) a previous run left unfinished", flush=True)
     Handler.sets = setsmod.Sets(SETS_ROOT, Handler.gallery, home_path)
     threading.Thread(target=watch_server, daemon=True).start()
+    global LAN
+    LAN = bool(args.lan)
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     try:
         srv = QuietServer((host, args.port), Handler)
