@@ -926,19 +926,46 @@ soundmon-gui --lan           # reachable from other devices on the LAN
 soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick, else servers.json "_default")
 ```
 
-- **Every engine on one form.** Nine engine buttons at the top (SFX, Music loop, Song,
+- **Every engine on one form.** Eight engine buttons at the top (SFX, Music loop, Song,
   Chiptune, AdLib, Retro FX, Blips, Narrate); only that engine's settings show. Style
   guides, moods, archetypes, voices, keys and hardware formats are read live from
   `sounds.json`, `chip.py`, `chipfx.py`, `opl.py`, `narrate.py` and the node, so the GUI
   never offers something soundmon doesn't have. Hovering a field shows the flag's own
-  `--help` text.
+  `--help` text. 🎲 rolls a description, 🕘 brings back ones you rendered; 🎲 next to Seed
+  picks one to keep. Form sections fold (and stay folded); sliders step with the mouse wheel
+  (shift ×5), reset on middle-click, and take a typed value when you click their number.
+- **Every sound is the same player**, wherever it is listed (queue, gallery, sets, find,
+  voices, the reference you dropped): a waveform with a playhead you click to play from that
+  spot, play/pause, and what the file really is, read from its own header (length, sample
+  rate, bit depth or bitrate, channels, codec, size, peak, clipped samples) plus a small
+  spectrum showing how high its content reaches. Space plays/pauses, Esc stops.
+- **Browse… and Open on every file and folder.** Every path field and drop zone has
+  **Browse…** (a picker over your home folder, with shortcuts, a filter and a preview of
+  sounds) and every sound has **↗** (also on right-click): open it in the system's default
+  app, in a program from Setup (found automatically: Audacity, VLC, OpenMPT…), or show it in
+  its folder. With `--lan`, browsing and opening only work from the machine running the GUI.
 - **The command is always visible.** Under RENDER is the exact `soundmon …` command the
   server will run (the server builds it, so the preview can't drift). COPY CLI takes it
   to a terminal.
+  Under it, a **setup check** warns about settings that will render but probably not as
+  meant (SAO past 47 s, SA3 steps/CFG, a reference the engine ignores, a server missing the
+  model…), each with **Fix**.
 - **Queue** shows each job's progress (`✅ [i/n]` lines), log and errors. When ComfyUI
-  fails a job, the job fails in seconds with the node's own message.
-  **⛔ CANCEL AND ABORT** in the status bar stops everything and empties the render
-  server's queue.
+  fails a job, the job fails in seconds with the node's own message. A set render, a Voices
+  run or a sweep is one card with one bar and **Cancel all**. **Cancel** really stops the
+  GPU: soundmon takes its own prompts off ComfyUI's queue (and interrupts the one rendering
+  if it is its own), so a ComfyUI shared with pixelmon keeps pixelmon's work.
+  **⛔ CANCEL AND ABORT** in the status bar stops everything this GUI started.
+- **SWEEP…** renders one take per value of one setting, same seed (reference strength,
+  steps, style, format, mood, archetype, voice, BPM, key…), so you hear what a setting does.
+  **🧬** on a take renders four variations of it (the take becomes the reference).
+- **⚖ Compare** lines up to nine takes: press `1`–`9` to switch between them *at the same
+  moment*, see their loudness and an overlaid spectrum against the ★ reference. Click a
+  gallery take's name for a close-up: big waveform, measurements, sonogram, the full
+  recipe and every action, `←`/`→` through the gallery.
+- **Notifications** (status bar): a desktop notification and/or a chime when jobs finish
+  or fail, a coin per take, and when the render server goes down, comes back, gets stuck or
+  is restarted. A banner says when the server is down while a GPU engine is selected.
 - **Gallery** keeps every take with its waveform, seed, rating and the files beside it
   (`.mod`, `.rad`, `.mid`). **Load** puts a take's settings back in the form; **Again**
   renders that exact take again (same seed). Each job lives in
@@ -958,6 +985,9 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
      `.soundmon-backup/<date>/` first. It warns when a key also exists in another
      format, because the game may play that one instead.
 
+  "Skip keys the game has" leaves out keys the game folder already has a file for; each
+  key can carry a note; every row is checked against the theme before anything is queued.
+
   Takes are just gallery jobs tagged with the set and key, so a set survives
   restarts and every take keeps its seed and command.
 - **Reference** (SFX, Music, Song): drop a sound to steer the render (`--ref`), with a
@@ -965,17 +995,26 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   length" (`--ref-match`) and "match its tone" (`--match-tone`). The job keeps a copy
   of the reference, and its gallery card has **ref ▶** to hear it. A set's theme can
   carry a reference too, and a set can export **mastered like the reference**.
-- **🔎 Find** indexes the folders you choose (they're saved in Setup), then lists the
+- **🔎 Find** indexes the folders you choose (remembered), then lists the
   sounds most like the one you drop, or like any gallery take or set take (🔎 on its
   card). Each result can be played, **Use**d as the form's reference, opened in its
   folder, or have its path copied.
 - **Voices** speaks one of your lines in every Kokoro voice, so you can compare them;
   **Use** puts one in the Narrate form.
-- **Presets** (top of the form) save and load the form's settings by name.
+- **Presets** (top of the form) save and load the form's settings by name, in folders and
+  with a note; 💾 on any queue card saves that job's settings. **⬇** downloads presets as a
+  `.zip` with the files they use (reference, MIDI, bank), **⬆** imports one (never
+  overwriting).
 - **Advanced** exposes the rest (sampler, reprompt, ACE-Step's LLM, trim/normalize/fade,
   OGG quality, MIDI start). Blank means soundmon's own default.
 - **Setup** lists every `servers.json` box with its state and whether it has the models
-  each engine needs (SA3 medium, ACE-Step, T5Gemma, Qwen), and picks where GPU renders go.
+  each engine needs (SA3 medium, ACE-Step, T5Gemma, Qwen), and picks where GPU renders go
+  (it says so when `--server` overrides the pick). **Backups** zips the whole
+  `~/soundmon-gallery`, restores what's missing from one (never overwriting), and can clear
+  the gallery (after a backup).
+
+The GUI only answers its own page: a request from another site, or to a name that isn't this
+machine, is refused.
 
 Drop a `.mid` or a recording on the Chiptune / AdLib form to have it followed
 (`--from-midi`, `--from-audio`), or a `.txt` of `key | text` lines on the Blips / Narrate
