@@ -46,7 +46,8 @@ def slug(text, n=48):
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")[:n] or "sound"
 
 
-KEY_RE = re.compile(r"[\w.\-/]{1,120}")
+# a key becomes a path inside the game folder: no "..", no leading "/", no hidden ".x" segments
+KEY_RE = re.compile(r"(?!/)(?!.*(?:^|/)\.)(?!.*//)[\w.\-/]{1,120}(?<!/)")
 
 
 def _secs(field):
@@ -149,6 +150,7 @@ class Sets:
             raise ValueError("give the set a name")
         rows = parse_manifest(body.get("manifest"))
         theme = self._theme(body.get("theme") or {}, validate)
+        self.check_rows({"id": "check", "theme": theme, "rows": rows}, validate)
         sid = time.strftime("%Y%m%d-") + slug(name, 40)
         with LOCK:
             if os.path.exists(self.path(sid)):
@@ -199,6 +201,8 @@ class Sets:
                 for d in ("picks", "flags", "notes"):
                     s[d] = {k: v for k, v in s[d].items() if k in keys}
                 s["rows"] = rows
+            if "manifest" in body or "theme" in body:
+                self.check_rows(s, validate)
             if isinstance(body.get("row"), dict):          # edit one row's prompt / seconds
                 r = body["row"]
                 row = next((x for x in s["rows"] if x["key"] == r.get("key")), None)
@@ -309,6 +313,23 @@ class Sets:
         return full
 
     # ---------------- render params for one key ----------------
+    def check_rows(self, s, validate, keys=None):
+        """Every row must render with the theme before anything is saved or queued: a bad row found
+        halfway used to leave half a set queued and an error."""
+        bad = []
+        for r in s["rows"]:
+            if keys is not None and r["key"] not in keys:
+                continue
+            for v in (s["theme"].get("voices") or [None]) if s["theme"]["engine"] == "narrate" else [None]:
+                try:
+                    validate(self.render_params(s, r["key"], n=1, voice=v))
+                except ValueError as e:
+                    bad.append(f"{r['key']}: {e}")
+                    break
+        if bad:
+            raise ValueError(f"{len(bad)} row{'s' if len(bad) > 1 else ''} won't render with this theme — "
+                             + "; ".join(bad[:6]) + (" …" if len(bad) > 6 else ""))
+
     def render_params(self, s, key, n=None, seed=None, voice=None):
         row = next((r for r in s["rows"] if r["key"] == key), None)
         if not row:
@@ -365,7 +386,9 @@ class Sets:
         """master: the master.master function (soundmon's mastering chain), needed when the theme masters."""
         d, ex = self.game_dir(s), s["theme"]["export"]
         plan = self.export_plan(s)
-        backup = os.path.join(d, ".soundmon-backup", time.strftime("%Y-%m-%d_%H%M%S"))
+        backup, i = os.path.join(d, ".soundmon-backup", time.strftime("%Y-%m-%d_%H%M%S")), 2
+        while os.path.exists(backup):                       # two exports in one second keep separate backups
+            backup, i = os.path.join(d, ".soundmon-backup", time.strftime("%Y-%m-%d_%H%M%S") + f"-{i}"), i + 1
         done, errors = [], []
         for item in plan:
             if only_changed and item["unchanged"]:

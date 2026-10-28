@@ -27,6 +27,7 @@ import random
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -314,6 +315,14 @@ def server_poisoned(name=None):
     return None
 
 
+def _gpu_work():
+    jobs = getattr(Handler, "jobs", None)
+    if not jobs:
+        return False
+    with jobs.lock:
+        return any(j["status"] in ("queued", "running") and ENGINES.get(j["engine"], {}).get("gpu") for j in jobs.jobs.values())
+
+
 def watch_server():
     """Check the render server every few seconds so polls never wait on a dead one; restart it
     (servers.json "_restart") when it is down, stuck, or poisoned."""
@@ -337,7 +346,8 @@ def watch_server():
         why = ("is stuck: prompts waiting, nothing running" if stuck
                else f"fails every prompt ({poisoned['error']})" if poisoned
                else f"hasn't answered for {DOWN_AFTER}s" if down_since and time.time() - down_since >= DOWN_AFTER else None)
-        if why and restart_command(name) and time.time() - last_restart.get(name, 0) >= RESTART_EVERY:
+        # only while this GUI has GPU work for it: a box shut down on purpose isn't restarted forever
+        if why and restart_command(name) and _gpu_work() and time.time() - last_restart.get(name, 0) >= RESTART_EVERY:
             last_restart[name] = time.time()
             head = None
             restart_server(name, why)
@@ -431,6 +441,8 @@ def home_path(path, must_exist=True):
     return full
 
 
+OPENABLE = (".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a", ".mid", ".midi", ".mod", ".rad", ".xm", ".it",
+            ".s3m", ".sbi", ".txt", ".csv", ".json", ".md", ".zip", ".png", ".gif", ".pdf", ".bwpreset", ".multisample", ".xrni")
 DISK_AUDIO = (".wav", ".flac", ".ogg", ".mp3", ".opus", ".aif", ".aiff", ".m4a")
 
 
@@ -799,10 +811,24 @@ ADV = {
 }
 
 
-def adv_argv(adv):
+_GPU, _SA = ("sfx", "music", "song"), ("sfx", "music")
+ADV_SCOPE = {   # which engines each Advanced override means something to (others leave it out)
+    **{k: _SA for k in ("engine", "sa3_size", "text_encoder", "reprompt_model", "reprompt_temp")},
+    **{k: _GPU for k in ("steps", "cfg", "fast", "sampler", "scheduler", "base", "negative", "trim", "max_seconds",
+                         "threshold_db", "fade_ms")},
+    **{k: ("song",) for k in ("llm_cfg", "temperature", "top_p", "top_k", "min_p", "no_audio_codes", "song_base")},
+    "loop_crossfade": ("music", "song"), "midi_start": ("chip", "opl"), "transpose": ("chip", "opl"),
+}
+
+
+def adv_argv(adv, eng=None):
     out = []
-    for k, v in (adv or {}).items():
+    if not isinstance(adv, dict):
+        raise ValueError("advanced settings must be an object")
+    for k, v in adv.items():
         if k not in ADV or v in (None, "", False):
+            continue
+        if eng and k in ADV_SCOPE and eng not in ADV_SCOPE[k]:
             continue
         flag, kind, extra = ADV[k]
         if kind == "flag":
@@ -930,7 +956,10 @@ def build_argv(p, meta, jdir=None):
         if takes > 1:
             argv += ["-n", str(takes)]
         if E["gpu"]:
-            styles = [s for s in (p.get("styles") or []) if s]
+            styles = p.get("styles") or []
+            if not isinstance(styles, list):
+                raise ValueError("styles must be a list")
+            styles = [str(s) for s in styles if s]
             bad = [s for s in styles if s not in meta["styles"]["styles"]]
             if bad:
                 raise ValueError(f"unknown style guide(s): {', '.join(bad)}")
@@ -1002,7 +1031,10 @@ def build_argv(p, meta, jdir=None):
             if p.get("match_tone"):
                 argv += ["--match-tone", ref]
         if E["gpu"]:
-            srv = [s.strip() for s in (p.get("servers") or []) if str(s).strip()]
+            srv = p.get("servers") or []
+            if not isinstance(srv, list):
+                raise ValueError("servers must be a list")
+            srv = [str(s).strip() for s in srv if str(s).strip()]
             for s in srv:
                 if not re.fullmatch(r"[\w.:/\-\[\]]{1,200}", s):
                     raise ValueError(f"bad render server {s!r}")
@@ -1030,13 +1062,13 @@ def build_argv(p, meta, jdir=None):
                     raise ValueError
             except ValueError:
                 raise ValueError("loudness must be 'off' or -40..0 LUFS")
-        if lufs != "-16":
+        if lufs != "-16" or eng in ("chip", "opl"):      # chip/opl default to no ceiling: say it
             argv += ["--lufs", lufs]
     enc = choice("encode", list(ENCODES), "wav")
     if enc in ("mp3", "opus") and not E["gpu"]:
         raise ValueError(f"{enc.upper()} is only made by the GPU engines — pick WAV, FLAC or OGG")
     argv += ENCODES[enc]
-    argv += adv_argv(p.get("adv"))
+    argv += adv_argv(p.get("adv") or {}, eng)
     argv.append("--no-open")
     return argv, files, takes
 
@@ -1096,14 +1128,19 @@ class JobQueue:
         jid = time.strftime("%Y%m%d-%H%M%S-") + f"{random.randrange(16**4):04x}"
         jdir = os.path.join(self.gallery, jid)
         os.makedirs(jdir, exist_ok=True)
-        for key in ("from_midi", "from_audio", "opl_bank", "ref"):  # the job keeps its own copy: reproducible later
-            if params.get(key):
-                shutil.copy2(input_path(params[key]), os.path.join(jdir, "input-" + os.path.basename(params[key])))
         argv, files, takes = build_argv(params, meta, jdir)
+        # the job keeps its own copy of every input it USES (an engine that ignores a stale reference
+        # left in the form mustn't need it): reproducible later, whatever happens to inputs/
         for key in ("from_midi", "from_audio", "opl_bank", "ref"):
             if params.get(key):
-                src = input_path(params[key])
-                argv = [os.path.join(jdir, "input-" + os.path.basename(src)) if a == src else a for a in argv]
+                try:
+                    src = input_path(params[key])
+                except ValueError:
+                    continue
+                if src in argv:
+                    dst = os.path.join(jdir, "input-" + os.path.basename(src))
+                    shutil.copy2(src, dst)
+                    argv = [dst if a == src else a for a in argv]
         for name, text in files.items():
             with open(os.path.join(jdir, name), "w", encoding="utf-8") as fh:
                 fh.write(text)
@@ -1130,38 +1167,43 @@ class JobQueue:
             if not job:
                 return False
             if job["status"] == "queued":
-                job["status"] = "cancelled"
+                job["status"], job["finished"] = "cancelled", time.time()
             elif job["status"] == "running" and self.current == jid and self.proc:
+                # SIGTERM: soundmon takes its own prompts off ComfyUI's queue and interrupts the one
+                # rendering if it is ours, so the GPU stops too (and other tools' prompts survive)
                 job["status"] = "cancelled"
+                job["log"].append("⛔ cancelled from the GUI")
                 self.proc.terminate()
-            return True
+            else:
+                return True
+        self._save(job)
+        return True
 
     def clear(self):
-        """Clear the Queue tab: cancel waiting jobs, forget finished ones (their files stay in the gallery)."""
-        cancelled = removed = 0
+        """Clear finished jobs from the Queue tab (their files stay in the gallery). Waiting and
+        running jobs are left alone: cancelling is Cancel's job, not Clear's."""
+        removed = 0
         with self.lock:
             for jid in list(self.order):
-                job = self.jobs[jid]
-                if job["status"] == "queued":
-                    job["status"] = "cancelled"
-                    cancelled += 1
-                elif job["status"] == "running":
-                    continue
-                self.order.remove(jid)
-                del self.jobs[jid]
-                removed += 1
-        return {"cancelled": cancelled, "removed": removed}
+                if self.jobs[jid]["status"] in ("done", "failed", "cancelled"):
+                    self.order.remove(jid)
+                    del self.jobs[jid]
+                    removed += 1
+        return {"cancelled": 0, "removed": removed}
 
-    def abort(self):
-        """⛔ CANCEL AND ABORT: cancel every waiting job, stop the running one, then empty the render
-        server's ComfyUI queue and interrupt what it's sampling (every server of a farm list)."""
+    def abort(self, whole_server=False):
+        """⛔ CANCEL AND ABORT: cancel every waiting job and stop the running one. The running soundmon
+        removes its own prompts from ComfyUI on the way out (SIGTERM), so a ComfyUI shared with
+        pixelmon or another soundmon keeps their work. whole_server=True also empties the render
+        servers' entire queues and interrupts whatever they're sampling (the old, blunt behaviour)."""
         servers = set(render_server().split(","))
-        proc, cancelled = None, 0
+        proc, cancelled, touched = None, 0, []
         with self.lock:
             for jid in self.order:
                 job = self.jobs[jid]
                 if job["status"] == "queued":
-                    job["status"] = "cancelled"
+                    job["status"], job["finished"] = "cancelled", time.time()
+                    touched.append(job)
                     cancelled += 1
                 elif job["status"] == "running":
                     argv = job["argv"]
@@ -1172,12 +1214,16 @@ class JobQueue:
                         proc = self.proc
                         proc.terminate()
                         cancelled += 1
-        if proc:                                         # let soundmon exit first, so it can't send one more prompt
+        for job in touched:
+            self._save(job)
+        if proc:                                         # let soundmon clean up and exit first
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=8)
             except subprocess.TimeoutExpired:
                 proc.kill()
         comfy = {}
+        if not whole_server:
+            return {"cancelled": cancelled, "servers": comfy, "scoped": True}
         for name in sorted(s.strip() for s in servers if s.strip()):
             url = server_url(name)
             if not url or url in comfy.values():
@@ -1192,9 +1238,31 @@ class JobQueue:
                 comfy[name] = f"unreachable ({e})"
         return {"cancelled": cancelled, "servers": comfy}
 
-    def snapshot(self):
+    def snapshot(self, every=False):
+        """The Queue tab's view: every waiting/running job plus the latest 60 finished ones
+        (every=True: all of them, for questions like "which keys of this set are pending?")."""
         with self.lock:
-            return [dict(self.jobs[j], log=self.jobs[j]["log"][-40:]) for j in self.order[-60:]]
+            ids = self.order if every else [j for j in self.order if self.jobs[j]["status"] in ("queued", "running")] + \
+                [j for j in self.order if self.jobs[j]["status"] not in ("queued", "running")][-60:]
+            ids = sorted(ids, key=self.order.index)
+            return [dict(self.jobs[j], log=self.jobs[j]["log"][-40:]) for j in ids]
+
+    def recover(self):
+        """At start-up: jobs a previous soundmon-gui left "queued" or "running" (it was stopped or
+        crashed) are marked as interrupted, and whatever takes they finished are kept."""
+        n = 0
+        for f in glob.glob(os.path.join(self.gallery, "*", "job.json")):
+            job = _read_json(f, None)
+            if not isinstance(job, dict) or job.get("status") not in ("queued", "running"):
+                continue
+            outs = scan_outputs(os.path.dirname(f))
+            job.update(status="done" if outs and job["status"] == "running" and len(outs) >= (job.get("total") or 1) else "failed",
+                       outputs=outs, finished=job.get("finished") or time.time(),
+                       error=None if outs and len(outs) >= (job.get("total") or 1) else
+                       f"soundmon-gui stopped while this job was {job['status']}" + (f" ({len(outs)} take{'s' if len(outs) != 1 else ''} finished)" if outs else ""))
+            _write_json(f, job)
+            n += 1
+        return n
 
     def _save(self, job):
         d = os.path.join(self.gallery, job["dir"])
@@ -1407,6 +1475,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _trusted(self):
+        """Refuse requests that didn't come from this GUI's own page.
+
+        Host must be this server by IP or localhost: a web page can point its own domain at
+        127.0.0.1 (DNS rebinding) and would otherwise be "same origin" with the GUI. A browser's
+        Origin/Referer, when present, must match Host: another site's page can't drive the GUI.
+        Tools without those headers (curl) are fine."""
+        host = (self.headers.get("Host") or "").strip().lower()
+        name = host.rsplit(":", 1)[0].strip("[]") if host.count(":") <= 1 or host.startswith("[") else host
+        ip_literal = bool(re.fullmatch(r"[\d.]+|[0-9a-f:]+", name))
+        if not (name in ("localhost", "127.0.0.1", "::1") or (LAN and (ip_literal or name in (socket.gethostname().lower(), socket.gethostname().lower() + ".local")))):
+            return False
+        src = self.headers.get("Origin") or self.headers.get("Referer")
+        if src and src != "null":
+            p = urllib.parse.urlparse(src)
+            if (p.netloc or "").lower() != host:
+                return False
+        return True
+
     def _local(self):
         """Is the browser on this machine? Always true unless --lan opened the page to other devices."""
         return not LAN or self.client_address[0] in ("127.0.0.1", "::1") or self.client_address[0].startswith("127.")
@@ -1438,8 +1525,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(end - start + 1 if size else 0))
             if rng and size:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            if download:
-                self.send_header("Content-Disposition", f'attachment; filename="{download}"')
+            if download:                                   # ASCII fallback + RFC 5987 for any other name
+                plain = re.sub(r'[^\x20-\x7e]|["\\]', "_", download)
+                self.send_header("Content-Disposition", f"attachment; filename=\"{plain}\"; filename*=UTF-8''{urllib.parse.quote(download)}")
             self.end_headers()
             fh.seek(start)
             left = end - start + 1 if size else 0
@@ -1451,6 +1539,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 left -= len(chunk)
 
     def do_GET(self):
+        if not self._trusted():
+            return self._json({"error": "forbidden: open soundmon-gui from its own address"}, 403)
         u = urllib.parse.urlparse(self.path)
         if u.path in ("/", "/index.html"):
             return self._file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
@@ -1532,7 +1622,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     ext = os.path.splitext(full)[1].lower()
                     return self._file(full, AUDIO_TYPES.get(ext) or "application/octet-stream")
                 return self._json({"set": s, "takes": self.sets.takes(s["id"]), "now": self.sets.now_files(s),
-                                   "pending": self.sets.pending(s["id"], self.jobs.snapshot())})
+                                   "pending": self.sets.pending(s["id"], self.jobs.snapshot(every=True))})
             except ValueError as e:
                 return self._json({"error": str(e)}, 404 if u.path == "/api/set/now" else 400)
         if u.path == "/api/analyse":
@@ -1554,15 +1644,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
         if u.path.startswith("/files/"):
             rel = urllib.parse.unquote(u.path[len("/files/"):])
+            if "\x00" in rel:
+                return self._json({"error": "not found"}, 404)
             full = os.path.realpath(os.path.join(self.gallery, rel))
             if not full.startswith(os.path.realpath(self.gallery) + os.sep) or not os.path.isfile(full):
                 return self._json({"error": "not found"}, 404)
             ext = os.path.splitext(full)[1].lower()
-            dl = os.path.basename(full) if "download" in urllib.parse.parse_qs(u.query) else None
+            dl = os.path.basename(full) if "download" in urllib.parse.parse_qs(u.query, keep_blank_values=True) else None
             return self._file(full, AUDIO_TYPES.get(ext) or mimetypes.guess_type(full)[0] or "application/octet-stream", dl)
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._trusted():
+            return self._json({"error": "forbidden: open soundmon-gui from its own address"}, 403)
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/upload":                      # raw bytes; ?filename=
             return self._upload(urllib.parse.parse_qs(u.query))
@@ -1573,6 +1667,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._json({"error": "bad json"}, 400)
+        if not isinstance(body, dict):
+            return self._json({"error": "expected a JSON object"}, 400)
         try:
             if u.path == "/api/command":                 # the exact command RENDER would run
                 try:                                     # half-typed forms are normal here: answer, don't fail
@@ -1615,10 +1711,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"group": group, "jobs": ids, "seed": seed})
             if u.path == "/api/input/from-take":         # 🧬 vary: a gallery take becomes a reference
                 src = self.jobs.gallery_path(body.get("dir"), body.get("file"))
-                os.makedirs(INPUTS, exist_ok=True)
-                out = unique_path(INPUTS, safe_name(os.path.basename(src), 96))
-                shutil.copy2(src, out)
-                return self._json({"file": os.path.basename(out)})
+                return self._json({"file": store_input(safe_name(os.path.basename(src), 96), src=src)})
             if u.path.startswith("/api/cancel/"):
                 return self._json({"ok": self.jobs.cancel(u.path.rsplit("/", 1)[-1])})
             if u.path == "/api/jobs/clear":
@@ -1640,7 +1733,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.jobs.clear()
                 return self._json({"removed": removed, "backup": backup})
             if u.path == "/api/jobs/abort":
-                return self._json(self.jobs.abort())
+                return self._json(self.jobs.abort(bool(body.get("whole_server"))))
             if u.path == "/api/rate":
                 return self._json({"ratings": rate(self.gallery, body.get("dir"), body.get("file"), body.get("stars", 0))})
             if u.path == "/api/setup":
@@ -1651,6 +1744,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u.path == "/api/similar/index":
                 folders = body.get("folders")
                 if isinstance(folders, list):
+                    for f in folders:                          # check before saving: a bad path never sticks
+                        if not os.path.isdir(home_path(f)):
+                            raise ValueError(f"not a folder: {f}")
                     save_setup({"similar_folders": folders})
                 try:
                     return self._json({"job": find_start(load_setup()["similar_folders"])})
@@ -1689,25 +1785,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError(f"not a file soundmon reads: {os.path.basename(p)} (MIDI, WAV/FLAC/OGG/MP3, .sbi or .txt)")
                 if os.path.getsize(p) > 200 * 1024 * 1024:
                     raise ValueError("file must be under 200 MB")
-                os.makedirs(INPUTS, exist_ok=True)
-                out = unique_path(INPUTS, name)
-                shutil.copy2(p, out)
-                res = {"file": os.path.basename(out), "from": p}
+                res = {"file": store_input(name, src=p), "from": p}
                 if name.lower().endswith(".txt"):
-                    with open(out, encoding="utf-8", errors="replace") as fh:
+                    with open(p, encoding="utf-8", errors="replace") as fh:
                         res["text"] = fh.read(200000)
                 return self._json(res)
             if u.path == "/api/similar/use":            # a Find result becomes a reference (copied into inputs)
                 p = body.get("path")
                 if p not in find_index().data["files"] or not os.path.isfile(p):
                     raise ValueError("that file isn't in the index")
-                os.makedirs(INPUTS, exist_ok=True)
                 name = safe_name(os.path.basename(p), 96)
                 if not name.lower().endswith(INPUT_EXT):
                     name += ".wav"
-                out = unique_path(INPUTS, name)
-                shutil.copy2(p, out)
-                return self._json({"file": os.path.basename(out)})
+                return self._json({"file": store_input(name, src=p)})
             if u.path == "/api/presets/delete":
                 return self._json({"presets": delete_preset(body.get("name"))})
             if u.path == "/api/voices":
@@ -1764,6 +1854,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if t.get("reveal") and os.path.isfile(path):
                         path = os.path.dirname(path)
                     is_dir = os.path.isdir(path)
+                    if not is_dir and not path.lower().endswith(OPENABLE):
+                        raise ValueError("only sound, music and text files open from here (never programs or scripts)")
                 elif t.get("indexed"):                        # a Find result: open the folder it is in
                     if t["indexed"] not in find_index().data["files"]:
                         raise ValueError("that file isn't in the index")
@@ -1788,6 +1880,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"opened": path, "with": app.get("name")})
         except ValueError as e:
             return self._json({"error": str(e)}, 400)
+        except (TypeError, AttributeError, KeyError) as e:         # a field of the wrong type or shape
+            return self._json({"error": f"bad request: {type(e).__name__}: {e}"}, 400)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1807,17 +1901,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s = self.sets.load(body.get("id"))
             keys = body.get("keys")
             if keys == "missing":
-                have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot())
+                have, busy = self.sets.takes(s["id"]), self.sets.pending(s["id"], self.jobs.snapshot(every=True))
                 keys = [r["key"] for r in s["rows"] if not have.get(r["key"]) and not busy.get(r["key"])]
+                if not keys:
+                    raise ValueError(f"nothing to render — every key has takes or is rendering ({sum(busy.values())} render{'s' if sum(busy.values()) != 1 else ''} queued)"
+                                     if busy else "nothing to render — every key already has takes")
             if not isinstance(keys, list) or not keys:
-                raise ValueError("nothing to render — every key already has takes")
+                raise ValueError("nothing to render — pick some keys")
             if len(keys) > 1000:
                 raise ValueError("at most 1000 keys at once")
             jobs, voices = [], s["theme"].get("voices") if s["theme"]["engine"] == "narrate" and body.get("seed") is None else None
-            for k in keys:
+            todo, bad = [], []
+            for k in keys:                                # check every render first: all of them queue, or none
                 for v in (voices or [None]):
                     p = self.sets.render_params(s, k, n=body.get("n"), seed=body.get("seed"), voice=v)
-                    jobs.append(self.jobs.add(p, group=f"set:{s['id']}", label=k)["id"])
+                    try:
+                        build_argv(json.loads(json.dumps(p)), load_meta())
+                    except ValueError as e:
+                        bad.append(f"{k}: {e}")
+                        break
+                    todo.append((p, k))
+            if bad:
+                raise ValueError(f"nothing queued: {len(bad)} key{'s' if len(bad) > 1 else ''} won't render — " + "; ".join(bad[:6]) + (" …" if len(bad) > 6 else ""))
+            for p, k in todo:
+                jobs.append(self.jobs.add(p, group=f"set:{s['id']}", label=k)["id"])
             return {"jobs": jobs}
         if act == "export":
             s = self.sets.load(body.get("id"))
@@ -1843,22 +1950,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _upload(self, q):
         """A MIDI / reference audio / OPL bank / manifest dropped on the form -> INPUTS (never overwrites)."""
         fname = safe_name((q.get("filename") or ["input.mid"])[0], 96)
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json({"error": "bad Content-Length"}, 400)
         if not fname.lower().endswith(INPUT_EXT):
             return self._json({"error": f"not a file soundmon reads: {fname} (MIDI, WAV/FLAC/OGG/MP3, .sbi or .txt)"}, 400)
-        if not 0 < n <= 200 * 1024 * 1024:
+        if n <= 0:
+            return self._json({"error": f"{fname} is empty"}, 400)
+        if n > 200 * 1024 * 1024:
             return self._json({"error": "file must be under 200 MB"}, 400)
         data = self.rfile.read(n)
+        if len(data) != n:
+            return self._json({"error": f"the upload of {fname} was cut short ({len(data)} of {n} bytes)"}, 400)
         if fname.lower().endswith((".mid", ".midi")) and data[:4] != b"MThd":
             return self._json({"error": f"{fname} isn't a MIDI file"}, 400)
-        os.makedirs(INPUTS, exist_ok=True)
-        out = unique_path(INPUTS, fname)
-        with open(out, "wb") as f:
-            f.write(data)
-        res = {"file": os.path.basename(out)}
+        res = {"file": store_input(fname, data=data)}
         if fname.lower().endswith(".txt"):
             res["text"] = data.decode("utf-8", "replace")[:200000]
         return self._json(res)
+
+
+def store_input(name, data=None, src=None):
+    """Put a dropped/picked file in INPUTS under a safe name. If the very same bytes are already
+    there (the same file dropped again, a Find result used twice), reuse that one instead of
+    piling up name-1, name-2 copies."""
+    import hashlib
+    os.makedirs(INPUTS, exist_ok=True)
+    if data is None:
+        with open(src, "rb") as fh:
+            data = fh.read()
+    digest, size = hashlib.sha1(data).hexdigest(), len(data)
+    stem, ext = os.path.splitext(name)
+    for f in os.listdir(INPUTS):
+        full = os.path.join(INPUTS, f)
+        if f.lower().endswith(ext.lower()) and os.path.isfile(full) and os.path.getsize(full) == size:
+            with open(full, "rb") as fh:
+                if hashlib.sha1(fh.read()).hexdigest() == digest:
+                    return f
+    out = unique_path(INPUTS, name)
+    with open(out, "wb") as fh:
+        fh.write(data)
+    return os.path.basename(out)
 
 
 def unique_path(d, fname):
@@ -1881,7 +2014,10 @@ def main():
     ap.add_argument("--gallery", default=os.path.expanduser("~/soundmon-gallery/gui"),
                     help="where renders + job.json records go (default ~/soundmon-gallery/gui)")
     args = ap.parse_args()
-    GALLERY_HOME = os.path.dirname(os.path.normpath(os.path.expanduser(args.gallery)))
+    # The gallery's state (inputs, sets, presets, setup) lives beside it only in the standard layout
+    # <home>/gui; any other --gallery keeps ~/soundmon-gallery, instead of littering the folder's parent
+    g = os.path.normpath(os.path.expanduser(args.gallery))
+    GALLERY_HOME = os.path.dirname(g) if os.path.basename(g) == "gui" else os.path.expanduser("~/soundmon-gallery")
     INPUTS = os.path.join(GALLERY_HOME, "inputs")
     SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
     SETS_ROOT = os.path.join(GALLERY_HOME, "sets")
@@ -1890,6 +2026,9 @@ def main():
     os.makedirs(args.gallery, exist_ok=True)
     Handler.gallery = os.path.realpath(os.path.expanduser(args.gallery))
     Handler.jobs = JobQueue(Handler.gallery)
+    n = Handler.jobs.recover()
+    if n:
+        print(f"[soundmon-gui] marked {n} job(s) a previous run left unfinished", flush=True)
     Handler.sets = setsmod.Sets(SETS_ROOT, Handler.gallery, home_path)
     threading.Thread(target=watch_server, daemon=True).start()
     global LAN

@@ -34,6 +34,12 @@ a { color: var(--accent); }
 
 .app { display: grid; grid-template-columns: 420px minmax(0, 1fr); height: calc(100vh - 30px); }
 @media (max-width: 900px) { .app { grid-template-columns: 1fr; height: auto; } .form { max-height: none; } }
+#jumpBtn { display: none; }
+@media (max-width: 900px) {
+  #jumpBtn { display: inline-block; padding: 2px 8px; font-size: 11px; }
+  .paneh { flex-wrap: wrap; } .paneh > * { max-width: 100%; }
+  .sb { gap: 8px; } .sb .nf, #sbMade { display: none; } .np canvas { width: 90px; } .np #npText { max-width: 26vw; }
+}
 
 /* ---- the sound widget (soundRow): ▶ | waveform | time, then facts | spectrum ---- */
 .snd { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; grid-template-areas: "tt tt tt" "pp wv tm" "pp mt sp"; gap: 2px 8px; align-items: center; min-width: 0; }
@@ -584,6 +590,7 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
 
 <div class="sb">
   <button type="button" class="sb-abort" id="abortBtn" hidden title="cancel every waiting job, stop the running one, and empty the render server's queue">Cancel and abort</button>
+  <button type="button" id="jumpBtn" title="jump between the form and the tabs">⇅ tabs</button>
   <span class="np"><button type="button" id="npStop" aria-label="Play or pause" title="play / pause (Space) · Esc stops" disabled>▶</button><canvas id="npWave" class="wave" title="click to seek"></canvas><span id="npTime" class="mono dim"></span><span id="npText" class="mono">nothing playing</span></span>
   <span class="nf"><label title="desktop notifications (the browser asks once)"><input type="checkbox" id="nfOn"> Notify:</label>
     <label><input type="checkbox" id="nfDone"> done</label><label><input type="checkbox" id="nfErr"> errors</label>
@@ -781,7 +788,10 @@ function copyText(t, btn) {
     const ta = el("textarea", { style: "position:fixed;opacity:0" }); ta.value = t; document.body.append(ta); ta.select();
     try { document.execCommand("copy"); done(); } catch (e) {} ta.remove(); });
 }
-$("copyCli").addEventListener("click", e => copyText($("cli").textContent, e.target));
+$("copyCli").addEventListener("click", e => {
+  if ($("cli").classList.contains("err") || !$("cli").textContent.startsWith("soundmon")) { toast("Nothing to copy yet: " + $("cli").textContent, true); return; }
+  copyText($("cli").textContent, e.target);
+});
 $("resetBtn").addEventListener("click", () => { if (!window.confirm(`Put every ${ENG[eng].name} field back to soundmon's defaults?`)) return; F[eng] = {}; store.set("form", F); writeForm(); queueCommand(); toast(ENG[eng].name + " fields reset to soundmon's defaults"); });
 
 /* ---- dropping MIDI / audio / banks / manifests on the form ---- */
@@ -798,10 +808,11 @@ document.querySelectorAll("[data-drop]").forEach(d => {
   d.addEventListener("drop", async e => {
     e.preventDefault(); d.classList.remove("over");
     const file = e.dataTransfer.files[0]; if (!file) return;
+    if (DROP_EXT[key] && !DROP_EXT[key].some(x => file.name.toLowerCase().endsWith(x))) { toast(`${file.name}: this spot takes ${DROP_EXT[key].join(" ")}`, true); return; }
     try { const j = await upload(file); cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); }
     catch (err) { toast(err.message, true); }
   });
-  d.addEventListener("click", e => { if (e.target.dataset.clear || e.target.closest(".dbtn")) return; const inp = el("input", { type: "file" }); inp.onchange = async () => {
+  d.addEventListener("click", e => { if (e.target.dataset.clear || e.target.closest(".dbtn")) return; const inp = el("input", { type: "file", accept: (DROP_EXT[key] || []).join(",") }); inp.onchange = async () => {
     if (!inp.files[0]) return; try { const j = await upload(inp.files[0]); cur()[key] = j.file; store.set("form", F); drawDrops(); queueCommand(); } catch (err) { toast(err.message, true); } }; inp.click(); });
 });
 document.querySelectorAll("[data-clear]").forEach(b => b.addEventListener("click", e => { e.stopPropagation(); cur()[b.dataset.clear] = ""; store.set("form", F); drawDrops(); queueCommand(); }));
@@ -1146,6 +1157,7 @@ function soundRow(url, label, opts = {}) {
 }
 
 function play(url, label, cv) {
+  if (THEN && THEN.after !== url) THEN = null;
   if (nowKey === url) { if (player.paused) player.play().catch(() => {}); else player.pause(); return; }
   nowKey = url; nowLabel = label;
   player.src = url; player.play().catch(e => { if (e.name !== "AbortError") toast("can't play this here: " + e.message, true); });
@@ -1172,7 +1184,8 @@ function stopPlay() {
 }
 for (const ev of ["play", "playing"]) player.addEventListener(ev, () => { cancelAnimationFrame(rafId); rafId = requestAnimationFrame(tick); });
 player.addEventListener("pause", () => { if (nowKey) { paintUrl(nowKey); paintNow(); } });
-player.addEventListener("ended", stopPlay);
+let THEN = null;                                       // "play B when A ends" (Sets A/B), only for that A
+player.addEventListener("ended", () => { const t = THEN, was = nowKey; THEN = null; stopPlay(); if (t && t.after === was) t.go(); });
 $("npStop").addEventListener("click", () => nowKey && play(nowKey, nowLabel));
 $("npWave").addEventListener("click", e => { if (nowKey && player.duration) { const r = e.target.getBoundingClientRect(); player.currentTime = (e.clientX - r.left) / r.width * player.duration; tick(); } });
 document.addEventListener("keydown", e => {
@@ -1286,7 +1299,7 @@ function outRows(j, max) {
   const outs = el("div", { class: "souts" }, ...show.map(o => { const name = o.file.split("/").pop();
     return soundRow(fileUrl(j.dir, o.file), (j.label ? j.label + " · " : "") + name, { compact: true, open: { dir: j.dir, file: o.file }, title: (j.label && j.label !== name.replace(/\.[^.]+$/, "") ? j.label + " · " : "") + name, titleTip: o.file, sub: o.seed != null ? "seed " + o.seed : "",
       actions: [el("span", { class: "btnrow" },
-        el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇", title: "download " + name }),
+        el("a", { class: "b", download: "", href: fileUrl(j.dir, o.file, true), text: "⬇", title: "download " + name }),
         el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
         el("button", { type: "button", text: "🧬", title: "vary this take: render new takes that start from it", onclick: () => varyTake(j, o) }),
         cmpBtn({ url: fileUrl(j.dir, o.file), label: (j.label ? j.label + " · " : "") + name, take: j.dir + "/" + o.file, open: { dir: j.dir, file: o.file } }),
@@ -1362,14 +1375,13 @@ function drawQueue() {
   host.replaceChildren(...[...seen].map(([k, js]) => k.startsWith("#") || js.length === 1 && !k.startsWith("set:") ? jobCard(js[0]) : groupCard(k, js)));
 }
 $("clearQueue").addEventListener("click", async () => {
-  const fin = JOBS.filter(j => !live(j)).length, wait = JOBS.filter(j => j.status === "queued").length;
-  if (!fin && !wait) return toast("Nothing to clear.");
-  if (wait && !window.confirm(`Clear the queue? ${wait} waiting job${wait > 1 ? "s" : ""} will be cancelled and ${fin} finished one${fin === 1 ? "" : "s"} removed from this list (their sounds stay in the Gallery). The running job keeps going.`)) return;
-  try { const r = await api("/api/jobs/clear", {}); toast(`Cleared ${r.removed} job${r.removed === 1 ? "" : "s"}${r.cancelled ? `, cancelled ${r.cancelled}` : ""}`); } catch (e) { toast(e.message, true); }
+  const fin = JOBS.filter(j => !live(j)).length;
+  if (!fin) return toast("No finished jobs to clear (waiting and running jobs stay; use Cancel for those).");
+  try { const r = await api("/api/jobs/clear", {}); toast(`Cleared ${r.removed} finished job${r.removed === 1 ? "" : "s"}; their sounds stay in the Gallery`); } catch (e) { toast(e.message, true); }
   pollSoon();
 });
 $("abortBtn").addEventListener("click", async () => {
-  try { const r = await api("/api/jobs/abort", {}); toast(`Stopped ${r.cancelled} job(s)` + (Object.keys(r.servers).length ? `; cleared ${Object.keys(r.servers).join(", ")}` : "")); } catch (e) { toast(e.message, true); }
+  try { const r = await api("/api/jobs/abort", {}); toast(`Stopped ${r.cancelled} job${r.cancelled === 1 ? "" : "s"}` + (r.scoped ? "; soundmon took its prompts off the render server (other tools' work keeps going)" : Object.keys(r.servers).length ? `; cleared ${Object.entries(r.servers).map(([k, v]) => /unreachable/.test(v) ? `${k} (${v})` : k).join(", ")}` : "")); } catch (e) { toast(e.message, true); }
   pollSoon();
 });
 function statusBar(render, busy) {
@@ -1389,6 +1401,11 @@ function statusBar(render, busy) {
   $("srvDot").className = "dot " + (render.stuck ? "warn" : render.up ? "up" : "down");
 }
 $("srvPill").addEventListener("click", () => showTab("setup"));
+$("jumpBtn").addEventListener("click", () => {                 // phones: the form and the tabs are one long page
+  const main = document.querySelector(".main"), toMain = main.getBoundingClientRect().top > 40;
+  (toMain ? main : document.querySelector(".form")).scrollIntoView({ behavior: "smooth" });
+  $("jumpBtn").textContent = toMain ? "⇅ form" : "⇅ tabs";
+});
 const SRVDOWN = { since: 0, hidden: false };
 $("srvDownCheck").addEventListener("click", () => { poll(); loadServers(); });
 $("srvDownSetup").addEventListener("click", () => showTab("setup"));
@@ -1417,6 +1434,12 @@ function drawGallery() {
 }
 $("galQ").addEventListener("input", drawGallery);
 $("galOpen").addEventListener("click", () => api("/api/open", { target: { folder: true } }).then(r => toast("Opened " + r.opened)).catch(e => toast(e.message, true)));
+function oneLine(p, file) {
+  // a manifest job (`key | text` lines) made many files: "Again" on one of them renders just its line
+  const stem = file.split("/").pop().replace(/\.[^.]+$/, ""), lines = String(p.prompt || "").split("\n");
+  if (lines.length > 1 || lines[0].includes("|")) { const hit = lines.find(l => l.includes("|") && l.split("|")[0].trim() === stem); if (hit) p.prompt = hit; }
+  return p;
+}
 function textFor(p, file) {
   // a manifest job: the line this file was made from (`key | text` -> key.wav), else the description
   const stem = file.split("/").pop().replace(/\.[^.]+$/, ""), lines = String(p.prompt || "").split("\n");
@@ -1432,7 +1455,7 @@ function card(j, o, vi) {
   const r = (j.ratings || {})[o.file] || 0;
   const stars = el("span", { class: "stars" }, ...[1, 2, 3, 4, 5].map(n => el("button", { type: "button", class: n <= r ? "on" : "", text: "★", "aria-label": `${n} star${n > 1 ? "s" : ""}`,
     onclick: async () => { try { j.ratings = (await api("/api/rate", { dir: j.dir, file: o.file, stars: n === r ? 0 : n })).ratings; drawGallery(); } catch (e) { toast(e.message, true); } } })));
-  const again = () => { const p = JSON.parse(JSON.stringify(j.params)); if (o.seed != null) p.seed = o.seed; p.n = 1; return p; };
+  const again = () => { const p = JSON.parse(JSON.stringify(j.params)); if (o.seed != null) p.seed = o.seed; p.n = 1; return oneLine(p, o.file); };
   const cmd = j.command + (o.seed != null && !/--seed/.test(j.command) ? ` --seed ${o.seed}` : "");
   return el("div", { class: "card gcard" },
     el("div", { class: "t" }, el("b", { class: "tklink", text: name, title: "open this take up close: " + o.file, onclick: () => openTake(GALVIS, vi) }), el("span", { class: "badge", text: (E.icon || "") + " " + (E.name || j.engine) })),
@@ -1443,8 +1466,8 @@ function card(j, o, vi) {
       el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", onclick: () => api("/api/render", again()).then(r => { toast("Queued: " + r.command); pollSoon(); }).catch(e => toast(e.message, true)) }))),
     el("div", { class: "btnrow" },
       el("button", { type: "button", text: "Copy CLI", onclick: e => copyText(cmd, e.target) }),
-      el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
-      ...(o.scores || []).map(s => el("a", { class: "b", href: fileUrl(j.dir, s, true), text: "⬇ " + s.split(".").pop(), title: "tracker / MIDI score" })),
+      el("a", { class: "b", download: "", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
+      ...(o.scores || []).map(s => el("a", { class: "b", download: "", href: fileUrl(j.dir, s, true), text: "⬇ " + s.split(".").pop(), title: "tracker / MIDI score" })),
       el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
       j.params.ref ? el("button", { type: "button", text: "ref ▶", title: "hear the reference this take was steered by", onclick: () => play(fileUrl(j.dir, "input-" + j.params.ref), "reference: " + j.params.ref) }) : null,
       cmpBtn({ url, label: name, take: j.dir + "/" + o.file, open: { dir: j.dir, file: o.file } }),
@@ -1573,7 +1596,7 @@ function detail(r, takes) {
     el("div", { html: `<b>${esc(k)}</b> · take ${esc(tlabel(t, i))} · seed <b>${esc(t.seed ?? "?")}</b>` }),
     el("div", { text: t.command || "" }),
     el("div", { class: "btnrow" },
-      el("button", { type: "button", text: "▶ A/B", disabled: !hasNow, title: "this take, then the game's current file", onclick: () => { play(takeUrl(t), `${k} · A: take ${tlabel(t, i)}`); player.addEventListener("ended", () => play(nowUrl(k), k + " · B: in the game now"), { once: true }); } }),
+      el("button", { type: "button", text: "▶ A/B", disabled: !hasNow, title: "this take, then the game's current file", onclick: () => { play(takeUrl(t), `${k} · A: take ${tlabel(t, i)}`); const a = takeUrl(t); THEN = { after: a, go: () => play(nowUrl(k), k + " · B: in the game now") }; } }),
       el("button", { type: "button", text: "Again", title: "render this exact take again (same seed)", disabled: t.seed == null, onclick: () => renderKeys([k], { seed: t.seed }) }),
       el("button", { type: "button", text: flagged ? "Unflag" : "Flag", onclick: () => mark(k, flagged ? "unflag" : "flag", t.take) }),
       el("button", { type: "button", text: "Copy CLI", onclick: e => copyText((t.command || "") + (t.seed != null && !/--seed/.test(t.command || "") ? " --seed " + t.seed : ""), e.target) }),
@@ -1648,13 +1671,13 @@ async function renderKeys(keys, extra = {}) {
 }
 document.addEventListener("keydown", e => {
   if (tab !== "sets" || !SET || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
-  const vis = visibleRows(), idx = vis.findIndex(r => r.key === selKey), k = selKey;
+  const vis = visibleRows(), idx = vis.findIndex(r => r.key === selKey), k = selKey, key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   if (/^[0-9]$/.test(e.key) && k) { hear(k, e.key === "0" ? 9 : +e.key - 1); }
-  else if (e.key === "n" && k && (SET.now[k] || []).length) play(nowUrl(k), k + " · in the game now");
-  else if (e.key === "p" && heard[k]) mark(k, "pick", heard[k]);
-  else if (e.key === "f" && heard[k]) mark(k, "flag", heard[k]);
-  else if (e.key === "j" && idx < vis.length - 1) { selKey = vis[idx + 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
-  else if (e.key === "k" && idx > 0) { selKey = vis[idx - 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
+  else if (key === "n" && k && (SET.now[k] || []).length) play(nowUrl(k), k + " · in the game now");
+  else if (key === "p" && heard[k]) mark(k, "pick", heard[k]);
+  else if (key === "f" && heard[k]) mark(k, "flag", heard[k]);
+  else if (key === "j" && idx < vis.length - 1) { selKey = vis[idx + 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
+  else if (key === "k" && idx > 0) { selKey = vis[idx - 1].key; drawRows(); document.querySelector(".krow.sel")?.scrollIntoView({ block: "nearest" }); }
   else return;
   e.preventDefault();
 });
@@ -1754,11 +1777,12 @@ function drawVoices() {
     const state = !j ? "" : o ? "" : j.status === "failed" ? "failed" : j.status === "cancelled" ? "cancelled" : "rendering…";
     return el("div", { class: "style", style: "grid-template-columns:auto minmax(0,1fr) auto auto" },
       el("span", { class: "badge " + ({ A: "ok", B: "ac", C: "warn", D: "bad" }[gr] || ""), text: gr || "?", title: "Kokoro's training grade", style: "grid-row:1 / span 2;align-self:center" }),
-      el("b", { text: v }), el("span", { class: "dim mono", text: o ? "" : state, title: j && j.error ? j.error : "", style: "grid-row:1 / span 2;grid-column:3;font-size:11px" }),
+      el("b", { text: v }), el("span", { class: "dim mono", text: o ? "" : state, style: "grid-row:1 / span 2;grid-column:3;font-size:11px" }),
       el("button", { type: "button", text: "Use", style: "grid-row:1 / span 2;grid-column:4", onclick: () => { readForm(); eng = "narrate"; store.set("engine", eng);
         cur().voice = v; cur().speed = $("vSpeed").value; cur().pitch = $("vPitch").value; store.set("form", F); showEngine(); toast(`Narrate now speaks with ${v}`); } }),
       el("span", { text: d.replace(/\s*\[[A-D]\]/, ""), style: "grid-column:2" }),
-      o ? el("div", { style: "grid-column:2 / span 3" }, soundRow(fileUrl(j.dir, o.file), v, { compact: true })) : null);
+      o ? el("div", { style: "grid-column:2 / span 3" }, soundRow(fileUrl(j.dir, o.file), v, { compact: true })) : null,
+      j && j.error && !o ? el("div", { class: "err", style: "grid-column:2 / span 3", text: j.error }) : null);
   }))));
 }
 for (const [id, out, fmt] of [["vSpeed", "vSpeedV", v => (+v).toFixed(2) + "×"], ["vPitch", "vPitchV", v => (v > 0 ? "+" : "") + v + " st"]]) $(id).addEventListener("input", () => $(out).textContent = fmt($(id).value));
@@ -1990,7 +2014,7 @@ function drawTake() {
     ["mood", p.mood], ["archetype", p.archetype], ["voice", p.voice], ["bpm / key", p.bpm || p.key ? `${p.bpm || ""} ${p.key || ""}` : ""],
     ...Object.entries(p.adv || {}).filter(([, v]) => v !== "" && v != null).map(([k, v]) => ["adv " + k, v]), ["made", new Date((j.finished || j.created) * 1000).toLocaleString()], ["job", j.dir]];
   for (const [k, v] of rows) if (v !== "" && v != null && v !== undefined) kv.append(el("dt", { text: k }), el("dd", { text: String(v) }));
-  const again = () => { const q = JSON.parse(JSON.stringify(p)); if (o.seed != null) q.seed = o.seed; q.n = 1; return q; };
+  const again = () => { const q = JSON.parse(JSON.stringify(p)); if (o.seed != null) q.seed = o.seed; q.n = 1; return oneLine(q, o.file); };
   const cmd = j.command + (o.seed != null && !/--seed/.test(j.command) ? ` --seed ${o.seed}` : "");
   $("tkBody").replaceChildren(
     soundRow(url, name, { open: { dir: j.dir, file: o.file }, sub: o.seed != null ? "seed " + o.seed : "" }),
@@ -2003,8 +2027,8 @@ function drawTake() {
       el("button", { type: "button", text: "🔎 Similar", onclick: () => { $("takeDlg").close(); findFrom({ take: j.dir + "/" + o.file }, name); } }),
       el("button", { type: "button", text: "💾 Preset", onclick: () => savePresetFrom(p) }),
       el("button", { type: "button", text: "Copy CLI", onclick: e => copyText(cmd, e.target) }),
-      el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
-      ...(o.scores || []).map(sc => el("a", { class: "b", href: fileUrl(j.dir, sc, true), text: "⬇ " + sc.split(".").pop() })),
+      el("a", { class: "b", download: "", href: fileUrl(j.dir, o.file, true), text: "⬇ " + name.split(".").pop() }),
+      ...(o.scores || []).map(sc => el("a", { class: "b", download: "", href: fileUrl(j.dir, sc, true), text: "⬇ " + sc.split(".").pop() })),
       p.ref ? el("button", { type: "button", text: "ref ▶", onclick: () => play(fileUrl(j.dir, "input-" + p.ref), "reference: " + p.ref) }) : null,
       openBtn({ dir: j.dir, file: o.file }, "open in…"),
       el("button", { type: "button", text: "📂", onclick: () => openThing({ folder: true, dir: j.dir }) })),
