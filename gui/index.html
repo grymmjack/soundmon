@@ -1395,7 +1395,8 @@ $("abortBtn").addEventListener("click", async () => {
 });
 function statusBar(render, busy) {
   $("abortBtn").hidden = !busy;
-  $("sbMade").textContent = `${MADE} sound${MADE === 1 ? "" : "s"} made this session`;
+  const want = JOBS.filter(j => j.status !== "cancelled").reduce((n, j) => n + (j.total || 1), 0);
+  $("sbMade").textContent = want > MADE ? `${MADE} of ${want} sounds made this session` : `${MADE} sound${MADE === 1 ? "" : "s"} made this session`;
   const run = JOBS.find(j => j.status === "running"), q = JOBS.filter(j => j.status === "queued").length;
   // the render server's own trouble first: restarting, broken, stuck (soundmon-gui's watchdog sees these)
   const rs = render.restart, srvNote = rs && rs.status !== "done"
