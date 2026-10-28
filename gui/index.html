@@ -81,7 +81,11 @@ dialog.browse[open] { display: grid; grid-template-rows: auto auto auto minmax(0
 .omenu { position: fixed; z-index: 50; display: grid; min-width: 190px; background: var(--panel); border: 1px solid var(--accent); border-radius: 4px; box-shadow: 0 6px 24px rgba(0,0,0,.5); padding: 3px; }
 .omenu button { text-align: left; text-transform: none; letter-spacing: 0; font-size: 12.5px; background: none; border-color: transparent; }
 .omenu button:hover { background: var(--panel2); }
+.omenu.hist { max-width: min(520px, calc(100vw - 16px)); max-height: 60vh; overflow-y: auto; }
+.omenu.hist button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ptools { display: inline-flex; gap: 4px; flex: none; }
+fieldset { position: relative; } .histbtn { position: absolute; top: -4px; right: 8px; padding: 1px 6px; font-size: 12px; background: var(--panel); }
+.btns { flex-wrap: wrap; }
 .pathrow { display: flex; gap: 4px; align-items: center; } .pathrow > input, .pathrow > textarea { flex: 1 1 auto; }
 .drop .dbtn { padding: 2px 7px; font-size: 11px; }
 .drop > button { flex: none; }
@@ -156,6 +160,11 @@ label.c { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .job .cmd { grid-column: 1 / -1; font: 11px var(--mono); color: var(--dim); overflow-wrap: anywhere; }
 .bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; border: 1px solid var(--line); grid-column: 1 / -1; }
 .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .3s; }
+.bar.seg { display: flex; } .bar.seg i { background: none; transition: none; } .bar.seg i.ok { background: var(--ok); } .bar.seg i.ac { background: var(--accent); }
+.bar.seg i.bad { background: var(--bad); } .bar.seg i.warn { background: var(--warn); }
+.grows { grid-column: 1 / -1; display: grid; gap: 6px; }
+.grow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 6px; }
+.grow b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log { grid-column: 1 / -1; font: 11px/1.5 var(--mono); color: var(--dim); background: var(--bg); border-radius: 4px; padding: 6px 8px; overflow-x: auto; white-space: pre; max-height: 160px; overflow-y: auto; margin: 0; }
 .err { grid-column: 1 / -1; color: var(--bad); font-size: 12.5px; overflow-wrap: anywhere; }
 .outs { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
@@ -270,7 +279,10 @@ tr:last-child td { border-bottom: 0; }
 .np #npTime { font-size: 11px; white-space: nowrap; }
 .np button { padding: 1px 6px; font-size: 11px; }
 #sbStatus { color: var(--accent); font-family: var(--mono); }
-#sbStatus .err { color: var(--bad); } #sbStatus .busy { color: var(--warn); }
+#sbStatus .err { color: var(--bad); }
+.srvdown { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 8px 12px 0; padding: 8px 12px; border: 1px solid var(--bad); border-radius: var(--radius); background: rgba(255,85,85,.08); font-size: 12.5px; }
+.srvdown b { color: var(--bad); }
+.noteedit { display: flex; gap: 4px; } .noteedit textarea { min-height: 34px; } #sbStatus .busy { color: var(--warn); }
 .sb .nf { display: inline-flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
 .sb .nf label { display: inline-flex; gap: 3px; align-items: center; cursor: pointer; }
 @media (max-width: 1100px) { .sb .nf label:not(:first-child) { display: none; } }
@@ -301,6 +313,7 @@ tr:last-child td { border-bottom: 0; }
 
   <fieldset>
     <legend id="promptLegend">Describe the sound</legend>
+    <button type="button" id="histBtn" class="histbtn" title="prompts you rendered before (this engine)">🕘</button>
     <textarea id="prompt" rows="3"></textarea>
     <div class="hint" id="promptHint"></div>
     <div class="btnrow" data-eng="blip narrate" style="margin-top:-4px"><button type="button" id="promptLoad" title="read a .txt of key | text lines into the box">Load a list from disk…</button></div>
@@ -329,7 +342,7 @@ tr:last-child td { border-bottom: 0; }
     <div class="row">
       <label class="f" data-flag="--seconds">Seconds<input id="seconds" type="number" step="0.5" min="0"></label>
       <label class="f" data-flag="-n">Takes<input id="n" type="number" min="1" max="200" value="1"></label>
-      <label class="f" data-flag="--seed">Seed<input id="seed" placeholder="random"></label>
+      <label class="f" data-flag="--seed">Seed<span class="pathrow"><input id="seed" placeholder="random"><button type="button" id="seedDice" title="a new random seed (kept until you change it)">🎲</button><button type="button" id="seedClear" title="random every render">✕</button></span></label>
     </div>
     <div class="hint" id="secsHint"></div>
   </fieldset>
@@ -431,7 +444,7 @@ tr:last-child td { border-bottom: 0; }
   </fieldset>
  </div>
   <div class="actions">
-    <div class="btns"><button type="button" class="render" id="renderBtn">RENDER</button><button type="button" id="copyCli">COPY CLI</button></div>
+    <div class="btns"><button type="button" class="render" id="renderBtn">RENDER</button><button type="button" id="sweepBtn" title="same seed, one setting varied over several values: hear what a setting does">SWEEP…</button><button type="button" id="copyCli">COPY CLI</button></div>
     <div class="cli" id="cli">…</div>
     <div class="toast" id="toast"></div>
   </div>
@@ -440,6 +453,9 @@ tr:last-child td { border-bottom: 0; }
 <!-- ================= MAIN ================= -->
 <main class="main">
   <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="srvdown" id="srvDown" hidden><b>● <span id="srvDownName"></span> isn't answering</b><span id="srvDownFor" class="dim"></span>
+    <span class="dim">GPU engines (SFX, Music, Song) need it; Chiptune, AdLib, Retro FX, Blips and Narrate still work.</span><span class="sp"></span>
+    <button type="button" id="srvDownCheck">Check now</button><button type="button" id="srvDownSetup">Setup</button><button type="button" id="srvDownHide">Hide</button></div>
   <div class="panes">
   <section class="pane" id="p-sets" hidden>
     <div class="paneh">
@@ -562,6 +578,16 @@ tr:last-child td { border-bottom: 0; }
     <div class="brright"><input id="brFilter" placeholder="filter this folder" aria-label="filter"><div id="brList" class="brlist"></div></div></div>
   <div id="brPrev"></div>
   <div class="brfoot"><span class="hint" id="brHint"></span><span class="err" id="brErr"></span><span class="sp"></span><button type="button" class="render" id="brOk">Choose</button></div>
+</dialog>
+<dialog id="sweepDlg" class="browse" aria-labelledby="swTitle" style="width:min(560px,calc(100vw - 32px))">
+  <div class="brhead"><h3 id="swTitle">Sweep a setting</h3><span class="sp"></span><button type="button" id="swClose" aria-label="close">✕</button></div>
+  <div style="display:grid;gap:8px;padding:10px 12px">
+    <div class="hint">Every take uses the same seed and the form's settings, except the one you vary. The results land as one card in the Queue, each labelled with its value.</div>
+    <label class="f">Setting<select id="swField"></select></label>
+    <label class="f">Values <span>(separated by commas; for style guides join several with +)</span><input id="swValues" spellcheck="false"></label>
+    <div class="hint" id="swHint"></div>
+  </div>
+  <div class="brfoot"><span class="err" id="swErr"></span><span class="sp"></span><button type="button" class="render" id="swGo">Render the sweep</button></div>
 </dialog>
 <audio id="player" preload="none"></audio>
 
@@ -719,7 +745,7 @@ $("form").addEventListener("input", e => { if (["speed", "pitch", "ref_strength"
 $("form").addEventListener("change", () => { readForm(); queueCommand(); });
 $("renderBtn").addEventListener("click", async () => {
   const b = $("renderBtn"); b.disabled = true;
-  try { const r = await api("/api/render", params()); toast(`Queued: ${r.command}`); pollSoon(); }
+  try { const p = params(), r = await api("/api/render", p); remember(p); toast(`Queued: ${r.command}`); pollSoon(); }
   catch (e) { toast(e.message, true); }
   finally { b.disabled = false; }
 });
@@ -730,7 +756,7 @@ function copyText(t, btn) {
     try { document.execCommand("copy"); done(); } catch (e) {} ta.remove(); });
 }
 $("copyCli").addEventListener("click", e => copyText($("cli").textContent, e.target));
-$("resetBtn").addEventListener("click", () => { F[eng] = {}; store.set("form", F); writeForm(); queueCommand(); toast(ENG[eng].name + " fields reset to soundmon's defaults"); });
+$("resetBtn").addEventListener("click", () => { if (!window.confirm(`Put every ${ENG[eng].name} field back to soundmon's defaults?`)) return; F[eng] = {}; store.set("form", F); writeForm(); queueCommand(); toast(ENG[eng].name + " fields reset to soundmon's defaults"); });
 
 /* ---- dropping MIDI / audio / banks / manifests on the form ---- */
 async function upload(file) {
@@ -1086,6 +1112,9 @@ function soundRow(url, label, opts = {}) {
   if (opts.title || opts.actions) root.append(el("div", { class: "stitle" }, opts.title ? el("b", { text: opts.title, title: opts.titleTip || opts.title }) : el("span"), ...(opts.actions || [])));
   root.append(btn, cv, tm, meta);
   if (spec) root.append(spec);
+  if (opts.open) root.addEventListener("contextmenu", e => {        // right-click: Open in… (like pixelmon-gui)
+    e.preventDefault(); openMenu(opts.open, { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }) });
+  });
   return root;
 }
 
@@ -1223,43 +1252,94 @@ async function poll() {
 function pollSoon() { clearTimeout(pollT); pollT = setTimeout(poll, 300); }
 let lastQueue = "";
 const QOPEN = new Set();                              // jobs whose every output is shown
+const STB = { queued: ["", "queued"], running: ["ac", "running"], done: ["ok", "done"], failed: ["bad", "failed"], cancelled: ["warn", "cancelled"] };
+function outRows(j, max) {
+  // a job's takes as sound widgets (the first `max`, then "show all")
+  const all = QOPEN.has(j.id), show = all ? j.outputs : j.outputs.slice(0, max);
+  const outs = el("div", { class: "souts" }, ...show.map(o => { const name = o.file.split("/").pop();
+    return soundRow(fileUrl(j.dir, o.file), (j.label ? j.label + " · " : "") + name, { compact: true, open: { dir: j.dir, file: o.file }, title: (j.label && j.label !== name.replace(/\.[^.]+$/, "") ? j.label + " · " : "") + name, titleTip: o.file, sub: o.seed != null ? "seed " + o.seed : "",
+      actions: [el("span", { class: "btnrow" },
+        el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇", title: "download " + name }),
+        el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
+        el("button", { type: "button", text: "🧬", title: "vary this take: render new takes that start from it", onclick: () => varyTake(j, o) }),
+        openBtn({ dir: j.dir, file: o.file }, "open this sound in its app, a program from Setup, or its folder"))] }); }));
+  if (j.outputs.length > max) outs.append(el("button", { type: "button", style: "justify-self:start", text: all ? "show fewer" : `show all ${j.outputs.length}`,
+    onclick: () => { all ? QOPEN.delete(j.id) : QOPEN.add(j.id); lastQueue = ""; drawQueue(); } }));
+  return outs;
+}
+const live = j => j.status === "queued" || j.status === "running";
+const elapsed = j => j.finished ? fmtT(j.finished - (j.started || j.created)) : j.started ? fmtT(Date.now() / 1000 - j.started) : "";
+function jobCard(j) {
+  const E = ENG[j.engine] || {}, st = STB[j.status] || ["", j.status], t = elapsed(j);
+  const prompt = j.params.prompt ? j.params.prompt.split("\n")[0].slice(0, 90) : "";
+  const card = el("div", { class: "card job" + (j.status === "failed" ? " failed" : "") },
+    el("h4", {}, el("span", { class: "badge " + st[0], text: st[1] }), `${E.icon || ""} ${E.name || j.engine}`, el("span", { class: "dim", text: prompt })),
+    el("span", { class: "dim mono", text: `${j.done}/${j.total}${t ? " · " + t : ""}` }),
+    el("div", { class: "cmd", text: j.command }));
+  if (live(j)) card.append(el("div", { class: "bar" }, el("i", { style: `width:${j.total ? Math.round(100 * j.done / j.total) : 0}%` })));
+  if (j.error) card.append(el("div", { class: "err", text: j.error }));
+  if (j.outputs.length) card.append(outRows(j, 4));
+  const acts = el("div", { class: "btnrow" });
+  if (live(j)) acts.append(el("button", { type: "button", text: "Cancel", title: "stop this job (and its prompts on the render server)", onclick: () => api("/api/cancel/" + j.id, {}).then(pollSoon) }));
+  acts.append(el("button", { type: "button", text: "Load", title: "put these settings back in the form", onclick: () => loadSettings(j.params) }),
+    el("button", { type: "button", text: "Copy", title: "copy the command", onclick: e => copyText(j.command, e.target) }),
+    el("button", { type: "button", text: "💾", title: "save these settings as a preset", onclick: () => savePresetFrom(j.params) }),
+    el("button", { type: "button", text: "📂", title: "open this job's folder", onclick: () => openThing({ folder: true, dir: j.dir }) }));
+  card.querySelector("h4").after(acts); acts.style.gridColumn = "2"; acts.style.gridRow = "2";
+  if (j.log.length && j.status !== "done") card.append(el("pre", { class: "log", text: j.log.slice(-14).join("\n") }));
+  return card;
+}
+function groupName(g, jobs) {
+  if (g.startsWith("set:")) { const s = SETS.find(x => x.id === g.slice(4)); return "🗂 Set " + (s ? s.name : g.slice(4)); }
+  if (g.startsWith("voices:")) return "🗣 Voices · “" + String(jobs[0].params.prompt || "").slice(0, 60) + "”";
+  if (g.startsWith("sweep:")) return "🎛 Sweep · " + (jobs[0].sweep || g.split(":")[1]);
+  if (g.startsWith("vary:")) return "🧬 Variations of " + (jobs[0].label || "a take");
+  return g;
+}
+function groupCard(g, jobs) {
+  // a set render, a Voices run, a sweep: one card, one bar, one Cancel, every take labelled
+  const n = c => jobs.filter(j => j.status === c).length, done = n("done"), failed = n("failed"), run = n("running"), q = n("queued"), canc = n("cancelled");
+  const takes = jobs.reduce((k, j) => k + j.outputs.length, 0), want = jobs.reduce((k, j) => k + (j.status === "cancelled" ? j.outputs.length : j.total || 1), 0);
+  const any = jobs.some(live), t0 = Math.min(...jobs.map(j => j.started || j.created)), t1 = any ? Date.now() / 1000 : Math.max(...jobs.map(j => j.finished || j.created));
+  const badge = any ? ["ac", run ? "running" : "queued"] : failed ? ["bad", `${failed} failed`] : canc && !done ? ["warn", "cancelled"] : ["ok", "done"];
+  const card = el("div", { class: "card job group" + (failed ? " failed" : "") },
+    el("h4", {}, el("span", { class: "badge " + badge[0], text: badge[1] }), groupName(g, jobs)),
+    el("span", { class: "dim mono", text: `${takes}/${want} takes · ${jobs.length} jobs${q ? ` · ${q} waiting` : ""} · ${fmtT(t1 - t0)}` }));
+  const seg = el("div", { class: "bar seg" }, ...[["ok", done], ["ac", run], ["bad", failed], ["warn", canc]].filter(([, k]) => k).map(([c, k]) => el("i", { class: c, style: `width:${100 * k / jobs.length}%` })));
+  card.append(seg);
+  const acts = el("div", { class: "btnrow" });
+  if (any) acts.append(el("button", { type: "button", text: "Cancel all", onclick: async () => { for (const j of jobs.filter(live)) await api("/api/cancel/" + j.id, {}).catch(() => {}); pollSoon(); } }));
+  acts.append(el("button", { type: "button", text: QOPEN.has(g) ? "Fewer" : "Details", title: "show every job's command and log", onclick: () => { QOPEN.has(g) ? QOPEN.delete(g) : QOPEN.add(g); lastQueue = ""; drawQueue(); } }));
+  card.querySelector("h4").after(acts); acts.style.gridColumn = "2"; acts.style.gridRow = "2";
+  const rows = el("div", { class: "grows" });
+  for (const j of jobs) {
+    const st = STB[j.status] || ["", j.status];
+    rows.append(el("div", { class: "grow" }, el("span", { class: "badge " + st[0], text: st[1] }), el("b", { class: "mono", text: j.label || j.id }),
+      el("span", { class: "dim mono", text: `${j.done}/${j.total}${elapsed(j) ? " · " + elapsed(j) : ""}` }),
+      live(j) ? el("button", { type: "button", text: "Cancel", onclick: () => api("/api/cancel/" + j.id, {}).then(pollSoon) }) : el("span")));
+    if (j.error) rows.append(el("div", { class: "err", text: j.error }));
+    if (j.outputs.length) rows.append(outRows(j, QOPEN.has(g) ? 99 : 2));
+    if (QOPEN.has(g)) { rows.append(el("div", { class: "cmd", text: j.command })); if (j.log.length && j.status !== "done") rows.append(el("pre", { class: "log", text: j.log.slice(-8).join("\n") })); }
+  }
+  card.append(rows);
+  return card;
+}
 function drawQueue() {
-  const sig = JSON.stringify(JOBS.map(j => [j.id, j.status, j.done, j.log.length]));
+  const sig = JSON.stringify([JOBS.map(j => [j.id, j.status, j.done, j.log.length]), [...QOPEN]]);
   if (sig === lastQueue) return; lastQueue = sig;
   const host = $("jobList");
   if (!JOBS.length) { host.replaceChildren(el("div", { class: "empty", text: "Nothing rendered yet this session. Describe a sound and press RENDER." })); return; }
-  host.replaceChildren(...[...JOBS].reverse().map(j => {
-    const E = ENG[j.engine] || {}, st = { queued: ["", "queued"], running: ["ac", "running"], done: ["ok", "done"], failed: ["bad", "failed"], cancelled: ["warn", "cancelled"] }[j.status] || ["", j.status];
-    const t = j.finished ? fmtT(j.finished - (j.started || j.created)) : j.started ? fmtT(Date.now() / 1000 - j.started) : "";
-    const prompt = j.params.prompt ? j.params.prompt.split("\n")[0].slice(0, 90) : "";
-    const card = el("div", { class: "card job" + (j.status === "failed" ? " failed" : "") },
-      el("h4", {}, el("span", { class: "badge " + st[0], text: st[1] }), `${E.icon || ""} ${E.name || j.engine}`, el("span", { class: "dim", text: prompt })),
-      el("span", { class: "dim mono", text: `${j.done}/${j.total}${t ? " · " + t : ""}` }),
-      el("div", { class: "cmd", text: j.command }));
-    if (j.status === "running" || j.status === "queued") card.append(el("div", { class: "bar" }, el("i", { style: `width:${j.total ? Math.round(100 * j.done / j.total) : 0}%` })));
-    if (j.error) card.append(el("div", { class: "err", text: j.error }));
-    if (j.outputs.length) {
-      const all = QOPEN.has(j.id), show = all ? j.outputs : j.outputs.slice(0, 4);
-      const outs = el("div", { class: "souts" }, ...show.map(o => { const name = o.file.split("/").pop();
-        return soundRow(fileUrl(j.dir, o.file), name, { compact: true, title: name, titleTip: o.file, sub: o.seed != null ? "seed " + o.seed : "",
-          actions: [el("span", { class: "btnrow" },
-            el("a", { class: "b", href: fileUrl(j.dir, o.file, true), text: "⬇", title: "download " + name }),
-            el("button", { type: "button", text: "🔎", title: "find sounds on your disk like this one", onclick: () => findFrom({ take: j.dir + "/" + o.file }, name) }),
-            el("button", { type: "button", text: "📂", title: "open this job's folder", onclick: () => openThing({ folder: true, dir: j.dir }) }),
-            openBtn({ dir: j.dir, file: o.file }, "open this sound in…"))] }); }));
-      if (j.outputs.length > 4) outs.append(el("button", { type: "button", style: "justify-self:start", text: all ? "show fewer" : `show all ${j.outputs.length}`,
-        onclick: () => { all ? QOPEN.delete(j.id) : QOPEN.add(j.id); lastQueue = ""; drawQueue(); } }));
-      card.append(outs);
-    }
-    const acts = el("div", { class: "btnrow" });
-    if (j.status === "queued" || j.status === "running") acts.append(el("button", { type: "button", text: "Cancel", onclick: () => api("/api/cancel/" + j.id, {}).then(pollSoon) }));
-    acts.append(el("button", { type: "button", text: "Load", title: "put these settings back in the form", onclick: () => loadSettings(j.params) }));
-    card.querySelector("h4").after(acts); acts.style.gridColumn = "2"; acts.style.gridRow = "2";
-    if (j.log.length && j.status !== "done") card.append(el("pre", { class: "log", text: j.log.slice(-14).join("\n") }));
-    return card;
-  }));
+  const seen = new Map();                              // newest first; a group sits where its newest job is
+  for (const j of [...JOBS].reverse()) { const k = j.group || "#" + j.id; if (!seen.has(k)) seen.set(k, []); seen.get(k).unshift(j); }
+  host.replaceChildren(...[...seen].map(([k, js]) => k.startsWith("#") || js.length === 1 && !k.startsWith("set:") ? jobCard(js[0]) : groupCard(k, js)));
 }
-$("clearQueue").addEventListener("click", () => api("/api/jobs/clear", {}).then(pollSoon));
+$("clearQueue").addEventListener("click", async () => {
+  const fin = JOBS.filter(j => !live(j)).length, wait = JOBS.filter(j => j.status === "queued").length;
+  if (!fin && !wait) return toast("Nothing to clear.");
+  if (wait && !window.confirm(`Clear the queue? ${wait} waiting job${wait > 1 ? "s" : ""} will be cancelled and ${fin} finished one${fin === 1 ? "" : "s"} removed from this list (their sounds stay in the Gallery). The running job keeps going.`)) return;
+  try { const r = await api("/api/jobs/clear", {}); toast(`Cleared ${r.removed} job${r.removed === 1 ? "" : "s"}${r.cancelled ? `, cancelled ${r.cancelled}` : ""}`); } catch (e) { toast(e.message, true); }
+  pollSoon();
+});
 $("abortBtn").addEventListener("click", async () => {
   try { const r = await api("/api/jobs/abort", {}); toast(`Stopped ${r.cancelled} job(s)` + (Object.keys(r.servers).length ? `; cleared ${Object.keys(r.servers).join(", ")}` : "")); } catch (e) { toast(e.message, true); }
   pollSoon();
@@ -1274,9 +1354,17 @@ function statusBar(render, busy) {
     : render.stuck ? el("span", { class: "err", title: render.stuck.error || "", text: `● ${render.server} ${render.stuck.error ? "is broken: every prompt fails" : "is stuck: prompts waiting, nothing running"} · ` }) : null;
   $("sbStatus").replaceChildren(...[srvNote, run ? `${(ENG[run.engine] || {}).name} · ${run.done}/${run.total}${q ? ` · ${q} queued` : ""}` : "idle"].filter(Boolean));
   $("srvName").textContent = render.server + (render.stuck ? " · stuck" : render.up ? " · up" : " · down");
+  if (render.up === false) { SRVDOWN.since = SRVDOWN.since || Date.now(); } else { SRVDOWN.since = 0; SRVDOWN.hidden = false; }
+  $("srvDown").hidden = !SRVDOWN.since || SRVDOWN.hidden || !["sfx", "music", "song"].includes(eng);
+  $("srvDownName").textContent = render.server;
+  $("srvDownFor").textContent = SRVDOWN.since && Date.now() - SRVDOWN.since > 60000 ? `for ${Math.round((Date.now() - SRVDOWN.since) / 60000)} min` : "";
   $("srvDot").className = "dot " + (render.stuck ? "warn" : render.up ? "up" : "down");
 }
 $("srvPill").addEventListener("click", () => showTab("setup"));
+const SRVDOWN = { since: 0, hidden: false };
+$("srvDownCheck").addEventListener("click", () => { poll(); loadServers(); });
+$("srvDownSetup").addEventListener("click", () => showTab("setup"));
+$("srvDownHide").addEventListener("click", () => { SRVDOWN.hidden = true; $("srvDown").hidden = true; });
 
 /* ================= gallery ================= */
 let GAL = [], galEng = store.get("galEng", "all");
@@ -1312,7 +1400,7 @@ function textFor(p, file) {
 }
 function card(j, o) {
   const E = ENG[j.engine] || {}, url = fileUrl(j.dir, o.file), name = o.file.split("/").pop();
-  const snd = soundRow(url, name, { sub: o.seed != null ? "seed " + o.seed : "" });
+  const snd = soundRow(url, name, { sub: o.seed != null ? "seed " + o.seed : "", open: { dir: j.dir, file: o.file } });
   const r = (j.ratings || {})[o.file] || 0;
   const stars = el("span", { class: "stars" }, ...[1, 2, 3, 4, 5].map(n => el("button", { type: "button", class: n <= r ? "on" : "", text: "★", "aria-label": `${n} star${n > 1 ? "s" : ""}`,
     onclick: async () => { try { j.ratings = (await api("/api/rate", { dir: j.dir, file: o.file, stars: n === r ? 0 : n })).ratings; drawGallery(); } catch (e) { toast(e.message, true); } } })));
@@ -1448,8 +1536,8 @@ function detail(r, takes) {
   const S = SET.set, k = r.key, cur = heard[k] || (S.picks[k] && S.picks[k] !== "now" ? S.picks[k] : takes[0].take), i = Math.max(0, takes.findIndex(t => t.take === cur)), t = takes[i];
   const hasNow = (SET.now[k] || []).length;
   const left = el("div", { style: "display:grid;gap:8px;min-width:0" },
-    soundRow(takeUrl(t), `${k} · take ${tlabel(t, i)}`, { title: "take " + tlabel(t, i), sub: t.seed != null ? "seed " + t.seed : "" }),
-    hasNow ? soundRow(nowUrl(k), k + " · in the game now", { title: "now in the game", titleTip: (SET.now[k] || [])[0] }) : null);
+    soundRow(takeUrl(t), `${k} · take ${tlabel(t, i)}`, { title: "take " + tlabel(t, i), sub: t.seed != null ? "seed " + t.seed : "", open: { dir: t.job, file: t.file } }),
+    hasNow ? soundRow(nowUrl(k), k + " · in the game now", { title: "now in the game", titleTip: (SET.now[k] || [])[0], open: { set_now: { id: setId, key: k } } }) : null);
   const flagged = (S.flags[k] || []).includes(t.take);
   const promptIn = el("input", { value: r.prompt, "aria-label": "Prompt for " + k });
   const rc = el("div", { class: "recipe" },
@@ -1466,6 +1554,10 @@ function detail(r, takes) {
       hasNow ? el("button", { type: "button", text: "↗ now", title: "open the game's current file in…", onclick: e => openMenu({ set_now: { id: setId, key: k } }, e.currentTarget) }) : null),
     el("div", { style: "display:flex;gap:4px" }, promptIn, el("button", { type: "button", text: "Save", style: "flex:none", title: "change this key's prompt (new takes use it)", onclick: async () => {
       try { SET.set = (await api("/api/sets/update", { id: setId, row: { key: k, prompt: promptIn.value } })).set; drawRows(); toast("Prompt saved; render more takes to hear it"); } catch (e) { toast(e.message, true); } } })));
+  const noteIn = el("textarea", { rows: 1, placeholder: "a note for this key (what's wrong, what to try)", "aria-label": "Note for " + k });
+  noteIn.value = S.notes[k] || "";
+  rc.append(el("div", { class: "noteedit" }, noteIn, el("button", { type: "button", text: "Save note", style: "flex:none", onclick: async () => {
+    try { SET.set = (await api("/api/sets/mark", { id: setId, key: k, action: "note", note: noteIn.value })).set; drawRows(); toast(noteIn.value.trim() ? "Note saved" : "Note cleared"); } catch (e) { toast(e.message, true); } } })));
   const kind = S.theme.export.master && S.theme.export.master !== "off" ? S.theme.export.master : S.theme.engine === "narrate" ? "speech" : "sfx";
   const mTake = el("div", { class: "measure" }, el("span", { class: "lab", text: "take" }), el("span", { class: "dim", text: "measuring…" }));
   const mNow = hasNow ? el("div", { class: "measure" }, el("span", { class: "lab", text: "now" }), el("span", { class: "dim", text: "measuring…" })) : null;
@@ -1673,7 +1765,7 @@ async function findSearch() {
     const r = await api("/api/similar/search", { ...FQ, within: $("findWithin").value.trim(), k: +$("findK").value });
     if (!r.results.length) { $("findResults").replaceChildren(el("div", { class: "empty", text: "No matches in the index. Index more folders, or clear the folder filter." })); return; }
     $("findResults").replaceChildren(...r.results.map(x => {
-      const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = soundRow(url, name, { compact: true });
+      const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = soundRow(url, name, { compact: true, open: { path: x.path } });
       return el("div", { class: "fres" },
         el("span", { class: "sc", text: x.score + "%", title: "how alike, 100 = the same" }),
         cv,
@@ -1710,15 +1802,81 @@ $("presetLoad").addEventListener("click", () => {
   const p = PRESETS.find(x => x.name === $("preset").value); if (!p) return toast("pick a preset first", true);
   readForm(); eng = p.snapshot.engine; store.set("engine", eng); F[eng] = { ...p.snapshot.form }; store.set("form", F); setAdv(p.snapshot.adv || {}); showEngine(); toast(`Loaded preset ${p.name}`);
 });
-$("presetSave").addEventListener("click", async () => {
-  const name = (window.prompt("Save these settings as:", $("preset").value || "") || "").trim(); if (!name) return;
-  readForm();
-  try { PRESETS = (await api("/api/presets", { name, snapshot: { engine: eng, form: cur(), adv: ADVV } })).presets; await loadPresets(name); toast(`Saved preset ${name}`); } catch (e) { toast(e.message, true); }
-});
+$("presetSave").addEventListener("click", () => { readForm(); savePreset({ engine: eng, form: cur(), adv: ADVV }, $("preset").value || ""); });
 $("presetDel").addEventListener("click", async () => {
   const name = $("preset").value; if (!name) return;
   if (!window.confirm(`Delete the preset "${name}"?`)) return;
   try { await api("/api/presets/delete", { name }); await loadPresets(); toast(`Deleted preset ${name}`); } catch (e) { toast(e.message, true); }
+});
+
+/* ================= presets from anywhere, 🧬 vary, sweep, seed, prompt history ================= */
+async function savePreset(snapshot, suggest) {
+  const name = (window.prompt("Save these settings as:", suggest || "") || "").trim(); if (!name) return;
+  const key = n => n.toLowerCase().replace(/[^\w.-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  const clash = PRESETS.find(x => key(x.name) === key(name));
+  if (clash && !window.confirm(`A preset called "${clash.name}" already exists. Replace it?`)) return;
+  try { PRESETS = (await api("/api/presets", { name, snapshot })).presets; await loadPresets(name); toast(`Saved preset ${name}`); } catch (e) { toast(e.message, true); }
+}
+function savePresetFrom(p) {
+  const form = {}; for (const k of [...FIELD_IDS, ...CHIP_FIELDS]) if (p[k] !== undefined) form[k] = p[k];
+  savePreset({ engine: p.engine, form, adv: p.adv || {} }, String(p.name || p.prompt || "").split("\n")[0].slice(0, 40));
+}
+async function varyTake(j, o) {
+  // GPU engines: the take becomes the reference, rendered again close to it with new seeds.
+  // CPU engines are deterministic per seed: same settings, new seeds.
+  const p = JSON.parse(JSON.stringify(j.params)), name = o.file.split("/").pop();
+  delete p.seed; p.n = 4;
+  try {
+    if (["sfx", "music", "song"].includes(p.engine)) {
+      const r = await api("/api/input/from-take", { dir: j.dir, file: o.file });
+      p.ref = r.file; p.ref_strength = p.ref_strength && +p.ref_strength < 0.6 ? p.ref_strength : 0.45;
+    }
+    const r = await api("/api/render", { ...p, group: "vary:" + Date.now(), label: name });
+    toast("Queued 4 variations: " + r.command); pollSoon();
+  } catch (e) { toast(e.message, true); }
+}
+const SWEEPS = () => {
+  const gpu = ["sfx", "music", "song"].includes(eng);
+  const list = [];
+  if (gpu) list.push(["ref_strength", "Reference strength", "0.2, 0.4, 0.6, 0.8"], ["adv.steps", "Steps", "4, 8, 16"], ["adv.cfg", "CFG", "1, 3, 6"]);
+  if (eng === "sfx" || eng === "music") list.push(["styles", "Style guides", Object.keys(META.styles.styles || {}).slice(0, 4).join(", ")]);
+  if (gpu || ["chip", "opl", "fx", "blip"].includes(eng)) list.push(["format", "Hardware format", META.formats.map(f => f.name).filter(n => n !== "none").slice(0, 5).join(", ")]);
+  if (["chip", "opl"].includes(eng)) list.push(["mood", "Mood", META.moods.slice(0, 5).join(", ")], ["scale", "Scale", META.scales.join(", ")], ["chippy", "Chippy", META.chippy.join(", ")]);
+  if (eng === "fx") list.push(["archetype", "Archetype", META.archetypes.slice(0, 6).join(", ")]);
+  if (eng === "blip") list.push(["blip_wave", "Blip wave", META.waves.join(", ")], ["blip_rate", "Blip rate", "8, 14, 20"]);
+  if (eng === "narrate") list.push(["voice", "Voice", Object.keys(META.voices).slice(0, 5).join(", ")], ["speed", "Speed", "0.8, 1, 1.2"], ["pitch", "Pitch", "-4, 0, 4"]);
+  if (eng === "song") list.push(["bpm", "BPM", "90, 120, 150"], ["key", "Key", "C minor, A minor, E minor"]);
+  if (eng !== "song" && eng !== "narrate" && eng !== "blip") list.push(["seconds", gpu ? "Seconds (SA3: changes what it makes, not only its length)" : "Seconds", gpu ? "2, 5, 10" : "1, 2, 4"]);
+  list.push(["lufs", "Loudness ceiling (LUFS)", "-23, -18, -14"]);
+  return list;
+};
+$("sweepBtn").addEventListener("click", () => {
+  const list = SWEEPS(), sel = $("swField");
+  sel.replaceChildren(...list.map(([k, label]) => el("option", { value: k, text: label })));
+  const fill = () => { const it = list.find(x => x[0] === sel.value); $("swValues").value = it ? it[2] : ""; $("swHint").textContent = `${ENG[eng].icon} ${ENG[eng].name}: one take per value, seed ${val("seed") || "picked at random, then shared"}.`; };
+  sel.onchange = fill; fill(); $("swErr").textContent = ""; $("sweepDlg").showModal();
+});
+$("swClose").addEventListener("click", () => $("sweepDlg").close());
+$("swGo").addEventListener("click", async () => {
+  const values = $("swValues").value.split(",").map(v => v.trim()).filter(Boolean);
+  try { const r = await api("/api/sweep", { params: params(), field: $("swField").value, values }); $("sweepDlg").close(); toast(`Queued a sweep of ${r.jobs.length} takes, seed ${r.seed}`); showTab("queue"); pollSoon(); }
+  catch (e) { $("swErr").textContent = e.message; }
+});
+$("seedDice").addEventListener("click", () => { $("seed").value = String(Math.floor(Math.random() * 2 ** 31)); $("seed").dispatchEvent(new Event("input", { bubbles: true })); });
+$("seedClear").addEventListener("click", () => { $("seed").value = ""; $("seed").dispatchEvent(new Event("input", { bubbles: true })); });
+// 🕘 the last 60 prompts per engine (this browser)
+const HIST = store.get("history", {});
+function remember(p) {
+  const t = String(p.prompt || "").trim(); if (!t || t.length > 4000) return;
+  const h = (HIST[p.engine] || []).filter(x => x !== t); h.unshift(t); HIST[p.engine] = h.slice(0, 60); store.set("history", HIST);
+}
+$("histBtn").addEventListener("click", e => {
+  document.querySelectorAll(".omenu").forEach(m => m.remove());
+  const h = HIST[eng] || [];
+  const m = el("div", { class: "omenu hist", role: "menu" }, ...(h.length ? h.map(t => el("button", { type: "button", role: "menuitem", text: t.split("\n")[0].slice(0, 90) + (t.includes("\n") ? " …" : ""), title: t,
+    onclick: () => { m.remove(); $("prompt").value = t; readForm(); queueCommand(); } })) : [el("div", { class: "dim", style: "padding:6px", text: "Nothing rendered with this engine yet." })]));
+  document.body.append(m); const r = e.currentTarget.getBoundingClientRect(); m.style.left = Math.max(8, r.right - m.offsetWidth) + "px"; m.style.top = r.bottom + 4 + "px";
+  setTimeout(() => document.addEventListener("click", function off(ev) { if (!m.contains(ev.target)) { m.remove(); document.removeEventListener("click", off); } }), 0);
 });
 
 /* ================= styles ================= */
@@ -1768,7 +1926,7 @@ let SETUP = null;
 async function loadServers() {
   try {
     SETUP = await api("/api/setup"); drawApps();
-    $("setupFile").textContent = "";
+    $("setupFile").textContent = SETUP.locked ? `started with --server ${SETUP.locked}: GPU renders go there (restart soundmon-gui without --server to choose here)` : "";
     const r = await api("/api/servers");
     const yes = (b, warn) => b == null ? '<span class="dim">?</span>' : b ? '<span style="color:var(--ok)">✓</span>' : `<span style="color:var(${warn ? "--bad" : "--dim"})">✗</span>`;
     $("srvRows").innerHTML = r.servers.map(s => `<tr><td><input type="radio" name="defsrv" value="${esc(s.name)}" ${r.render.split(",").includes(s.name) ? "checked" : ""} aria-label="use ${esc(s.name)}"></td>
@@ -1776,6 +1934,7 @@ async function loadServers() {
       <td><span class="dot ${s.up ? "up" : "down"}"></span>${s.up ? "up" : "down"}</td>
       <td>${s.up ? yes(s.models?.sa3, true) : "—"}</td><td>${s.up ? yes(s.models?.ace) : "—"}</td><td>${s.up ? yes(s.models?.t5gemma, true) : "—"}</td><td>${s.up ? yes(s.models?.qwen) : "—"}</td>
       <td>${s.restart ? "yes" : '<span class="dim">no</span>'}</td></tr>`).join("");
+    if (SETUP.locked) $("srvRows").querySelectorAll("input[name=defsrv]").forEach(i => i.disabled = true);
     $("srvRows").querySelectorAll("input[name=defsrv]").forEach(i => i.addEventListener("change", async () => {
       try { SETUP = await api("/api/setup", { server: i.value }); toast(`GPU renders now go to ${i.value}`); poll(); queueCommand(); } catch (e) { toast(e.message, true); } }));
   } catch (e) { $("srvRows").innerHTML = `<tr><td colspan="8" style="color:var(--bad)">${esc(e.message)}</td></tr>`; }
@@ -1788,6 +1947,9 @@ function drawApps() {
         if (f !== "exec") return inp;
         return el("div", { class: "pathrow" }, inp, el("button", { type: "button", text: "Browse…", title: "pick the program", onclick: async () => { const p = await pickPath({ kind: "file", start: a.exec && a.exec.includes("/") ? a.exec : "", title: "Choose the program" }); if (p) { inp.value = a.exec = p; if (!a.name) { a.name = p.split("/").pop(); drawApps(); } } } })); }),
       el("button", { type: "button", text: "✕", "aria-label": "remove", onclick: () => { SETUP[key].splice(i, 1); drawApps(); } }))));
+    const found = ((SETUP.detected || {})[key] || []).filter(a => !(SETUP[key] || []).some(b => b.exec === a.exec && b.args === a.args));
+    if (found.length) $(host).append(el("select", { "aria-label": "add a program found on this machine", onchange: e => { const a = found[+e.target.value]; if (a) { SETUP[key].push({ ...a }); drawApps(); } } },
+      el("option", { value: "", text: `＋ found on this machine (${found.length})…` }), ...found.map((a, i) => el("option", { value: i, text: a.name }))));
   }
 }
 document.querySelectorAll("[data-addapp]").forEach(b => b.addEventListener("click", () => { SETUP[b.dataset.addapp].push({ name: "", exec: "", args: "{}" }); drawApps(); }));

@@ -482,6 +482,114 @@ def browse(path, kind="any", exts=None, hidden=False, gallery=None):
             "sep": os.sep}
 
 
+def _desktop_entries():
+    """Linux: every installed app's .desktop entry (pixelmon-gui's scan)."""
+    dirs = [os.path.expanduser("~/.local/share/applications"), "/usr/local/share/applications", "/usr/share/applications",
+            os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
+            "/var/lib/flatpak/exports/share/applications", "/var/lib/snapd/desktop/applications"]
+    seen, out = set(), []
+    for d in dirs:
+        for f in sorted(glob.glob(os.path.join(d, "*.desktop"))):
+            if os.path.basename(f) in seen:
+                continue
+            seen.add(os.path.basename(f))
+            e, sect = {}, None
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line.startswith("["):
+                            sect = line
+                        elif sect == "[Desktop Entry]" and "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            e.setdefault(k.strip(), v.strip())
+            except OSError:
+                continue
+            if e.get("Type") == "Application" and e.get("Exec") and e.get("NoDisplay", "").lower() != "true" \
+                    and e.get("Hidden", "").lower() != "true":
+                out.append(e)
+    return out
+
+
+def _desktop_app(e):
+    try:
+        parts = shlex.split(e["Exec"])
+    except ValueError:
+        return None
+    parts = [x for x in parts if x not in ("%i", "%c", "%k")]
+    args = ["{}" if x in ("%f", "%F", "%u", "%U") else x for x in parts[1:]]
+    if "{}" not in args:
+        args.append("{}")
+    return {"name": e.get("Name", parts[0]), "exec": parts[0], "args": shlex.join(args).replace("'{}'", "{}")}
+
+
+def _mac_app(name, bundle):
+    for root in ("/Applications", os.path.expanduser("~/Applications"), "/System/Applications"):
+        for app in glob.glob(os.path.join(root, bundle)):
+            return {"name": name, "exec": "open", "args": f"-a {shlex.quote(os.path.splitext(os.path.basename(app))[0])} {{}}"}
+    return None
+
+
+def _win_app(name, *patterns):
+    roots = [os.environ.get(v, "") for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "ProgramW6432")]
+    for pat in patterns:
+        if not any(ch in pat for ch in "\\/*"):
+            w = shutil.which(pat)
+            if w:
+                return {"name": name, "exec": w, "args": "{}"}
+            continue
+        for r in [x for x in roots if x]:
+            hits = sorted(glob.glob(os.path.join(r, pat)))
+            if hits:
+                return {"name": name, "exec": hits[-1], "args": "{}"}
+    return None
+
+
+_DETECTED = {}
+
+
+def detect_programs():
+    """Sound programs and file managers installed here, offered in Setup's "Add a program" (cached)."""
+    if "v" in _DETECTED:
+        return _DETECTED["v"]
+    snd, fold = [], []
+    if IS_MAC:
+        for n, b in (("Audacity", "Audacity.app"), ("ocenaudio", "ocenaudio.app"), ("VLC", "VLC.app"), ("REAPER", "REAPER*.app"),
+                     ("Logic Pro", "Logic Pro*.app"), ("GarageBand", "GarageBand.app"), ("Bitwig Studio", "Bitwig Studio.app"),
+                     ("Renoise", "Renoise*.app"), ("OpenMPT", "OpenMPT*.app"), ("MuseScore", "MuseScore*.app"), ("QuickTime Player", "QuickTime Player.app")):
+            a = _mac_app(n, b)
+            if a:
+                snd.append(a)
+        fold.append({"name": "Finder", "exec": "open", "args": "{}"})
+    elif IS_WIN:
+        for n, *pats in (("Audacity", r"Audacity\Audacity.exe"), ("ocenaudio", r"ocenaudio\ocenaudio.exe"), ("VLC", r"VideoLAN\VLC\vlc.exe"),
+                         ("REAPER", r"REAPER (x64)\reaper.exe", r"REAPER\reaper.exe"), ("Bitwig Studio", r"Bitwig Studio\Bitwig Studio.exe"),
+                         ("Renoise", r"Renoise*\Renoise.exe"), ("OpenMPT", r"OpenMPT\OpenMPT.exe"), ("MilkyTracker", r"MilkyTracker\milkytracker.exe"),
+                         ("MuseScore", r"MuseScore*\bin\MuseScore*.exe")):
+            a = _win_app(n, *pats)
+            if a:
+                snd.append(a)
+        fold.append({"name": "Explorer", "exec": "explorer", "args": "{}"})
+    else:
+        for e in _desktop_entries():
+            mimes = [m for m in e.get("MimeType", "").split(";") if m]
+            a = _desktop_app(e)
+            if not a:
+                continue
+            if any(m.startswith("audio/") or m in ("application/ogg", "audio/x-wav", "audio/midi") for m in mimes):
+                snd.append(a)
+            if "inode/directory" in mimes or "FileManager" in e.get("Categories", ""):
+                fold.append(a)
+        have = {a["exec"] for a in snd}
+        for n, x, args in (("Audacity", "audacity", "{}"), ("mpv", "mpv", "--force-window {}"), ("ffplay", "ffplay", "-autoexit {}"),
+                           ("sox play", "play", "{}"), ("MilkyTracker", "milkytracker", "{}"), ("SchismTracker", "schismtracker", "{}")):
+            if x not in have and shutil.which(x):
+                snd.append({"name": n, "exec": x, "args": args})
+    key = lambda a: a["name"].lower()     # noqa: E731
+    _DETECTED["v"] = (sorted({a["name"]: a for a in snd}.values(), key=key), sorted({a["name"]: a for a in fold}.values(), key=key))
+    return _DETECTED["v"]
+
+
 def os_opener(is_dir):
     if IS_MAC:
         return {"name": "Finder" if is_dir else "system default", "exec": "open", "args": "{}"}
@@ -1243,7 +1351,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/gallery":
             return self._json({"items": gallery_items(self.gallery)})
         if u.path == "/api/setup":
-            return self._json(load_setup())
+            snd, fold = detect_programs()
+            return self._json(dict(load_setup(), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
         if u.path == "/api/sets":
             return self._json({"sets": self.sets.list()})
         if u.path == "/api/presets":
@@ -1349,6 +1458,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 group, label = body.pop("group", None), body.pop("label", None)
                 job = self.jobs.add(body, group=group, label=label)
                 return self._json({"jobs": [job["id"]], "command": job["command"]})
+            if u.path == "/api/sweep":
+                # same seed, one setting varied over a few values: one labelled job per value, one queue card
+                base, field, values = dict(body.get("params") or {}), str(body.get("field") or ""), body.get("values")
+                if not re.fullmatch(r"(adv\.)?[a-z_]{1,30}", field):
+                    raise ValueError("pick a setting to sweep")
+                if not isinstance(values, list) or not 2 <= len(values) <= 24:
+                    raise ValueError("give 2 to 24 values, separated by commas")
+                seed = str(base.get("seed") or "").strip()
+                if not seed.isdigit():
+                    seed = str(random.randrange(1, 2 ** 31))
+                base.update(seed=seed, n=1)
+                variants = []
+                for v in values:
+                    q = json.loads(json.dumps(base))
+                    v = v.strip() if isinstance(v, str) else v
+                    if field.startswith("adv."):
+                        q.setdefault("adv", {})[field[4:]] = v
+                    elif field == "styles":
+                        q["styles"] = [x for x in str(v).split("+") if x]
+                    else:
+                        q[field] = v
+                    try:
+                        build_argv(q, load_meta())
+                    except ValueError as e:
+                        raise ValueError(f"{field} = {v}: {e}")
+                    variants.append((q, f"{field.split('.')[-1]} = {v}"))
+                group = f"sweep:{field.split('.')[-1]}:{time.strftime('%H%M%S')}"
+                ids = [self.jobs.add(q, group=group, label=lab)["id"] for q, lab in variants]
+                return self._json({"group": group, "jobs": ids, "seed": seed})
+            if u.path == "/api/input/from-take":         # 🧬 vary: a gallery take becomes a reference
+                src = self.jobs.gallery_path(body.get("dir"), body.get("file"))
+                os.makedirs(INPUTS, exist_ok=True)
+                out = unique_path(INPUTS, safe_name(os.path.basename(src), 96))
+                shutil.copy2(src, out)
+                return self._json({"file": os.path.basename(out)})
             if u.path.startswith("/api/cancel/"):
                 return self._json({"ok": self.jobs.cancel(u.path.rsplit("/", 1)[-1])})
             if u.path == "/api/jobs/clear":
@@ -1358,7 +1502,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u.path == "/api/rate":
                 return self._json({"ratings": rate(self.gallery, body.get("dir"), body.get("file"), body.get("stars", 0))})
             if u.path == "/api/setup":
-                return self._json(save_setup(body))
+                snd, fold = detect_programs()
+                return self._json(dict(save_setup(body), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
             if u.path == "/api/presets":
                 return self._json({"presets": save_preset(body)})
             if u.path == "/api/similar/index":
