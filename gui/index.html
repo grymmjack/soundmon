@@ -90,7 +90,7 @@ dialog.browse[open] { display: grid; grid-template-rows: auto auto auto minmax(0
 .omenu.hist { max-width: min(520px, calc(100vw - 16px)); max-height: 60vh; overflow-y: auto; }
 .omenu.hist button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ptools { display: inline-flex; gap: 4px; flex: none; }
-fieldset { position: relative; } .histbtn { position: absolute; top: -4px; right: 8px; padding: 1px 6px; font-size: 12px; background: var(--panel); }
+fieldset { position: relative; } .histbtn { position: absolute; top: -4px; right: 8px; display: flex; gap: 3px; } .histbtn button { padding: 1px 6px; font-size: 12px; background: var(--panel); }
 .btns { flex-wrap: wrap; }
 .pathrow { display: flex; gap: 4px; align-items: center; } .pathrow > input, .pathrow > textarea { flex: 1 1 auto; }
 .drop .dbtn { padding: 2px 7px; font-size: 11px; }
@@ -110,6 +110,9 @@ fieldset { position: relative; } .histbtn { position: absolute; top: -4px; right
 fieldset { border: 1px solid var(--line); border-radius: var(--radius); margin: 0; padding: 8px 10px 10px; min-width: 0; display: grid; gap: 8px; }
 legend { color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-size: 12px; padding: 0 5px; }
 legend::before { content: "▾ "; color: var(--accent); }
+legend { cursor: pointer; user-select: none; } fieldset.closed > :not(legend) { display: none !important; }
+fieldset.closed legend::before { content: "▸ "; } fieldset.closed { padding-bottom: 2px; }
+label.f .mono[data-typable] { cursor: text; text-decoration: underline dotted; }
 label.f { display: grid; gap: 3px; font-size: 12px; color: var(--dim); min-width: 0; }
 label.c { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .row { display: grid; gap: 8px; grid-template-columns: repeat(var(--c, 3), minmax(0, 1fr)); }
@@ -290,6 +293,9 @@ tr:last-child td { border-bottom: 0; }
 .srvdown { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 8px 12px 0; padding: 8px 12px; border: 1px solid var(--bad); border-radius: var(--radius); background: rgba(255,85,85,.08); font-size: 12.5px; }
 .srvdown b { color: var(--bad); }
 .noteedit { display: flex; gap: 4px; }
+.warns { display: grid; gap: 4px; } .warns:empty { display: none; }
+.warn1 { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--warn); border: 1px solid rgba(255,255,85,.35); border-radius: 4px; padding: 4px 8px; }
+.warn1 span { flex: 1; } .warn1 button { padding: 1px 7px; font-size: 11px; }
 dialog.takedlg { width: min(980px, calc(100vw - 32px)); }
 dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
 .takedlg .snd canvas.wave { height: 90px; }
@@ -331,7 +337,7 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
 
   <fieldset>
     <legend id="promptLegend">Describe the sound</legend>
-    <button type="button" id="histBtn" class="histbtn" title="prompts you rendered before (this engine)">🕘</button>
+    <span class="histbtn"><button type="button" id="rollBtn" title="a random description for this engine (shift-click: roll and render)">🎲</button><button type="button" id="histBtn" title="prompts you rendered before (this engine)">🕘</button></span>
     <textarea id="prompt" rows="3"></textarea>
     <div class="hint" id="promptHint"></div>
     <div class="btnrow" data-eng="blip narrate" style="margin-top:-4px"><button type="button" id="promptLoad" title="read a .txt of key | text lines into the box">Load a list from disk…</button></div>
@@ -464,6 +470,7 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
   <div class="actions">
     <div class="btns"><button type="button" class="render" id="renderBtn">RENDER</button><button type="button" id="sweepBtn" title="same seed, one setting varied over several values: hear what a setting does">SWEEP…</button><button type="button" id="copyCli">COPY CLI</button></div>
     <div class="cli" id="cli">…</div>
+    <div id="warns" class="warns"></div>
     <div class="toast" id="toast"></div>
   </div>
 </form>
@@ -766,9 +773,11 @@ async function updateCommand() {
     const r = await api("/api/command", p);
     if (r.invalid) throw new Error(r.invalid);
     $("cli").textContent = r.command; $("cli").classList.remove("err"); lastTakes = r.takes;
+    drawWarnings(r.warnings || []);
     $("renderBtn").textContent = r.takes > 1 ? `RENDER ${r.takes} ${["blip", "narrate"].includes(eng) ? "LINES" : "TAKES"}` : "RENDER";
     $("renderBtn").disabled = false;
   } catch (e) {               // an empty form is a starting point, not an error
+    drawWarnings([]);
     const empty = !String(p.prompt || "").trim() && !p.from_midi && !p.from_audio;
     $("cli").textContent = empty ? "the command appears here as you fill in the form" : e.message;
     $("cli").classList.toggle("err", !empty); $("renderBtn").disabled = true; $("renderBtn").textContent = "RENDER";
@@ -2070,6 +2079,38 @@ $("bkClear").addEventListener("click", async () => {
   catch (e) { toast(e.message, true); }
 });
 
+/* 🎲 a random description, per engine (pixelmon-gui's phrase dice, for sound) */
+const ROLL = {
+  sfx: [["a heavy", "a small", "a rusty", "an old", "a huge", "a distant", "a muffled", "a sharp", "a wet", "a hollow"],
+        ["wooden door", "iron gate", "glass bottle", "metal pipe", "stone slab", "leather bag", "chain", "crate", "sword", "drawbridge", "lever", "chest lid", "bell", "coin pouch"],
+        ["slamming shut", "creaking open", "shattering on stone", "dropped on a wooden floor", "scraping across gravel", "rattling", "clanging twice", "being dragged", "hit with a hammer", "rolling away"],
+        ["", ", in a large cave", ", in a small room", ", outdoors in the rain", ", close up", ", echoing in a hall"]],
+  music: [["a calm", "a tense", "an upbeat", "a dark", "a dreamy", "a heroic", "a melancholy", "a playful", "a mysterious", "a driving"],
+          ["lo-fi", "synthwave", "orchestral", "8-bit", "ambient", "jazz", "folk", "drum and bass", "celtic", "dungeon synth"],
+          ["piano loop", "string ostinato", "drum groove", "pad drone", "guitar riff", "flute melody", "bass line", "harp arpeggio", "choir pad", "marimba pattern"]],
+  song: [["synthwave", "folk rock", "power metal", "city pop", "chiptune rock", "indie pop", "acoustic ballad", "eurodance", "sea shanty", "blues"],
+         ["female vocals", "male vocals", "duet", "choir"], ["driving bass", "big drums", "warm pads", "fingerpicked guitar", "brass stabs", "arpeggiated synths"]],
+  chip: [["the forest temple", "boss fight", "title screen", "the frozen caves", "final chase", "town square", "the haunted tower", "victory lap", "sunken ruins", "the long road"]],
+  fx: [["laser", "coin", "jump", "explosion", "power up", "door", "hit", "error", "menu select", "alarm", "footstep", "magic spell", "pickup", "teleport"]],
+  blip: [["Hello there, traveller.", "The door is locked. Maybe there's a key somewhere?", "You found 50 gold!", "Are you sure? This can't be undone.", "Welcome back! It's been a while.", "Watch out, something moves in the dark…"]],
+};
+ROLL.opl = ROLL.chip; ROLL.narrate = ROLL.blip;
+function rollPrompt() {
+  const parts = ROLL[eng] || ROLL.sfx, pick = a => a[Math.floor(Math.random() * a.length)];
+  if (eng === "song") return `${pick(parts[0])}, ${pick(parts[1])}, ${pick(parts[2])}`;
+  return parts.map(pick).join(" ").replace(/\s+,/g, ",").replace(/\s+/g, " ").trim();
+}
+$("rollBtn").addEventListener("click", e => { $("prompt").value = rollPrompt(); readForm(); queueCommand(); if (e.shiftKey) setTimeout(() => $("renderBtn").click(), 300); });
+
+function drawWarnings(ws) {
+  // pixelmon-gui's setup check: renders, but probably not the way you meant; one click fixes it
+  const apply = w => { readForm(); if (w.fix) { Object.assign(cur(), w.fix); store.set("form", F); writeForm(); drawDrops(); }
+    if (w.adv) { const a = { ...ADVV }; for (const [k, v] of Object.entries(w.adv)) { if (v === "") delete a[k]; else a[k] = v; } setAdv(a); } queueCommand(); };
+  $("warns").replaceChildren(...ws.map(w => el("div", { class: "warn1" }, el("span", { text: "⚠ " + w.msg }),
+    w.fix || w.adv ? el("button", { type: "button", text: "Fix", onclick: () => apply(w) }) : null)),
+    ...(ws.filter(w => w.fix || w.adv).length > 1 ? [el("button", { type: "button", style: "justify-self:start;font-size:11px", text: "Fix all", onclick: () => ws.forEach(w => (w.fix || w.adv) && apply(w)) })] : []));
+}
+
 /* ================= styles ================= */
 function drawStyles() {
   const st = META.styles;
@@ -2161,6 +2202,28 @@ $("edManifest").closest("label").after(el("div", { class: "btnrow", style: "marg
 $("findDrop").append(el("button", { type: "button", class: "dbtn", text: "Browse…", style: "margin-left:auto", onclick: async e => {
   e.stopPropagation(); const p = await pickPath({ kind: "file", ext: EXT.audio, title: "Find sounds like…" }); if (!p) return;
   try { const j = await api("/api/input/from-path", { path: p }); findFrom({ input: j.file }, p.split("/").pop()); } catch (err) { toast(err.message, true); } } }));
+
+/* ---- fold-outs remembered; sliders: wheel steps (shift ×5), middle-click resets, click the value to type ---- */
+{
+  const FOLD = store.get("folds", {});
+  document.querySelectorAll(".form fieldset > legend").forEach(lg => {
+    const fs = lg.parentElement, key = (lg.firstChild?.textContent || lg.textContent).trim().toLowerCase();
+    if (FOLD[key]) fs.classList.add("closed");
+    lg.title = "fold / unfold (remembered)";
+    lg.addEventListener("click", e => { if (e.target.closest("button")) return; fs.classList.toggle("closed"); FOLD[key] = fs.classList.contains("closed"); store.set("folds", FOLD); });
+  });
+  document.querySelectorAll('input[type="range"]').forEach(r => {
+    const fire = () => { r.dispatchEvent(new Event("input", { bubbles: true })); r.dispatchEvent(new Event("change", { bubbles: true })); };
+    r.addEventListener("wheel", e => { e.preventDefault(); const st = +r.step || 1, k = (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 5 : 1);
+      r.value = Math.min(+r.max, Math.max(+r.min, +r.value + k * st)); fire(); }, { passive: false });
+    r.addEventListener("auxclick", e => { if (e.button === 1) { e.preventDefault(); r.value = r.defaultValue; fire(); } });
+    r.title = (r.title ? r.title + " · " : "") + "wheel to step (shift ×5), middle-click to reset";
+    const out = r.closest("label")?.querySelector(".mono");
+    if (out) { out.dataset.typable = "1"; out.title = "click to type a value"; out.addEventListener("click", e => { e.preventDefault();
+      const v = window.prompt(`Value (${r.min} to ${r.max}):`, r.value); if (v == null || v.trim() === "" || isNaN(+v)) return;
+      r.value = Math.min(+r.max, Math.max(+r.min, +v)); fire(); }); }
+  });
+}
 
 /* ================= boot ================= */
 async function boot() {

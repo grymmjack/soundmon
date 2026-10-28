@@ -855,6 +855,37 @@ def adv_argv(adv, eng=None):
     return out
 
 
+def preflight(p):
+    """Things that will render, but probably not the way you meant (pixelmon-gui's setup check):
+    [{"msg", "fix": {field: value} | None, "adv": {field: value} | None}]."""
+    eng, adv, out = p.get("engine") or "sfx", p.get("adv") if isinstance(p.get("adv"), dict) else {}, []
+    gpu = ENGINES.get(eng, {}).get("gpu")
+    sao = adv.get("engine") == "sao"
+    try:
+        secs = float(p.get("seconds") or 0)
+    except (TypeError, ValueError):
+        secs = 0
+    if eng in ("sfx", "music") and sao and secs > 47:
+        out.append({"msg": "Stable Audio Open stops at 47 s.", "fix": {"seconds": "47"}})
+    if eng in ("sfx", "music") and not sao and (adv.get("steps") or adv.get("cfg")):
+        out.append({"msg": "SA3 is distilled for 8 steps at CFG 1; other values tend to sound worse, not better.", "adv": {"steps": "", "cfg": ""}})
+    if eng in ("sfx", "music") and not sao and p.get("reprompt") is False:
+        out.append({"msg": "SA3 was trained on rewritten descriptions: without the Qwen rewrite it usually sounds flatter.", "fix": {"reprompt": True}})
+    if eng in ("chip", "opl") and p.get("loop"):
+        out.append({"msg": "Chiptune and AdLib loop by construction; the loop crossfade isn't applied to them.", "fix": {"loop": False}})
+    if p.get("ref") and not gpu:
+        out.append({"msg": "The reference only steers SFX, Music and Song; this engine ignores it.", "fix": {"ref": ""}})
+    if (p.get("ref_match") or p.get("match_tone")) and not p.get("ref") and gpu:
+        out.append({"msg": "Tempo/key and tone matching need a reference sound — drop one in Reference.", "fix": {"ref_match": False, "match_tone": False}})
+    if gpu and SERVER_STATE.get("up"):
+        m = server_models(render_server().split(",")[0]) or {}
+        need = "ace" if eng == "song" else ("sao" if sao else "sa3")
+        if m and m.get(need) is False:
+            out.append({"msg": f"{render_server().split(',')[0]} doesn't have the {'ACE-Step' if need == 'ace' else 'SAO' if need == 'sao' else 'SA3 medium'} model — "
+                               f"provision it (./download-models.sh {'--song' if need == 'ace' else '--sa3' if need == 'sa3' else ''}) or pick another server in Setup.", "fix": None})
+    return out
+
+
 def is_manifest(text):
     """More than one line, or `key | text` rows: one file per line."""
     lines = [ln for ln in str(text or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
@@ -1675,7 +1706,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     argv, _, takes = build_argv(body, load_meta())
                 except ValueError as e:
                     return self._json({"invalid": str(e)})
-                return self._json({"command": command_text(argv), "takes": takes})
+                return self._json({"command": command_text(argv), "takes": takes, "warnings": preflight(body)})
             if u.path == "/api/render":
                 group, label = body.pop("group", None), body.pop("label", None)
                 job = self.jobs.add(body, group=group, label=label)
