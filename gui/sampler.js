@@ -676,7 +676,7 @@
       el("div", { class: "sm-sect", text: "Envelope" }),
       knob("pad.a"), knob("pad.d"), knob("pad.s"), knob("pad.r"),
       el("div", { class: "sm-sect", text: "Filter" }),
-      el("label", { class: "sm-k" }, el("span", { text: "Type" }), sel([["off", "off"], ["lp", "low-pass"], ["hp", "high-pass"]], p.filter, v => { p.filter = v; dirty(); }, ""), el("span")),
+      el("label", { class: "sm-k" }, el("span", { text: "Type" }), sel([["off", "off"], ["lp", "LP"], ["hp", "HP"]], p.filter, v => { p.filter = v; dirty(); }, ""), el("span")),
       knob("pad.cut"), knob("pad.res"));
     markLearn(); drawWave();
   }

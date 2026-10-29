@@ -26,6 +26,83 @@ SFX: same "just describe what you want" workflow, no subscription, no upload, no
 per-generation cost, and the render farm means you can make 100 variations while
 you get coffee.
 
+## Features
+
+**Making sounds**
+- **Sound effects and music loops** from a description with **Stable Audio 3** (44.1 kHz,
+  full-band), with seconds, steps, CFG, seed and an **Avoid** (negative) prompt.
+- **Full songs with sung vocals** (`--song`, ACE-Step 1.5): lyrics, BPM, key and length.
+- **Narration** (`--narrate`, Kokoro, on the CPU): British and American voices, speed and pitch,
+  a whole `key | text` script in one go — or **record it yourself** (`--record`), a recording
+  booth that names each take as a generated line would be.
+- **Real synthesis where a model is the wrong tool** — no GPU, no model:
+  **NES 2A03 chiptunes** (`--chip`), **AdLib / OPL3 FM** on the Nuked OPL3 core DOSBox uses
+  (`--opl`), **8-bit sound effects** from sfxr-style recipes on a PSG or OPL3 (`--chipfx`,
+  `--oplfx`), and **JRPG text blips** (`--blip`). Chip and FM music can follow a `.mid` or a
+  recording (`--from-midi`, `--from-audio`), and write `.mod`, `.rad` and `.mid` beside the audio.
+- **14 moods** that set scale, tempo, rhythm and contour together (`--mood ominous`), and about
+  **40 style guides** (`--style impact,dry`, `ambience,big`, `ui,small`…) kept in `sounds.json`.
+- **Seamless loops** (`--loop`) that really loop: the model's composed ending is found and cut
+  so the last sample runs into the first.
+- **Steer with a reference** (`--ref`): make a sound like one you have, from close variation to
+  loosely inspired; keep its tempo, key and length (`--ref-match`) or match its tone (`--match-tone`).
+
+**Finishing**
+- **Mastering a set** (`--master`): every file gets its own amounts of one chain (tilt, body,
+  presence, sibilance) so twenty sounds stacked in a fight don't grate. Never normalised to full scale.
+- **Hardware format lock** (`--format amiga`, `sb`, `nes`, `gameboy`, `snes`, `psx`…): the real
+  machine's rate, bit depth and channels, aliasing and grit included. Silence trimmed, and `--ogg`
+  compression (11 MB → 436 KB for a minute of music).
+- **Stems, loops and sampler instruments** from a finished track (`tools/stems.py`,
+  `tools/instruments.py`): Demucs stems, bar loops, one-shots and multisample instruments for your DAW.
+
+**Your library**
+- **Find** (`--index`, `--find`, `--similar`): index the folders you choose (hundreds of
+  thousands of sounds, SQLite) and search by tags, loop or one-shot, length, tempo, key and
+  name — or by **sounds like** a sound you drop.
+- **Listen** (`--listen`): an audio model hears every sound, tags the ones whose names say
+  nothing, and lets you search by description ("a dark metallic hit").
+
+**The farm**
+- **Render farm**: fan a batch across several GPUs (`--server rtx,local,mac`); shares
+  ComfyUI, `servers.json` and the farm with [pixelmon](https://github.com/grymmjack/pixelmon).
+- **Batches** from a manifest (`--batch-file`); every file carries its own recipe (the command,
+  engine and seed) in its tags, so any sound can be made again.
+
+**The GUI (`soundmon-gui`)**
+- **Every engine on one form**, with the exact `soundmon …` command under RENDER, a setup check
+  with one-click fixes, presets, **SWEEP** (one setting across several values at the same seed)
+  and **🧬** variations of any take.
+- **Every sound is the same player**: waveform, spectrum, and what the file really is (rate,
+  depth, codec, peak, clipping). Takes show up in the **Queue** one by one as they finish;
+  **Cancel** stops the GPU work.
+- **🎚 Sets** for a game's whole sound list: N takes per key beside the sound the game plays now —
+  pick, flag, re-roll, then **export picks** into the game folder (replaced files backed up first).
+- **🔎 Find** and 👂 **Listen** on your library, with tag chips, an **Aspects** dial and drag-in
+  "sounds like".
+- **🎞 Clip bin**: named bins of sounds dragged in from anywhere, reordered, played through, zipped.
+- **🎛 Assemble**: an 8-lane sketchpad on a musical grid — move, trim, fade, pitch, stretch and
+  reverse clips, shape the sum with **pitch, filter and amp envelopes**, then export, send to the
+  clip bin, or make one like it.
+- **🎹 Sampler**: 16 pads played from a **MIDI controller**, the computer's keys or the mouse —
+  pads, pitched or both, per-pad envelope, filter, loop and choke groups, MIDI-learned knobs,
+  recording and resampling, kits saved and exported as **SFZ**.
+- **⚖ Compare** up to nine takes at the same moment (`1`–`9`), with loudness and spectra;
+  **🗣 Voices** speaks a line in every voice.
+- **Open in** Audacity, VLC, OpenMPT, your file manager… from any sound; **Browse…** on every
+  path; backups of the whole gallery.
+
+## Screenshots
+
+| | |
+|:-:|:-:|
+| ![Gallery: every take with its waveform, spectrum and recipe](docs/screenshots/soundmon-gallery.png) | ![Find: the library searched for kick, with tag chips and filters](docs/screenshots/soundmon-find.png) |
+| **Gallery** — every take with its player, recipe, **Load** and **Again** | **🔎 Find** — your sound library, by tags, filters or "sounds like" |
+| ![Assemble: eight lanes of clips with the master's pitch, filter and amp envelopes](docs/screenshots/soundmon-assemble.png) | ![Sampler: a 16-pad kit, the selected pad's waveform with its loop, knobs and keyboard](docs/screenshots/soundmon-sampler.png) |
+| **🎛 Assemble** — build a sound from others on 8 lanes | **🎹 Sampler** — 16 pads played from a MIDI controller |
+| ![Gallery with the clip bin open beside it](docs/screenshots/soundmon-clip-bin.png) | ![Voices: one line spoken by every Kokoro voice](docs/screenshots/soundmon-voices.png) |
+| **🎞 Clip bin** — collect sounds from anywhere | **🗣 Voices** — hear a line in every voice |
+
 ---
 
 ## What this is
