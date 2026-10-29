@@ -1008,7 +1008,15 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   Under it, a **setup check** warns about settings that will render but probably not as
   meant (SAO past 47 s, SA3 steps/CFG, a reference the engine ignores, a server missing the
   model…), each with **Fix**.
-- **Queue** shows each job's progress (`✅ [i/n]` lines), log and errors. When ComfyUI
+- **Avoid** (SFX, Music, Song), under the description, is the negative prompt (`--negative`):
+  what to push away. With **keep the usual ones too** ticked (the default) your words are
+  added to the mode's own negative (no music or speech in an SFX, and so on); untick it to
+  avoid only what you typed. Style guides add their own either way (not on Song).
+- **Layout:** drag the edge of the form, or of the clip bin, to make it wider or narrower
+  (double-click the edge to reset; remembered); text boxes grow as you type, and their
+  corner handle (and the command preview's) drags them taller.
+- **Queue** shows each job's progress (`✅ [i/n]` lines), log and errors. Several takes
+  show up one by one as each is finished, not all at the end. When ComfyUI
   fails a job, the job fails in seconds with the node's own message. A set render, a Voices
   run or a sweep is one card with one bar and **Cancel all**. **Cancel** really stops the
   GPU: soundmon takes its own prompts off ComfyUI's queue (and interrupts the one rendering
@@ -1063,6 +1071,33 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   character count. A result's tag (dashed: by ear) is a menu: set your own, and the next
   Listen learns from it. Each result can be played, **Use**d as the form's reference,
   opened in its folder, compared, or have its path copied.
+- **🎛 Assemble** is a sketchpad for building a sound from others: 8 lanes on a grid (BPM,
+  beats per bar, snap from 1 bar to 1/32, 10 ms or off; Shift drags off the grid; the wheel
+  zooms, Shift+wheel scrolls). Drag sounds onto the lanes from the clip bin, Gallery, Queue,
+  Find, Sets or your desktop, then move them (Alt: a copy), trim their edges and drag their
+  top corners for fades. A clip's **volume**, **pitch** (sampler-style: it changes the length
+  too, unless **keep length**), **stretch** (×½, ×2 or any amount, pitch kept), **reverse**;
+  each lane has mute, solo and volume. The **master** shapes the sum with three breakpoint
+  envelopes drawn under the lanes: **pitch** (varispeed of the whole mix, like a sampler's
+  pitch envelope), **filter cutoff** (LP or HP, with resonance) and **amp** (click to add a
+  point, drag it, right-click to delete). The green strip is the result. **Play** (Space)
+  plays from the cursor (click the ruler), **Loop** repeats; Ctrl+Z / Ctrl+Y undo and redo.
+  Out: **Export** (WAV, FLAC, OGG or MP3, into `~/soundmon-gallery/assemble/exports` or any
+  folder), **To clip bin**, **Make one like this** (it becomes the form's reference sound)
+  and **Find similar**; **no clipping** turns the mix down if it would clip (never up).
+  Name a project to keep it (saved as you go, in `~/soundmon-gallery/assemble/projects`);
+  the sounds it uses are kept in `assemble/media`. The page mixes everything itself (Web
+  Audio), so what you hear is what you export; stretches are made by ffmpeg (rubberband
+  when the build has it, else `atempo`).
+- **🎞 Clip bin** (pixelmon-gui's corkboard, for sound): collect sounds from anywhere in bins
+  beside the tabs. Drag any sound in (a queue or gallery take, a Find result, a set's take,
+  a file from your desktop; with the bin hidden, drop it on the 🎞 Clip bin button), or
+  right-click it → **Add to clip bin**. Each clip is a copy in
+  `~/soundmon-gallery/bins/BIN/`, so taking it out never touches the original; hover its
+  name to see where it came from. Drag clips to reorder them; right-click one to move it
+  to the top, the bottom or another bin. **▶ play through** plays the bin in order, **Use**
+  makes a clip the form's reference, and a bin can be renamed, deleted, opened in its
+  folder or downloaded as a `.zip` (numbered in the bin's order).
 - **Voices** speaks one of your lines in every Kokoro voice, so you can compare them;
   **Use** puts one in the Narrate form.
 - **Presets** (top of the form) save and load the form's settings by name, in folders and

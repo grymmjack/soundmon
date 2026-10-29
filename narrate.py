@@ -71,7 +71,30 @@ SAMPLE_RATE = 24000     # Kokoro's native output rate
 # CPU inference is ~1s a line anyway, so there is nothing to win on the GPU
 # and a whole class of driver problems to lose.
 RUN_DEVICE = "cpu"
+KOKORO_REPO = "hexgrad/Kokoro-82M"
 
+
+
+def kokoro_pipeline(lang):
+    """Kokoro's pipeline without the noise it prints on every run: torch's dropout and weight_norm
+    warnings (harmless, about the model's own code), the repo_id hint, and the Hub's "unauthenticated
+    requests" warning once the model is already downloaded (it is then only checked, never fetched)."""
+    import logging
+    import warnings
+    from kokoro import KPipeline
+    warnings.filterwarnings("ignore", message=r"dropout option adds dropout", category=UserWarning)
+    warnings.filterwarnings("ignore", message=r".*weight_norm.* is deprecated", category=FutureWarning)
+    for name in ("huggingface_hub", "huggingface_hub.utils._http", "kokoro"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        if isinstance(try_to_load_from_cache(KOKORO_REPO, "config.json"), str):
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            import huggingface_hub.constants as hc
+            hc.HF_HUB_OFFLINE = True
+    except Exception:
+        pass
+    return KPipeline(lang_code=lang, repo_id=KOKORO_REPO, device=RUN_DEVICE)
 
 def _pitch_shift(audio, semitones, np):
     """Lower (or raise) pitch while keeping the original duration.
@@ -233,7 +256,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
     print(f"🎙  {a.voice} ({VOICES[a.voice]})  |  {len(items)} line(s)  |  "
           f"speed {a.speed}  |  pitch {a.pitch:+g} st  |  CPU")
 
-    pipeline = KPipeline(lang_code=lang, device=RUN_DEVICE)
+    pipeline = kokoro_pipeline(lang)
     # Speaking faster up front is what lets _pitch_shift lower the pitch without
     # also stretching the line — see the docstring there.
     gen_speed = a.speed * (2.0 ** (-a.pitch / 12.0))

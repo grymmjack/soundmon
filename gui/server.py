@@ -1067,6 +1067,15 @@ def build_argv(p, meta, jdir=None):
                 argv.append("--no-reprompt")
             if eng == "music" and p.get("loop"):
                 argv.append("--loop")
+            # Avoid (negative prompt): added to the mode's usual negative unless neg_keep is off.
+            # One line on the command, so line breaks become commas.
+            neg = ", ".join(x.strip(" ,") for x in str(p.get("negative") or "").splitlines() if x.strip(" ,"))
+            if len(neg) > 600:
+                raise ValueError("the negative prompt is too long (600 characters max)")
+            keep = p.get("neg_keep") is not False
+            if neg or not keep:
+                usual = meta["negatives"].get({"song": "SONG_NEGATIVE", "music": "MUSIC_NEGATIVE"}.get(eng, "SFX_NEGATIVE"), "")
+                argv += ["--negative", ", ".join(x for x in (usual if keep else "", neg) if x)]
         if eng == "song":
             lyr = str(p.get("lyrics") or "").strip()
             if len(lyr) > 20000:
@@ -1388,14 +1397,25 @@ class JobQueue:
                                              env=dict(os.environ, NO_COLOR="1", PYTHONUNBUFFERED="1"))
                 for line in self.proc.stdout:
                     line = ANSI.sub("", line.rstrip())
-                    if not line.strip():
-                        continue
+                    if not line.strip() or line.strip() == "amdgpu.ids: No such file or directory":
+                        continue                    # (ROCm's libdrm on loading torch: harmless, every run)
                     with self.lock:
                         job["log"].append(line)
                         m = DONE_LINE.search(line)
                         if m:
                             job["done"] = int(m.group(1))
                             job["total"] = max(job["total"], int(m.group(2)))
+                            # each take shows up as it lands (soundmon prints ✅ once its file is finished),
+                            # not all of them when the last one is done
+                            try:
+                                outs = scan_outputs(d)
+                                seeds = [int(s) for s in SEED.findall("\n".join(ln for ln in job["log"] if "✅" in ln))]
+                                for o in outs:
+                                    if o["seed"] is None and seeds:
+                                        o["seed"] = seeds[min(len(seeds) - 1, outs.index(o))]
+                                job["outputs"] = outs
+                            except OSError:
+                                pass
                 rc = self.proc.wait()
             except Exception as e:
                 job["log"].append(f"GUI error: {e}")
@@ -1739,6 +1759,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path in ("/", "/index.html"):
             return self._file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
+        if u.path == "/assemble.js":
+            return self._file(os.path.join(HERE, "assemble.js"), "text/javascript; charset=utf-8")
+        if u.path.startswith("/api/assemble/"):
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                if u.path == "/api/assemble/media":
+                    full = asm_media_path((q.get("f") or [""])[0])
+                    return self._file(full, AUDIO_TYPES.get(os.path.splitext(full)[1].lower()) or "application/octet-stream")
+                if u.path == "/api/assemble/projects":
+                    return self._json({"projects": asm_projects(), "folder": ASM, "exports": asm_dir("exports"),
+                                       "stretcher": "rubberband" if _has_rubberband() else "atempo"})
+                if u.path == "/api/assemble/project":
+                    with open(asm_project_path((q.get("name") or [""])[0]), encoding="utf-8") as fh:
+                        return self._json({"project": json.load(fh)})
+            except (ValueError, OSError) as e:
+                return self._json({"error": str(e)}, 404)
         if u.path == "/api/meta":
             meta = load_meta()
             meta.update(server=render_server(), server_up=server_is_up(), known_servers=sorted(known_servers()),
@@ -1857,6 +1893,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 501)
             except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as e:
                 return self._json({"error": str(e)}, 400)
+        if u.path == "/api/bins":
+            return self._json({"root": BINS, "bins": list_bins()})
+        if u.path in ("/api/bins/file", "/api/bins/zip"):
+            q = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+            try:
+                if u.path == "/api/bins/zip":
+                    tmp = bin_zip((q.get("bin") or [""])[0])
+                    try:
+                        return self._file(tmp, "application/zip", "clip-bin-" + safe_name(q["bin"][0], 48) + ".zip")
+                    finally:
+                        os.remove(tmp)
+                full = bin_file((q.get("bin") or [""])[0], (q.get("file") or [""])[0])
+            except ValueError as e:
+                return self._json({"error": str(e)}, 404)
+            ext = os.path.splitext(full)[1].lower()
+            return self._file(full, AUDIO_TYPES.get(ext) or "application/octet-stream",
+                              os.path.basename(full) if "download" in q else None)
         if u.path.startswith("/files/"):
             rel = urllib.parse.unquote(u.path[len("/files/"):])
             if "\x00" in rel:
@@ -1875,6 +1928,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/upload":                      # raw bytes; ?filename=
             return self._upload(urllib.parse.parse_qs(u.query))
+        if u.path in ("/api/assemble/upload", "/api/assemble/export"):     # raw bytes
+            q = urllib.parse.parse_qs(u.query)
+            arg = lambda k, d="": (q.get(k) or [d])[0]                     # noqa: E731
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= BIN_MAX:
+                    raise ValueError("a sound must be under 200 MB")
+                data = self.rfile.read(n)
+                if len(data) != n:
+                    raise ValueError("the upload was cut short")
+                if u.path == "/api/assemble/upload":       # a file dropped from the desktop onto a lane
+                    return self._json({"media": asm_store(arg("filename", "sound.wav"), data=data)})
+                if data[:4] != b"RIFF":
+                    raise ValueError("expected a WAV from the page")
+                fmt = arg("format", "wav").lower()
+                out = asm_encode(data, fmt)
+                fname = (safe_name(arg("name", "assembled"), 80) or "assembled") + "." + fmt
+                to = arg("to", "file")
+                if to == "bin":
+                    f, new = bin_add(arg("bin", "favorites"), data=out, fname=fname)
+                    return self._json({"bins": list_bins(), "file": f, "added": new})
+                if to == "ref":                            # the form's reference, or a Find query
+                    return self._json({"file": store_input(fname, data=out)})
+                if to != "file":
+                    raise ValueError(f"unknown export target {to!r}")
+                if arg("folder") and not self._local():
+                    raise ValueError("saving into this computer's folders only works on the computer running soundmon-gui")
+                folder = home_path(arg("folder")) if arg("folder") else asm_dir("exports")
+                if not os.path.isdir(folder):
+                    raise ValueError("pick a folder to save into")
+                path = unique_path(folder, fname)
+                with open(path, "wb") as fh:
+                    fh.write(out)
+                return self._json({"path": path})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        if u.path == "/api/bins/upload":                 # a sound dropped on a clip bin from the desktop: raw bytes
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if not 0 < n <= BIN_MAX:
+                    raise ValueError("a clip must be under 200 MB")
+                data = self.rfile.read(n)
+                if len(data) != n:
+                    raise ValueError("the upload was cut short")
+                f, new = bin_add((q.get("bin") or [""])[0], data=data, fname=(q.get("filename") or ["clip.wav"])[0])
+                return self._json({"bins": list_bins(), "added": [f] if new else [], "already": 0 if new else 1})
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
         if u.path == "/api/presets/import":              # raw .zip bytes
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -1896,6 +1998,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             return self._json({"error": "expected a JSON object"}, 400)
         try:
+            if u.path.startswith("/api/bins/"):
+                return self._json(self._bins_post(u.path[len("/api/bins/"):], body))
+            if u.path == "/api/input/from-target":       # a sound dragged within the page onto a drop zone
+                src = self._target_file(body.get("target"))
+                name = safe_name(os.path.basename(src), 96)
+                if not name.lower().endswith(INPUT_EXT):
+                    raise ValueError(f"not a file soundmon reads: {os.path.basename(src)}")
+                return self._json({"file": store_input(name, src=src), "name": os.path.basename(src)})
+            if u.path == "/api/assemble/import":         # a sound from the page (take, Find result, clip…) onto a lane
+                src = self._target_file(body.get("target"))
+                return self._json({"media": asm_store(os.path.basename(src), src=src)})
+            if u.path == "/api/assemble/process":
+                return self._json({"media": asm_process(body.get("media"), body.get("stretch", 1), body.get("semis", 0))})
+            if u.path == "/api/assemble/save":
+                proj = body.get("project")
+                if not isinstance(proj, dict):
+                    raise ValueError("nothing to save")
+                text = json.dumps(proj, indent=1)
+                if len(text) > 4 * 1024 * 1024:
+                    raise ValueError("that project is too big to save")
+                path = asm_project_path(body.get("name"))
+                with open(path + ".tmp", "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                os.replace(path + ".tmp", path)
+                return self._json({"projects": asm_projects(), "name": os.path.basename(path)[:-5]})
+            if u.path == "/api/assemble/delete":
+                os.remove(asm_project_path(body.get("name")))
+                return self._json({"projects": asm_projects()})
             if u.path == "/api/command":                 # the exact command RENDER would run
                 try:                                     # half-typed forms are normal here: answer, don't fail
                     argv, _, takes = build_argv(body, load_meta())
@@ -2102,7 +2232,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if t.get("backups"):
                     os.makedirs(backups_dir(), exist_ok=True)
                     t = {"path": backups_dir()}
-                if t.get("path") or t.get("input") or t.get("set_now"):
+                if t.get("bin"):                              # a clip bin, or a clip in one
+                    path = bin_file(t["bin"], t.get("file")) if t.get("file") else bin_dir(t["bin"])
+                    if t.get("reveal") and os.path.isfile(path):
+                        path = os.path.dirname(path)
+                    is_dir = os.path.isdir(path)
+                elif t.get("path") or t.get("input") or t.get("set_now"):
                     if t.get("path") and not self._local():
                         raise ValueError("opening paths only works on the computer running soundmon-gui")
                     # any file or folder under home (a path field, a Browse pick, a Find result, the game's file)
@@ -2209,6 +2344,84 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.sets.export(s, only_changed=not body.get("all"), master=mfn)
         raise ValueError(f"unknown sets action {act!r}")
 
+    def _target_file(self, t):
+        """A sound the page points at (the same targets as Open in…) -> its file: a take {dir, file},
+        a Find result or a file on disk {path}, a dropped input {input}, the game's file {set_now},
+        another bin's clip {bin, file}."""
+        if not isinstance(t, dict):
+            raise ValueError("expected a sound to add")
+        if t.get("bin"):
+            return bin_file(t["bin"], t.get("file"))
+        if t.get("input"):
+            return input_path(t["input"])
+        if t.get("set_now"):
+            return self.sets.now_path(self.sets.load(t["set_now"].get("id")), t["set_now"].get("key"))
+        if t.get("path") or t.get("indexed"):
+            p = str(t.get("path") or t.get("indexed"))
+            if find_index().has(p) and os.path.isfile(p):             # a Find result: anywhere it was indexed
+                return p
+            if not self._local():
+                raise ValueError("adding files from this computer only works on the computer running soundmon-gui")
+            p = home_path(p)
+            if not os.path.isfile(p):
+                raise ValueError("that's a folder, not a sound")
+            return p
+        return self.jobs.gallery_path(t.get("dir"), t.get("file"))
+
+    def _bins_post(self, act, body):
+        if act == "new":
+            d = bin_dir(body.get("name"), must=False)
+            if os.path.exists(d):
+                raise ValueError(f"there's already a bin called {os.path.basename(d)}")
+            os.makedirs(d)
+            return {"bins": list_bins(), "bin": os.path.basename(d)}
+        d = bin_dir(body.get("bin"))
+        name = os.path.basename(d)
+        if act == "rename":
+            to = bin_dir(body.get("to"), must=False)
+            if os.path.exists(to):
+                raise ValueError(f"there's already a bin called {os.path.basename(to)}")
+            os.rename(d, to)
+            return {"bins": list_bins(), "bin": os.path.basename(to)}
+        if act == "delete":
+            shutil.rmtree(d)
+            return {"bins": list_bins()}
+        if act == "add":                                   # sounds from the page: [{target}, …] or one target
+            ts = body.get("targets") if isinstance(body.get("targets"), list) else [body.get("target")]
+            added, had = [], 0
+            for t in ts[:200]:
+                src = self._target_file(t)
+                came = src if not (isinstance(t, dict) and t.get("bin")) else _bin_json(os.path.dirname(src), ".from.json", {}).get(os.path.basename(src), src)
+                f, new = bin_add(name, src=src, came=came)
+                added += [f] if new else []
+                had += 0 if new else 1
+                if isinstance(t, dict) and t.get("bin") and body.get("move") and new:
+                    od = os.path.dirname(src)
+                    os.remove(src)
+                    bin_forget(od, [os.path.basename(src)])
+            return {"bins": list_bins(), "added": added, "already": had}
+        if act == "remove":
+            fs = [os.path.basename(str(f)) for f in (body.get("files") or [body.get("file")]) if f]
+            for f in fs:
+                os.remove(bin_file(name, f))
+            bin_forget(d, fs)
+            return {"bins": list_bins()}
+        if act == "clear":
+            fs = bin_items(d)
+            for f in fs:
+                os.remove(os.path.join(d, f))
+            bin_forget(d, fs)
+            return {"bins": list_bins()}
+        if act == "order":
+            have = bin_items(d)
+            order = [f for f in body.get("order") or [] if f in have]
+            _bin_save(d, ".order.json", order + [f for f in have if f not in order])
+            return {"bins": list_bins()}
+        if act == "use":                                   # a clip becomes the form's reference sound
+            return {"file": store_input(safe_name(os.path.basename(bin_file(name, body.get("file"))), 96),
+                                        src=bin_file(name, body.get("file")))}
+        raise ValueError(f"unknown clip bin action {act!r}")
+
     def _upload(self, q):
         """A MIDI / reference audio / OPL bank / manifest dropped on the form -> INPUTS (never overwrites)."""
         fname = safe_name((q.get("filename") or ["input.mid"])[0], 96)
@@ -2265,8 +2478,267 @@ def unique_path(d, fname):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Clip bins (pixelmon-gui's corkboards, for sound): one folder per bin under BINS, each sound a
+# copy (removing one never touches the original). The bin's order is kept in .order.json, where
+# each copy came from in .from.json.
+# ---------------------------------------------------------------------------
+BINS = os.path.join(GALLERY_HOME, "bins")
+BIN_MAX = 200 * 1024 * 1024
+
+
+def bin_dir(name, must=True):
+    n = safe_name(name, 48)
+    if not n:
+        raise ValueError("give the bin a name (letters, digits, - and _)")
+    d = os.path.join(BINS, n)
+    if must and not os.path.isdir(d):
+        raise ValueError(f"there's no bin called {name}")
+    return d
+
+
+def bin_file(name, f):
+    d = bin_dir(name)
+    full = os.path.realpath(os.path.join(d, os.path.basename(str(f or ""))))
+    if not full.startswith(os.path.realpath(d) + os.sep) or not os.path.isfile(full):
+        raise ValueError(f"{f} isn't in the bin {name} any more")
+    return full
+
+
+def _bin_json(d, which, default):
+    try:
+        with open(os.path.join(d, which), encoding="utf-8") as fh:
+            v = json.load(fh)
+        return v if isinstance(v, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def _bin_save(d, which, v):
+    tmp = os.path.join(d, which + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(v, fh, indent=1)
+    os.replace(tmp, os.path.join(d, which))
+
+
+def bin_items(d):
+    """The bin's sounds in its order: the saved order first, anything else (added by hand) after."""
+    files = sorted((f for f in os.listdir(d) if not f.startswith(".") and f.lower().endswith(DISK_AUDIO)
+                    and os.path.isfile(os.path.join(d, f))), key=str.lower)
+    order = [f for f in _bin_json(d, ".order.json", []) if f in files]
+    return order + [f for f in files if f not in order]
+
+
+def list_bins():
+    os.makedirs(os.path.join(BINS, "favorites"), exist_ok=True)
+    out = []
+    for b in sorted(os.listdir(BINS), key=str.lower):
+        d = os.path.join(BINS, b)
+        if b.startswith(".") or not os.path.isdir(d):
+            continue
+        came = _bin_json(d, ".from.json", {})
+        out.append({"name": b, "items": [{"file": f, "size": os.path.getsize(os.path.join(d, f)), "from": came.get(f, "")}
+                                         for f in bin_items(d)]})
+    return out
+
+
+def bin_add(name, src=None, data=None, fname=None, came=""):
+    """Copy a sound into a bin, at the end. The same bytes under the same name aren't copied twice."""
+    import hashlib
+    d = bin_dir(name)
+    fname = safe_name(fname or os.path.basename(src), 96)
+    if not fname.lower().endswith(DISK_AUDIO):
+        raise ValueError(f"only sounds go in a clip bin ({', '.join(DISK_AUDIO)}): {fname}")
+    if data is None:
+        if os.path.getsize(src) > BIN_MAX:
+            raise ValueError("a clip must be under 200 MB")
+        with open(src, "rb") as fh:
+            data = fh.read()
+    digest = hashlib.sha1(data).hexdigest()
+    stem, ext = os.path.splitext(fname)
+    for f in os.listdir(d):
+        full = os.path.join(d, f)
+        if (f == fname or (f.startswith(stem + "-") and f.endswith(ext))) and os.path.getsize(full) == len(data):
+            with open(full, "rb") as fh:
+                if hashlib.sha1(fh.read()).hexdigest() == digest:
+                    return f, False                        # already here
+    out = unique_path(d, fname)
+    with open(out, "wb") as fh:
+        fh.write(data)
+    f = os.path.basename(out)
+    _bin_save(d, ".order.json", bin_items(d))              # (a new file sorts after the saved order: the end)
+    if came:
+        c = _bin_json(d, ".from.json", {})
+        c[f] = came
+        _bin_save(d, ".from.json", c)
+    return f, True
+
+
+def bin_forget(d, files):
+    """Take files out of a bin's order and where-from list (the files themselves are handled by the caller)."""
+    _bin_save(d, ".order.json", [f for f in _bin_json(d, ".order.json", []) if f not in files])
+    c = _bin_json(d, ".from.json", {})
+    if any(f in c for f in files):
+        _bin_save(d, ".from.json", {k: v for k, v in c.items() if k not in files})
+
+
+def bin_zip(name):
+    """The bin as a .zip in a temporary file (stored, not deflated: sounds barely shrink)."""
+    import tempfile
+    import zipfile
+    d = bin_dir(name)
+    fd, tmp = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+        for i, f in enumerate(bin_items(d), 1):
+            z.write(os.path.join(d, f), f"{i:02d}-{f}")    # numbered, so the bin's order survives
+    return tmp
+
+
+# ---------------------------------------------------------------------------
+# Assemble: an 8-lane sketchpad. The page mixes and plays everything itself (Web Audio); the
+# server keeps the sounds dropped on it (media/, deduplicated), makes stretched or length-kept
+# pitched copies with ffmpeg (media/_fx/), keeps projects (projects/NAME.json) and writes exports.
+# ---------------------------------------------------------------------------
+ASM = os.path.join(GALLERY_HOME, "assemble")
+_RUBBERBAND = []
+
+
+def asm_dir(*parts):
+    d = os.path.join(ASM, *parts)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def asm_media_path(name):
+    base = os.path.realpath(asm_dir("media"))
+    full = os.path.realpath(os.path.join(base, str(name or "")))
+    if not full.startswith(base + os.sep) or not os.path.isfile(full):
+        raise ValueError(f"that sound isn't in Assemble's media any more: {name}")
+    return full
+
+
+def asm_store(fname, data=None, src=None):
+    """A sound dropped on Assemble -> media/ (the same bytes are kept once). Returns its media name."""
+    import hashlib
+    fname = safe_name(fname, 96)
+    if not fname.lower().endswith(DISK_AUDIO):
+        raise ValueError(f"only sounds can go on a lane ({', '.join(DISK_AUDIO)}): {fname}")
+    if data is None:
+        if os.path.getsize(src) > BIN_MAX:
+            raise ValueError("a sound must be under 200 MB")
+        with open(src, "rb") as fh:
+            data = fh.read()
+    d = asm_dir("media")
+    digest = hashlib.sha1(data).hexdigest()
+    stem, ext = os.path.splitext(fname)
+    for f in os.listdir(d):
+        full = os.path.join(d, f)
+        if (f == fname or (f.startswith(stem + "-") and f.endswith(ext))) and os.path.isfile(full) and os.path.getsize(full) == len(data):
+            with open(full, "rb") as fh:
+                if hashlib.sha1(fh.read()).hexdigest() == digest:
+                    return f
+    out = unique_path(d, fname)
+    with open(out, "wb") as fh:
+        fh.write(data)
+    return os.path.basename(out)
+
+
+def _has_rubberband():
+    if not _RUBBERBAND:
+        try:
+            out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, timeout=20).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        _RUBBERBAND.append(bool(re.search(r"\srubberband\s", out)))
+    return _RUBBERBAND[0]
+
+
+def asm_process(name, stretch=1.0, semis=0.0):
+    """A copy of a media sound `stretch` times as long and `semis` semitones up, its length kept
+    (rubberband when ffmpeg has it, else atempo). Cached in media/_fx/."""
+    import hashlib
+    src = asm_media_path(name)
+    stretch, semis = float(stretch), float(semis)
+    if not (0.25 <= stretch <= 4 and -24 <= semis <= 24):
+        raise ValueError("stretch goes from 0.25x to 4x, pitch from -24 to +24 semitones")
+    if abs(stretch - 1) < 1e-4 and abs(semis) < 1e-4:
+        return name
+    rb = _has_rubberband()
+    key = hashlib.sha1(f"{name}|{os.path.getmtime(src)}|{stretch:.5f}|{semis:.4f}|{rb}".encode()).hexdigest()[:20]
+    rel = f"_fx/{key}.wav"
+    out = os.path.join(asm_dir("media", "_fx"), f"{key}.wav")
+    if os.path.isfile(out):
+        return rel
+    r, tempo = 2.0 ** (semis / 12.0), 1.0 / stretch
+    if rb:
+        af = [f"rubberband=tempo={tempo:.6f}:pitch={r:.6f}:transients=crisp"]
+    else:                                   # asetrate moves the pitch (and the speed), atempo puts the length right
+        af, t = ["aresample=44100"], tempo
+        if abs(semis) > 1e-4:
+            af += [f"asetrate={44100 * r:.3f}", "aresample=44100"]
+            t = tempo / r
+        while t < 0.5:
+            af.append("atempo=0.5")
+            t /= 0.5
+        while t > 2.0:
+            af.append("atempo=2.0")
+            t /= 2.0
+        af.append(f"atempo={t:.6f}")
+    tmp = out + ".tmp.wav"
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-y", "-i", src, "-af", ",".join(af), "-c:a", "pcm_f32le", tmp],
+                       capture_output=True, text=True, timeout=300)
+    if p.returncode or not os.path.isfile(tmp):
+        raise ValueError("ffmpeg couldn't stretch it: " + (p.stderr.strip().splitlines() or ["no output"])[-1])
+    os.replace(tmp, out)
+    return rel
+
+
+def asm_projects():
+    d = asm_dir("projects")
+    out = [{"name": f[:-5], "mtime": os.path.getmtime(os.path.join(d, f))} for f in os.listdir(d) if f.endswith(".json")]
+    return sorted(out, key=lambda x: -x["mtime"])
+
+
+def asm_project_path(name):
+    n = safe_name(name, 64)
+    if not n:
+        raise ValueError("give the project a name")
+    return os.path.join(asm_dir("projects"), n + ".json")
+
+
+_ENC = []
+
+
+def _asm_encoders():
+    if not _ENC:
+        try:
+            _ENC.append(subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=20).stdout)
+        except (OSError, subprocess.SubprocessError):
+            _ENC.append("")
+    return _ENC[0]
+
+
+def asm_encode(wav, fmt):
+    """WAV bytes from the page -> the format asked for (wav / flac / ogg / mp3), as bytes."""
+    if fmt == "wav":
+        return wav
+    if fmt == "ogg" and not _asm_encoders().count(" libvorbis "):
+        # (a build with no libvorbis: ffmpeg's own encoder, stereo only - the page always sends stereo)
+        codec = ["-ac", "2", "-c:a", "vorbis", "-strict", "-2", "-q:a", "6"]
+    else:
+        codec = {"flac": ["-c:a", "flac"], "ogg": ["-c:a", "libvorbis", "-q:a", "6"], "mp3": ["-c:a", "libmp3lame", "-q:a", "2"]}.get(fmt)
+    if not codec:
+        raise ValueError("export as wav, flac, ogg or mp3")
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-f", "wav", "-i", "pipe:0", *codec, "-f", fmt, "pipe:1"],
+                       input=wav, capture_output=True, timeout=300)
+    if p.returncode or not p.stdout:
+        raise ValueError(f"ffmpeg couldn't write {fmt}: " + (p.stderr.decode(errors="replace").strip().splitlines() or ["no output"])[-1])
+    return p.stdout
+
+
 def main():
-    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE, SETS_ROOT, PRESETS
+    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE, SETS_ROOT, PRESETS, BINS, ASM
     ap = argparse.ArgumentParser(prog="soundmon-gui", description="Web GUI for soundmon.")
     ap.add_argument("--port", type=int, default=8191)
     ap.add_argument("--server", default=os.environ.get("SOUNDMON_SERVER", ""),
@@ -2284,6 +2756,8 @@ def main():
     SETUP_FILE = os.path.join(GALLERY_HOME, "gui-setup.json")
     SETS_ROOT = os.path.join(GALLERY_HOME, "sets")
     PRESETS = os.path.join(GALLERY_HOME, "gui-presets")
+    BINS = os.path.join(GALLERY_HOME, "bins")
+    ASM = os.path.join(GALLERY_HOME, "assemble")
     SERVER_ARG = re.sub(r"\s+", "", args.server or "")
     os.makedirs(args.gallery, exist_ok=True)
     Handler.gallery = os.path.realpath(os.path.expanduser(args.gallery))

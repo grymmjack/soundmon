@@ -184,8 +184,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             sys.exit(f"--blip-style voice needs Kokoro: pip install kokoro   ({e})")
         if a.voice not in narrate.VOICES:
             sys.exit(f"unknown --voice {a.voice!r}. See --list-voices.")
-        pipeline = KPipeline(lang_code="b" if a.voice[0] == "b" else "a",
-                             device=narrate.RUN_DEVICE)
+        pipeline = narrate.kokoro_pipeline("b" if a.voice[0] == "b" else "a")
         print(f"\U0001f7e2 blip/voice  {a.voice}  |  {len(items)} line(s)  |  "
               f"{a.blip_speed:g}x  |  CPU")
     else:
