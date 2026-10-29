@@ -10,13 +10,15 @@ stretches are what grates. This measures every sound and gives each its own amou
     -> cut at 3.2 kHz           when the 2.5–5 kHz presence band piles up
     -> de-esser                 when its sibilant bursts are sharp
     -> low-pass 12 kHz          sound effects only (air)
-    -> gain back towards its own loudest 400 ms — at most +3 dB and never past -1 dBTP.
+    -> gain back to its own loudest 400 ms, never past -1 dBTP.
        No limiter, so nothing is distorted, and nothing is normalized to full scale.
 
-The make-up gain is capped ON PURPOSE (neon-caster's design): at most +3 dB, and none at all for
-a sound with over 40 % of its energy above 10 kHz (white noise, a whistle) — for those, the level
-the EQ and low-pass took away IS the treatment. So very bright sounds come out quieter than they
-went in (white noise: about -9 dB at its loudest 400 ms); every line of --master says by how much.
+A sound comes out as loud as it went in (its loudest 400 ms), less harsh. Only a sound with over
+40 % of its energy above 10 kHz (white noise, a whistle) may come out quieter, by at most
+BRIGHT_DROP: for those, some of the level the EQ and low-pass took away is the treatment.
+(It used to be at most +3 dB of make-up and none for a bright sound: a coin or a sword hit that
+is nearly all highs came out 15-18 dB down, too quiet to hear.) Headroom can still hold a sound
+back; every line of --master says what decided its gain.
 
 Voices ("speech") are left alone unless they are bright, and keep their air. On NEON-CASTER this
 took the sound effects' energy above 2.5 kHz from 34 % to 21 % and their harsh seconds from 64 to
@@ -46,6 +48,7 @@ KINDS = ("sfx", "speech")
 SKIP_DIRS = {"mastered", ".soundmon-backup", ".pixelmon-backup", "takes", "node_modules", ".git"}
 CEILING = -1.0              # dBTP: the only guard (no limiter)
 MARGIN = 0.1                # aim this far under it; the written file is measured again
+BRIGHT_DROP = 6.0           # dB: how much quieter a mostly-air sound may come out than it went in
 SILENT = 1e-6               # peak below -120 dBFS: nothing to measure
 
 
@@ -353,11 +356,12 @@ def master(src, dst, kind="sfx", a=None):
     try:
         _ffmpeg(["-i", src, "-af", ",".join(f), "-ar", sr, "-ac", ch, "-c:a", "pcm_f32le", tmp])
         m0, (m1, _), tp1 = loudness(src)[0], loudness(tmp), true_peak(tmp)
-        # back towards how loud it was (at most +3 dB), never past its headroom
-        g = min(m0 - m1, CEILING - MARGIN - tp1, 3.0)
-        why = "loudness" if g == m0 - m1 else "headroom" if g == CEILING - MARGIN - tp1 else "+3 dB cap"
-        if a["regions"]["air"] > 0.4 and g > 0:
-            g, why = 0.0, "bright"                        # a whistle up top: the low-pass took the harshness
+        # back to how loud it was, never past its headroom; a mostly-air sound (a whistle up top) may
+        # stay up to BRIGHT_DROP quieter - the low-pass took the harshness
+        bright = a["regions"]["air"] > 0.4
+        want = m0 - m1 - (BRIGHT_DROP if bright else 0.0)
+        g = min(want, CEILING - MARGIN - tp1)
+        why = ("bright" if bright else "loudness") if g == want else "headroom"
         if a.get("silent"):
             g, why = 0.0, "silent"
         g, tp = _write_gain(tmp, dst, g, sr, ch, ["-c:a", "pcm_s16le"])
@@ -610,7 +614,7 @@ def run(a, slug, to_ogg=None, loudness_normalize=None, to_flac=None):
             print(f"   ✅ [{i}/{len(files)}] {shown:<32} silent — written as it is")
             continue
         drop = after["lufs"] - before["lufs"]
-        note = {"bright": "  (bright: no make-up gain, by design)", "+3 dB cap": "  (make-up capped at +3 dB, by design)",
+        note = {"bright": f"  (bright: up to {BRIGHT_DROP:g} dB quieter, by design)",
                 "headroom": "  (kept under -1 dBTP)"}.get(what.get("limit"), "") if drop < -1 else ""
         print(f"   ✅ [{i}/{len(files)}] {shown:<32} {kind:<6} above 2.5k {before['harsh']:.0%}→{after['harsh']:.0%}  "
               f"harsh {before['harsh_s']:.2f}→{after['harsh_s']:.2f}s  loudest {before['lufs']:.1f}→{after['lufs']:.1f} LUFS  "
