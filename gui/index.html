@@ -624,6 +624,7 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
   </section>
 
   <section class="pane" id="p-assemble" hidden></section>
+  <section class="pane" id="p-sampler" hidden></section>
   <section class="pane" id="p-styles" hidden>
     <div class="paneh"><h2>Styles</h2><span class="dim">read live from sounds.json</span></div>
     <p class="lede">Proven prompt snippets appended to your description. Add your own to <code>sounds.json</code>; the key becomes the style's name.</p>
@@ -1033,7 +1034,7 @@ $("prompt").addEventListener("drop", async e => {                    // a .txt m
 });
 
 /* ================= tabs ================= */
-const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["find", "🔎 Find"], ["assemble", "🎛 Assemble"], ["compare", "⚖ Compare"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
+const TABS = [["sets", "🎚 Sets"], ["queue", "Queue"], ["gallery", "Gallery"], ["find", "🔎 Find"], ["assemble", "🎛 Assemble"], ["sampler", "🎹 Sampler"], ["compare", "⚖ Compare"], ["voices", "🗣 Voices"], ["styles", "Styles"], ["adv", "⚙ Advanced"], ["setup", "🛠 Setup"]];
 let tab = store.get("tab", "gallery");
 function showTab(t) {
   if (!TABS.some(x => x[0] === t)) t = "gallery";
@@ -1045,6 +1046,7 @@ function showTab(t) {
   if (t === "gallery") loadGallery();
   if (t === "sets") loadSets();
   if (t === "assemble" && window.asmShow) asmShow();
+  if (window.smpShow) smpShow(t === "sampler");
   if (t === "voices") drawVoices();
   if (t === "find") findStatus().then(() => { if (!findRun.done) { findRun.done = true; findRun(); } });
   if (t === "compare") drawCompare();
@@ -2663,5 +2665,6 @@ async function boot() {
 boot();
 </script>
 <script src="/assemble.js"></script>
+<script src="/sampler.js"></script>
 </body>
 </html>

@@ -1759,8 +1759,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path in ("/", "/index.html"):
             return self._file(os.path.join(HERE, "index.html"), "text/html; charset=utf-8")
-        if u.path == "/assemble.js":
-            return self._file(os.path.join(HERE, "assemble.js"), "text/javascript; charset=utf-8")
+        if u.path in ("/assemble.js", "/sampler.js"):
+            return self._file(os.path.join(HERE, u.path[1:]), "text/javascript; charset=utf-8")
+        if u.path.startswith("/api/sampler/"):
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                if u.path == "/api/sampler/kits":
+                    return self._json({"kits": smp_kits(), "folder": SMP, "exports": smp_dir("exports")})
+                if u.path == "/api/sampler/kit":
+                    with open(smp_kit_path((q.get("name") or [""])[0]), encoding="utf-8") as fh:
+                        return self._json({"kit": json.load(fh)})
+            except (ValueError, OSError) as e:
+                return self._json({"error": str(e)}, 404)
         if u.path.startswith("/api/assemble/"):
             q = urllib.parse.parse_qs(u.query)
             try:
@@ -1955,7 +1965,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError(f"unknown export target {to!r}")
                 if arg("folder") and not self._local():
                     raise ValueError("saving into this computer's folders only works on the computer running soundmon-gui")
-                folder = home_path(arg("folder")) if arg("folder") else asm_dir("exports")
+                folder = home_path(arg("folder")) if arg("folder") else smp_dir("exports") if arg("area") == "sampler" else asm_dir("exports")
                 if not os.path.isdir(folder):
                     raise ValueError("pick a folder to save into")
                 path = unique_path(folder, fname)
@@ -2026,6 +2036,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if u.path == "/api/assemble/delete":
                 os.remove(asm_project_path(body.get("name")))
                 return self._json({"projects": asm_projects()})
+            if u.path == "/api/sampler/save":
+                kit = body.get("kit")
+                if not isinstance(kit, dict):
+                    raise ValueError("nothing to save")
+                text = json.dumps(kit, indent=1)
+                if len(text) > 2 * 1024 * 1024:
+                    raise ValueError("that kit is too big to save")
+                path = smp_kit_path(body.get("name"))
+                with open(path + ".tmp", "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                os.replace(path + ".tmp", path)
+                return self._json({"kits": smp_kits(), "name": os.path.basename(path)[:-5]})
+            if u.path == "/api/sampler/delete":
+                os.remove(smp_kit_path(body.get("name")))
+                return self._json({"kits": smp_kits()})
+            if u.path == "/api/sampler/sfz":             # the kit as an SFZ instrument: NAME/NAME.sfz + NAME_samples/
+                if body.get("folder") and not self._local():
+                    raise ValueError("saving into this computer's folders only works on the computer running soundmon-gui")
+                folder = home_path(body["folder"]) if body.get("folder") else smp_dir("exports")
+                if not os.path.isdir(folder):
+                    raise ValueError("pick a folder to save into")
+                return self._json({"path": smp_sfz(body.get("kit"), folder, body.get("name") or "kit")})
             if u.path == "/api/command":                 # the exact command RENDER would run
                 try:                                     # half-typed forms are normal here: answer, don't fail
                     argv, _, takes = build_argv(body, load_meta())
@@ -2232,7 +2264,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if t.get("backups"):
                     os.makedirs(backups_dir(), exist_ok=True)
                     t = {"path": backups_dir()}
-                if t.get("bin"):                              # a clip bin, or a clip in one
+                if t.get("media"):                            # a sound on Assemble's lanes or a Sampler pad
+                    path = asm_media_path(t["media"])
+                    if t.get("reveal"):
+                        path = os.path.dirname(path)
+                    is_dir = os.path.isdir(path)
+                elif t.get("bin"):                            # a clip bin, or a clip in one
                     path = bin_file(t["bin"], t.get("file")) if t.get("file") else bin_dir(t["bin"])
                     if t.get("reveal") and os.path.isfile(path):
                         path = os.path.dirname(path)
@@ -2352,6 +2389,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError("expected a sound to add")
         if t.get("bin"):
             return bin_file(t["bin"], t.get("file"))
+        if t.get("media"):                                            # a sound on Assemble's lanes or a Sampler pad
+            return asm_media_path(t["media"])
         if t.get("input"):
             return input_path(t["input"])
         if t.get("set_now"):
@@ -2737,8 +2776,150 @@ def asm_encode(wav, fmt):
     return p.stdout
 
 
+
+# ---------------------------------------------------------------------------
+# SAMPLER - a 16-pad sampler played from a MIDI controller (or the computer's keys). The page does the
+# playing (Web Audio + Web MIDI); the pads' sounds live in Assemble's media/ (the same store), kits in
+# sampler/kits/NAME.json, and a kit exports as an SFZ instrument any SFZ sampler or DAW loads.
+# ---------------------------------------------------------------------------
+SMP = os.path.join(GALLERY_HOME, "sampler")
+SFZ_COPY = (".wav", ".flac", ".ogg")              # the formats every SFZ player reads; the rest become WAV
+
+
+def smp_dir(*parts):
+    d = os.path.join(SMP, *parts)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def smp_kits():
+    d = smp_dir("kits")
+    out = [{"name": f[:-5], "mtime": os.path.getmtime(os.path.join(d, f))} for f in os.listdir(d) if f.endswith(".json")]
+    return sorted(out, key=lambda x: -x["mtime"])
+
+
+def smp_kit_path(name):
+    n = safe_name(name, 64)
+    if not n:
+        raise ValueError("give the kit a name")
+    return os.path.join(smp_dir("kits"), n + ".json")
+
+
+def _sample_rate(path):
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate",
+                              "-of", "csv=p=0", path], capture_output=True, text=True, timeout=30).stdout.strip()
+        return int(out.split(",")[0])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 44100
+
+
+def smp_sfz(kit, folder, name):
+    """Write the kit as FOLDER/NAME/NAME.sfz beside NAME_samples/. Pads sit on their notes at their own pitch;
+    in Pitched or Both mode the selected pad also covers the keys no pad is on, pitched from its root."""
+    import math
+    import shutil
+    if not isinstance(kit, dict) or not isinstance(kit.get("pads"), list):
+        raise ValueError("no kit to export")
+    name = safe_name(name, 64) or "kit"
+    out = unique_path(folder, name)
+    sdir = os.path.join(out, name + "_samples")
+    os.makedirs(sdir)
+    num = lambda v, d=0.0: float(v) if isinstance(v, (int, float)) and math.isfinite(v) else d   # noqa: E731
+    mode = kit.get("mode") if kit.get("mode") in ("pads", "keys", "both") else "both"
+    base = int(num(kit.get("base"), 48))
+    pads, files, used = kit["pads"][:16], {}, set()
+
+    def sample(i, p):                                  # copy (or convert) the pad's sound once
+        if i in files:
+            return files[i]
+        src = asm_media_path(p.get("media"))
+        stem = re.sub(r"[^\w.-]+", "-", os.path.splitext(p.get("name") or os.path.basename(src))[0]).strip("-")[:40] or "pad"
+        ext = os.path.splitext(src)[1].lower()
+        fname = f"{i + 1:02d}-{stem}" + (ext if ext in SFZ_COPY else ".wav")
+        dst = os.path.join(sdir, fname)
+        if ext in SFZ_COPY:
+            shutil.copyfile(src, dst)
+        else:
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-v", "error", "-y", "-i", src, "-c:a", "pcm_s16le", dst], capture_output=True, text=True, timeout=300)
+            if r.returncode:
+                raise ValueError(f"ffmpeg couldn't convert {os.path.basename(src)}")
+        files[i] = (fname, _sample_rate(dst))
+        return files[i]
+
+    def region(i, p, keys, center):
+        fname, sr = sample(i, p)
+        dur = num(p.get("dur"))
+        st, en = max(0.0, num(p.get("start"))), num(p.get("end")) or dur
+        o = [f"sample={fname}"] + keys + [f"pitch_keycenter={center}"]
+        if num(p.get("semis")):
+            o.append(f"transpose={int(num(p.get('semis')))}")
+        if num(p.get("fine")):
+            o.append(f"tune={int(num(p.get('fine')))}")
+        if num(p.get("vol")):
+            o.append(f"volume={num(p.get('vol')):.1f}")
+        if num(p.get("pan")):
+            o.append(f"pan={max(-100, min(100, round(num(p.get('pan')) * 100)))}")
+        if st > 0:
+            o.append(f"offset={int(st * sr)}")
+        if en and en < dur - 1e-3:
+            o.append(f"end={max(int(st * sr) + 1, int(en * sr) - 1)}")
+        play = p.get("play")
+        if play == "loop":
+            ls, le = num(p.get("ls")), num(p.get("le")) or en or dur
+            o += ["loop_mode=loop_continuous", f"loop_start={int(ls * sr)}", f"loop_end={max(int(ls * sr) + 1, int(le * sr) - 1)}"]
+        else:
+            o.append("loop_mode=one_shot" if play != "hold" else "loop_mode=no_loop")
+        if p.get("rev"):
+            o.append("direction=reverse")
+        a, d, s_, r = num(p.get("a"), 0.002), num(p.get("d")), num(p.get("s"), 1), num(p.get("r"), 0.05)
+        o += [f"ampeg_attack={a:.3f}", f"ampeg_decay={d:.3f}", f"ampeg_sustain={max(0, min(100, s_ * 100)):.1f}", f"ampeg_release={r:.3f}"]
+        if p.get("filter") in ("lp", "hp"):
+            hz = 20 * 1000 ** max(0.0, min(1.0, num(p.get("cut"), 1)))
+            q = max(0.1, num(p.get("res"), 0.707))
+            o += [f"fil_type={p['filter']}f_2p", f"cutoff={hz:.0f}", f"resonance={max(0.0, 20 * math.log10(q / 0.707)):.1f}"]
+        o.append(f"amp_veltrack={max(0, min(100, round(num(p.get('vel'), 1) * 100)))}")
+        g = int(num(p.get("choke")))
+        if g:
+            o += [f"group={g}", f"off_by={g}"]
+        elif p.get("mono"):
+            o += [f"group={100 + i}", f"off_by={100 + i}"]
+        return "<region> " + " ".join(o)
+
+    lines = [f"// {name} - a soundmon Sampler kit", f"<control> default_path={name}_samples/", "<group>"]
+    live = [(i, p) for i, p in enumerate(pads) if isinstance(p, dict) and p.get("media") and not p.get("mute")]
+    if mode != "keys":
+        for i, p in live:
+            n = int(p["note"]) if isinstance(p.get("note"), (int, float)) else base + i
+            n = max(0, min(127, n))
+            used.add(n)
+            lines.append(region(i, p, [f"key={n}"], n))
+    sel = int(num(kit.get("sel")))
+    sp = pads[sel] if 0 <= sel < len(pads) and isinstance(pads[sel], dict) else None
+    if mode != "pads" and sp and sp.get("media"):
+        k, runs = 0, []
+        while k < 128:                                  # the keys no pad is on, in runs
+            if k in used:
+                k += 1
+                continue
+            j = k
+            while j + 1 < 128 and j + 1 not in used:
+                j += 1
+            runs.append((k, j))
+            k = j + 1
+        root = max(0, min(127, int(num(sp.get("root"), 60))))
+        for lo, hi in runs:
+            lines.append(region(sel, sp, [f"lokey={lo}", f"hikey={hi}"], root))
+    if len(lines) == 3:
+        shutil.rmtree(out, ignore_errors=True)
+        raise ValueError("no pads with sounds to export")
+    with open(os.path.join(out, name + ".sfz"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return os.path.join(out, name + ".sfz")
+
+
 def main():
-    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE, SETS_ROOT, PRESETS, BINS, ASM
+    global SERVER_ARG, GALLERY_HOME, INPUTS, SETUP_FILE, SETS_ROOT, PRESETS, BINS, ASM, SMP
     ap = argparse.ArgumentParser(prog="soundmon-gui", description="Web GUI for soundmon.")
     ap.add_argument("--port", type=int, default=8191)
     ap.add_argument("--server", default=os.environ.get("SOUNDMON_SERVER", ""),
@@ -2758,6 +2939,7 @@ def main():
     PRESETS = os.path.join(GALLERY_HOME, "gui-presets")
     BINS = os.path.join(GALLERY_HOME, "bins")
     ASM = os.path.join(GALLERY_HOME, "assemble")
+    SMP = os.path.join(GALLERY_HOME, "sampler")
     SERVER_ARG = re.sub(r"\s+", "", args.server or "")
     os.makedirs(args.gallery, exist_ok=True)
     Handler.gallery = os.path.realpath(os.path.expanduser(args.gallery))

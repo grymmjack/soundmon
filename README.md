@@ -1089,6 +1089,23 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   the sounds it uses are kept in `assemble/media`. The page mixes everything itself (Web
   Audio), so what you hear is what you export; stretches are made by ffmpeg (rubberband
   when the build has it, else `atempo`).
+- **🎹 Sampler** is 16 pads you play from a **MIDI controller**, the computer's keys or the
+  mouse. **Connect MIDI** once (the browser asks), pick the controller (or every input) and a
+  channel; the light blinks as MIDI comes in. Drop sounds on the pads from the clip bin,
+  Gallery, Queue, Find, Assemble or your desktop (several fill the next pads); drag a pad onto
+  another to swap them (Alt: a copy) or out to the clip bin, Assemble or Start from. Three
+  ways to play: **Pads** (each pad on its own note, from **Pads from**, C3 by default),
+  **Pitched** (every key plays the selected pad, pitched from its **root**) and **Both** (keys
+  with a pad play it, the rest play the selected pad pitched). Per pad: volume, pan, pitch and
+  fine, velocity, **one-shot / hold / loop** (the loop is the green part of the waveform),
+  start and end (drag the white edges), reverse, mono, a **choke group**, an ADSR envelope and
+  a low- or high-pass filter, and a note of its own (**Learn**, then play it). The pitch wheel
+  bends (± range), the sustain pedal holds; right-click any knob and move one on your
+  controller to **learn** it. Computer keys: a piano on the Z and Q rows (← → for octaves) or
+  the pads on 1-4 Q-R A-F Z-V; Esc stops everything. **⏺ Rec** records what you play: save it,
+  put it in the clip bin, **onto a pad** (resampling), or make one like it. Name a kit to keep
+  it (`~/soundmon-gallery/sampler/kits`); **Export SFZ** writes it as an SFZ instrument (a
+  `.sfz` beside its samples) for any SFZ sampler or DAW.
 - **🎞 Clip bin** (pixelmon-gui's corkboard, for sound): collect sounds from anywhere in bins
   beside the tabs. Drag any sound in (a queue or gallery take, a Find result, a set's take,
   a file from your desktop; with the bin hidden, drop it on the 🎞 Clip bin button), or
