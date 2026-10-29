@@ -355,6 +355,7 @@ def main():
     want = {o for act in _smj.build_parser()._actions for o in act.option_strings if o.startswith("--list-")}
     want |= {"--version", "--dry-run", "--help", "--chip", "--opl", "--chipfx", "--oplfx", "--blip", "--blip-file",
              "--narrate", "--narrate-file", "--record", "--record-file", "--master", "--index", "--similar",
+             "--find", "--describe", "--listen", "--tags",
              "--from-midi", "--from-audio"}
     check("bin/soundmon never starts ComfyUI for listings, --version, --dry-run or a CPU engine",
           want <= skip and '"${arg%%=*}"' in wrap, f"missing from its skip-list: {sorted(want - skip)}")
@@ -476,6 +477,59 @@ def main():
                 ranks.append(all(n.startswith(kind) for n in top))
             check("--similar ranks a sound's own kind first", all(ranks),
                   f"zap/thud/pad top-2 own kind: {ranks}")
+
+            # tags.py: a sound's own words say what it is, the way sample packs write them.
+            import tags as _tg
+            want_t = {"Kicks/DryKick 03.wav": "kick", "x/HHO 2.wav": "hat", "SD/909 snr.wav": "snare",
+                      "Perc/synthperc 2.wav": "perc", "DrumKit B/b10_tom.wav": "tom", "FX/LazerShot 01.wav": "zap",
+                      "custom/what is this.wav": None, "Kick&Snare.wav": None, "Loops/Pad 120bpm Fmin.wav": "pad",
+                      "Bass Drums/DM-BD 2277.wav": "kick", "Hi Hats/open 2.wav": "hat"}
+            got_t = {p_: _tg.describe("/R/" + p_, "/R")["tag"] for p_ in want_t}
+            d_ = _tg.describe("/R/Loops/Pad 120bpm Fmin.wav", "/R")
+            check("tags: words, glued words, abbreviations; ties and strangers untagged; tempo and key",
+                  got_t == want_t and d_["bpm"] == 120 and d_["key"] == "Fm" and d_["kind"] == "loop",
+                  f"{ {k: v for k, v in got_t.items() if v != want_t[k]} } {d_}")
+            # a sampler's loop points: looped end to end is a loop, part way in a held note (one-shot);
+            # words near the file still win ("Oneshot" folders of seamless drones)
+            import struct as _st
+
+            def _smpl_wav(path_, a, b, frames=132300):
+                sf.write(path_, 0.3 * np.sin(np.arange(frames) / 9), 44100, subtype="PCM_16")
+                body = _st.pack("<9I", 0, 0, 0, 60, 0, 0, 0, 1, 0) + _st.pack("<6I", 0, 0, a, b, 0, 0)
+                with open(path_, "r+b") as fh:
+                    fh.seek(0, 2)
+                    fh.write(b"smpl" + _st.pack("<I", len(body)) + body)
+                    size_ = fh.tell() - 8
+                    fh.seek(4)
+                    fh.write(_st.pack("<I", size_))
+            os.makedirs(os.path.join(mt, "smp", "Oneshot"), exist_ok=True)
+            kinds_ = {}
+            for name_, a_, b_ in (("whole.wav", 0, 132299), ("held.wav", 30000, 132000), ("Oneshot/drone.wav", 0, 132299), ("hit.wav", 0, 132299)):
+                fp_ = os.path.join(mt, "smp", name_)
+                _smpl_wav(fp_, a_, b_)
+                kinds_[name_] = _tg.describe(fp_, os.path.join(mt, "smp"), _tg.embedded(fp_), 0.5 if name_ == "hit.wav" else 3.0)["kind"]
+            check("tags: sampler loop points (whole file a loop, sustain a one-shot; words win; a hit stays one)",
+                  kinds_ == {"whole.wav": "loop", "held.wav": "oneshot", "Oneshot/drone.wav": "oneshot", "hit.wav": "oneshot"}, f"{kinds_}")
+            # SOUNDMON_PATH_MAP: an index made where the sounds were at one path, worked on where they're at
+            # another - nothing re-read (same dates and sizes), the index's own paths kept
+            moved = os.path.join(mt, "moved")
+            os.rename(lib, moved)
+            old_map = _sim.PATH_MAP
+            os.environ["SOUNDMON_PATH_MAP"] = f"{lib}={moved}"            # the worker processes read it here
+            _sim.PATH_MAP = _sim._path_map()
+            try:
+                st_ = ix.update([lib])
+                ok_map = st_["added"] == 0 and st_["removed"] == 0 and _sim.here(os.path.join(lib, "pad0.wav")) == \
+                    os.path.join(moved, "pad0.wav") and ix.has(os.path.join(lib, "pad0.wav"))
+            finally:
+                _sim.PATH_MAP = old_map
+                os.environ.pop("SOUNDMON_PATH_MAP", None)
+                os.rename(moved, lib)
+            check("index: SOUNDMON_PATH_MAP reads the same files at another path", ok_map, f"{st_}")
+            # the index keeps tags, filters on them, and a tag of yours wins
+            ix.set_tag(os.path.join(lib, "pad0.wav"), "bells")
+            only = [os.path.basename(r["path"]) for r in ix.browse({"tags": ["bells"]})["results"]]
+            check("index: your tag wins and filters", only == ["pad0.wav"], f"{only}")
 
             # match_tone is sample-exact: firequalizer's 10 ms linear-phase delay (and its 10 ms
             # tail) are trimmed, so a click stays on its sample and a --loop stays seamless. In

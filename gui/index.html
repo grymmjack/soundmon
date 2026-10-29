@@ -272,6 +272,16 @@ tr:last-child td { border-bottom: 0; }
 .fres .nm { min-width: 0; font-size: 12px; } .fres .nm b { font: 600 12.5px var(--mono); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fres .nm span { color: var(--dim); font: 11px var(--mono); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 @media (max-width: 760px) { .fres { grid-template-columns: 52px minmax(0, 1fr); } }
+.frow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; } .frow > input { flex: 1 1 220px; width: auto; }
+.frow .pathrow { flex: 1 1 260px; }
+.fsmall { font-size: 12px; color: var(--dim); } .fsmall input[type=number] { width: 64px; padding: 3px 5px; } .fsmall select { width: auto; padding: 3px 5px; }
+.fstatus { display: grid; gap: 4px; } .fstatus .bar { height: 5px; }
+.chip.fam { font-weight: 700; } .chip small { margin-left: 3px; } .chip.none { opacity: .45; }
+.tg { font: 10.5px var(--mono); border-radius: 10px; padding: 1px 7px; border: 1px solid var(--line); cursor: pointer; background: none; white-space: nowrap; }
+.tg.drums { color: var(--accent2); border-color: rgba(255,85,255,.45); } .tg.tonal { color: var(--accent); border-color: rgba(85,255,255,.4); }
+.tg.fx { color: var(--warn); border-color: rgba(255,255,85,.4); } .tg.ear { border-style: dashed; } .tg.you::after { content: " ✓"; }
+.tg.untagged { color: var(--dim); }
+.aspects { display: grid; grid-template-columns: max-content minmax(120px, 1fr) 3ch; gap: 4px 10px; align-items: center; margin: 8px 0 4px; font-size: 12px; }
 .measure { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 11px; }
 .measure .lab { color: var(--dim); font: 10.5px var(--mono); text-transform: uppercase; width: 64px; text-align: right; margin-right: 4px; }
 .sono { width: 100%; height: 34px; display: block; image-rendering: pixelated; border-radius: 3px; background: #000; }
@@ -492,7 +502,7 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
       <div class="paneh"><h2 id="edTitle">New set</h2><span class="sp"></span><button type="button" id="edCancel">Cancel</button></div>
       <div class="row" style="--c:2">
         <label class="f">Name<input id="edName" maxlength="80" placeholder="neon-caster sfx"></label>
-        <label class="f">Game folder <span>(where picks are exported; inside your home folder)</span><input id="edFolder" placeholder="~/git/my-game/sfx"></label>
+        <label class="f">Game folder <span>(where picks are exported; inside your home folder or one added in Setup)</span><input id="edFolder" placeholder="~/git/my-game/sfx"></label>
       </div>
       <label class="f">The list of sounds <span>— paste it, or drop a .txt here. One per line: <code>key | text</code>, <code>key | seconds | prompt</code>, <code>name | secs | bpm | key | mood</code>, or plain words. <code>[Group]</code> lines group the rows; <code>#</code> lines are skipped.</span>
         <textarea id="edManifest" rows="9" placeholder="[Weapons]&#10;shoot | 1 | short punchy neon blaster shot, synthetic laser crack&#10;rail | 2 | electric railgun discharge, rising whine, heavy crack&#10;[Doors]&#10;door | 2 | sliding sci-fi door, pneumatic hiss and thunk"></textarea></label>
@@ -528,19 +538,40 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
   </section>
 
   <section class="pane" id="p-find" hidden>
-    <div class="paneh"><h2>Find</h2><span class="dim mono" id="findCount"></span><span class="sp"></span><button type="button" id="findIndexBtn">↻ Index folders</button></div>
-    <p class="lede">Drop a sound to find the ones on your disk that sound like it: same tone colour, brightness, the way it moves, and length. Listening is done by this machine; nothing is uploaded. <b>Use</b> makes a result the reference for a new render.</p>
-    <div class="card" style="display:grid;gap:6px">
-      <label class="f">Folders to search <span>(one per line, inside your home folder; re-index after adding sounds — only new or changed files are read)</span>
-        <textarea id="findFolders" rows="3" placeholder="~/git/neon-caster/neon-caster/sfx&#10;~/Music/samples"></textarea></label>
-      <div class="hint" id="findStatus"></div>
+    <div class="paneh"><h2>Find</h2><span class="dim mono" id="findCount"></span><span class="sp"></span>
+      <button type="button" id="findIndexBtn" title="read the new or changed files in your folders (the rest is kept)">↻ Index</button>
+      <button type="button" id="findListenBtn" title="let an audio model hear every sound: it tags the ones whose names say nothing (learning from the ones whose names do), finds sounds by their character, and searches by description. Runs here, on the GPU if there is one">👂 Listen</button>
+      <button type="button" id="findStopBtn" hidden title="stop — what's done is kept, and the next run carries on">■ Stop</button></div>
+    <p class="lede">Your sound library, searchable. Every sound is tagged from its own words (its name, its folders, what the file says about itself) and, once listened to, by ear. Filter by tag, loop or one-shot, length, tempo and key; drop a sound to find ones like it; or describe one. It all runs on this machine; nothing is uploaded. <b>Use</b> makes a result the reference for a new render.</p>
+    <div class="fstatus"><div class="hint" id="findStatus"></div><div class="bar" id="findBar" hidden><i></i></div></div>
+    <details class="card" id="findFoldersCard"><summary>Folders <span class="dim" id="findFoldersSum"></span></summary>
+      <label class="f" style="margin-top:6px">One per line: inside your home folder, or one added in Setup → Folders outside home. Press ↻ Index after adding sounds: only new or changed files are read.
+        <textarea id="findFolders" rows="4" placeholder="~/git/neon-caster/neon-caster/sfx&#10;~/Music/samples"></textarea></label>
+    </details>
+    <div class="drop" id="findDrop" style="padding:10px 14px"><span>Sounds like: <b id="findQuery">drop a sound here, or press 🔎 on any sound</b></span></div>
+    <div class="frow">
+      <input type="search" id="findText" placeholder="names with these words: 909 kick, vinyl…" aria-label="Names with these words">
+      <input type="search" id="findDescribe" placeholder="sounds like the words: a dark metallic hit…" aria-label="Describe the sound">
+      <input type="text" id="findWithin" placeholder="only inside this folder (optional)">
     </div>
-    <div class="drop" id="findDrop" style="padding:14px"><span>Sounds like: <b id="findQuery">drop a sound here, or press 🔎 on any Gallery card or Set take</b></span></div>
-    <div class="filters" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      <input type="text" id="findWithin" placeholder="only inside this folder (optional)" style="flex:1 1 240px;width:auto">
-      <select id="findK" style="width:auto"><option>30</option><option>60</option><option>100</option></select>
-      <button type="button" id="findAgain">Search</button></div>
+    <div class="chips" id="findFam"></div>
+    <div class="chips" id="findTags"></div>
+    <div class="frow fsmall">
+      <span class="seg" id="findKind"></span>
+      <label>length <input type="number" id="findMinS" min="0" step="0.1" placeholder="min"> – <input type="number" id="findMaxS" min="0" step="0.1" placeholder="max"> s</label>
+      <label>tempo <input type="number" id="findBpmMin" min="0" placeholder="min"> – <input type="number" id="findBpmMax" min="0" placeholder="max"> bpm</label>
+      <label>key <select id="findKey"></select></label>
+      <label>tagged by <select id="findBy"><option value="">anyone</option><option value="words">its words</option><option value="sound">ear</option><option value="you">you</option><option value="none">nobody</option></select></label>
+      <label>show <select id="findK"><option>30</option><option>60</option><option>100</option><option>200</option></select></label>
+      <button type="button" id="findClear" title="clear every filter">✕ Clear</button>
+    </div>
+    <details class="card" id="findAspects"><summary>Aspects <span class="dim">· what “sounds like” listens for</span></summary>
+      <div class="aspects" id="findAspectList"></div>
+      <div class="hint">How much each counts when you drop a sound. <b>Character</b> is what the audio model heard (👂 Listen first): the best at “the same kind of sound”. Lower it to match the exact tone instead.</div>
+    </details>
+    <div class="hint" id="findSummary"></div>
     <div id="findResults" style="display:grid;gap:5px"></div>
+    <div class="btnrow" style="justify-content:center"><button type="button" id="findMore" hidden>Show more</button></div>
   </section>
 
   <section class="pane" id="p-queue" hidden>
@@ -586,6 +617,9 @@ dialog.takedlg[open] { grid-template-rows: auto minmax(0, 1fr); }
         <div class="hint">"{}" in the arguments marks the file; otherwise it goes last. e.g. <code>audacity</code>, or <code>vlc</code> with <code>--play-and-exit {}</code></div></div>
       <div class="card apps"><h3>Open folders with</h3><div id="folderApps" class="apps"></div><button type="button" data-addapp="folder_apps">＋ Add a program</button></div>
     </div>
+    <div class="card" style="display:grid;gap:6px"><h3>Folders outside home <span class="dim" style="font-weight:400" id="extraCount"></span></h3>
+      <textarea id="extraFolders" rows="5" wrap="off" spellcheck="false" style="font-family:var(--mono, monospace)" placeholder="/mnt/btrfs/samples&#10;/media/grymmjack/SOUNDS"></textarea>
+      <div class="hint">The GUI only touches your home folder, plus these: Browse…, Find, Sets' game folders, references. One whole path a line, up to 20 — a sample library on another disk. Not a whole drive or a system folder (/etc, /usr…). Only changed from this computer.</div></div>
     <div><button type="button" class="render" id="saveSetup" style="width:auto;padding:7px 18px">Save setup</button> <span class="toast" id="setupToast"></span></div>
     <div class="card" style="display:grid;gap:8px"><h3>Backups <span class="dim" style="font-weight:400">· the whole soundmon-gallery: takes, sets, presets, dropped files, the Find index</span></h3>
       <div class="pathrow"><input id="bkKey" placeholder="a word for this backup (optional)" style="max-width:300px"><button type="button" id="bkMake">🗄 Back up now</button><button type="button" id="bkOpen" title="open the backups folder">📂</button><span class="sp"></span><button type="button" id="bkClear" title="delete every take in the gallery (backed up first)">✕ Clear gallery…</button></div>
@@ -948,7 +982,7 @@ function showTab(t) {
   if (t === "gallery") loadGallery();
   if (t === "sets") loadSets();
   if (t === "voices") drawVoices();
-  if (t === "find") findStatus();
+  if (t === "find") findStatus().then(() => { if (!findRun.done) { findRun.done = true; findRun(); } });
   if (t === "compare") drawCompare();
   if (t === "setup") { loadServers(); loadBackups(); }
   if (location.hash !== "#" + t) history.replaceState(null, "", "#" + t);
@@ -1809,18 +1843,54 @@ $("vGo").addEventListener("click", async () => {
 
 
 /* ================= find ================= */
-let FQ = null, findPoll = 0;
+// The library: browse it by filters (tags, kind, length, tempo, key, words in the name, a description),
+// or drop a sound for the ones like it (the same filters narrow that too).
+let FQ = null, findPoll = 0, FTAGS = [], FINFO = null, FOFF = 0, FSEQ = 0;
+const FAM = [["drums", "🥁 Drums"], ["tonal", "🎹 Tonal"], ["fx", "💥 FX"]];
+const ASPECT = [["timbre", "Timbre", 15, "the tone colour: which frequencies, and how they move"], ["brightness", "Brightness", 6, "bright or dark, tonal or noisy"],
+  ["envelope", "Envelope", 6, "how it starts and fades, how busy it is"], ["length", "Length", 3, "how long it is"],
+  ["character", "Character", 70, "what the audio model hears: the same kind of sound (👂 Listen first)"]];
+const KEYS = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+let FS = Object.assign({ fam: [], tags: [], kind: "", min_s: "", max_s: "", bpm_min: "", bpm_max: "", key: "", by: "", text: "", describe: "", within: "" }, store.get("findFilters", {}));
+let FW = Object.assign(Object.fromEntries(ASPECT.map(a => [a[0], a[2]])), store.get("findWeights", {}));
+const tagOf = id => FTAGS.find(t => t.id === id);
+function fmtDur(s) { s = Math.max(0, Math.round(s)); return s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min` : s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`; }
+
 async function findStatus() {
   try {
-    const r = await api("/api/similar/status");
+    const r = await api("/api/similar/status"); FINFO = r;
+    if (!FTAGS.length) { FTAGS = r.tags; drawFindFilters(); }
     if (!$("findFolders").dataset.touched) $("findFolders").value = (r.setup_folders.length ? r.setup_folders : r.folders).join("\n");
-    const j = r.job;
-    $("findCount").textContent = `${r.count} sound${r.count === 1 ? "" : "s"} indexed`;
-    $("findStatus").textContent = j && j.running ? `Indexing ${j.done} / ${j.total || "…"}  ${j.current}`
-      : j && j.error ? `Indexing failed: ${j.error}` : j && j.stats ? `Indexed: ${j.stats.added} new or changed, ${j.stats.kept} unchanged, ${j.stats.removed} gone, ${j.stats.failed} unreadable${j.stats.short ? `, ${j.stats.short} silent or too short` : ""}${j.stats.skipped ? `, ${j.stats.skipped} skipped (broken links, unreadable folders)` : ""}.`
-      : r.updated ? `Last indexed ${new Date(r.updated * 1000).toLocaleString()}.` : "Nothing indexed yet: add folders above and press ↻ Index folders.";
-    $("findIndexBtn").disabled = !!(j && j.running);
-    clearTimeout(findPoll); if (j && j.running) findPoll = setTimeout(findStatus, 1000);
+    $("findFoldersSum").textContent = `· ${r.folders.length} folder${r.folders.length === 1 ? "" : "s"}`;
+    $("findCount").textContent = `${r.count.toLocaleString()} sound${r.count === 1 ? "" : "s"}` + (r.listened ? ` · ${r.listened.toLocaleString()} heard` : "");
+    const j = r.job, run = j && j.running, bar = $("findBar");
+    let msg = "";
+    if (run) {
+      const el_ = (Date.now() / 1000 - (j.phase_started || j.started)), rate = j.done / Math.max(el_, 1);
+      const eta = j.total && j.done > 20 ? ` · ${rate.toFixed(rate < 10 ? 1 : 0)}/s, about ${fmtDur((j.total - j.done) / rate)} left` : "";
+      msg = j.phase === "listing" ? `Looking for sounds… ${j.done.toLocaleString()} so far` :
+        j.phase === "cooling" ? `Resting to cool down (${j.done.toLocaleString()} / ${(j.total || 0).toLocaleString()} so far) — ${j.current}` :
+        `${j.phase[0].toUpperCase() + j.phase.slice(1)} ${j.done.toLocaleString()} / ${(j.total || 0).toLocaleString()}${eta}  ${j.current}` + (j.stop ? " · stopping…" : "");
+      bar.hidden = !j.total; bar.firstChild.style.width = (j.total ? 100 * j.done / j.total : 0) + "%";
+    } else {
+      bar.hidden = true;
+      const s = j && j.stats;
+      if (j && j.error) msg = `${j.kind === "listening" ? "Listening" : "Indexing"} failed: ${j.error}`;
+      else if (s && j.kind === "indexing") msg = `Indexed${s.stopped ? " (stopped — ↻ Index carries on)" : ""}: ${s.added.toLocaleString()} new or changed, ${s.kept.toLocaleString()} unchanged, ${s.removed} gone, ${s.failed} unreadable${s.short ? `, ${s.short} silent or too short` : ""}${s.skipped ? `, ${s.skipped} skipped (broken links, unreadable folders)` : ""}.`;
+      else if (s && j.kind === "listening") msg = `Heard ${s.heard.toLocaleString()} new${s.stopped ? " (stopped — 👂 Listen carries on)" : ""}, on ${s.device}. Learned from ${s.learned_from.toLocaleString()} sounds tagged by their words${s.agree != null ? ` (on ones held back it agreed with their words ${Math.round(100 * s.agree)}% of the time)` : ""}; ${s.tagged.toLocaleString()} more tagged by ear, where it's at least ${Math.round(100 * s.bar)}% sure.`;
+      else if (r.updated) msg = `Last indexed ${new Date(r.updated * 1000).toLocaleString()}.` + (r.listened < r.count && r.count ? ` ${(r.count - r.listened).toLocaleString()} not heard yet: 👂 Listen tags them by ear.` : "");
+      else msg = "Nothing indexed yet: open Folders, add yours, and press ↻ Index.";
+      if (r.note) msg += " " + r.note;
+    }
+    $("findStatus").textContent = msg;
+    $("findIndexBtn").disabled = $("findListenBtn").disabled = !!run; $("findStopBtn").hidden = !run;
+    $("findListenBtn").title = r.can_listen ? "Listening needs: " + r.can_listen : $("findListenBtn").title;
+    $("findDescribe").disabled = !r.listened; $("findDescribe").title = r.listened ? "" : "👂 Listen first: describing needs the sounds heard";
+    if (!r.count && !run) $("findFoldersCard").open = true;
+    clearTimeout(findPoll);
+    if (run) findPoll = setTimeout(findStatus, 1000);
+    else if (findStatus.was) { findStatus.was = false; findRun(); }
+    if (run) findStatus.was = true;
   } catch (e) { $("findStatus").textContent = e.message; }
 }
 $("findFolders").addEventListener("input", () => $("findFolders").dataset.touched = "1");
@@ -1828,41 +1898,125 @@ $("findIndexBtn").addEventListener("click", async () => {
   const folders = $("findFolders").value.split("\n").map(s => s.trim()).filter(Boolean);
   try { await api("/api/similar/index", { folders }); delete $("findFolders").dataset.touched; findStatus(); } catch (e) { toast(e.message, true); }
 });
-function findFrom(q, label) { FQ = q; $("findQuery").textContent = label || q.input || q.path || q.take; showTab("find"); findSearch(); }
-async function findSearch() {
-  if (!FQ) return;
-  $("findResults").replaceChildren(el("div", { class: "empty", text: "Listening…" }));
-  try {
-    const r = await api("/api/similar/search", { ...FQ, within: $("findWithin").value.trim(), k: +$("findK").value });
-    if (!r.results.length) { $("findResults").replaceChildren(el("div", { class: "empty", text: "No matches in the index. Index more folders, or clear the folder filter." })); return; }
-    $("findResults").replaceChildren(...r.results.map(x => {
-      const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = soundRow(url, name, { compact: true, open: { path: x.path } });
-      return el("div", { class: "fres" },
-        el("span", { class: "sc", text: x.score + "%", title: "how alike, 100 = the same" }),
-        cv,
-        el("div", { class: "nm" }, el("b", { text: name, title: x.path }), el("span", { text: x.path, title: x.path }),
-          el("div", { class: "btnrow", style: "margin-top:2px" }, el("span", { class: "dim mono", style: "font-size:11px", text: (x.seconds ?? "?") + " s" }),
-            ...x.aspects.map(a => el("span", { class: "badge ac", text: a, title: "matches in " + a })))),
-        el("div", { class: "btnrow" },
-          el("button", { type: "button", text: "Use", title: "make this the Reference for a new render", onclick: async () => {
-            try { const u = await api("/api/similar/use", { path: x.path }); readForm(); if (!["sfx", "music", "song"].includes(eng)) { eng = "sfx"; store.set("engine", eng); }
-              cur().ref = u.file; store.set("form", F); showEngine(); toast(`Reference: ${name}. Describe what to make from it and press RENDER.`); } catch (e) { toast(e.message, true); } } }),
-          el("button", { type: "button", text: "🔎", title: "find sounds like this one", onclick: () => findFrom({ path: x.path }, name) }),
-          el("button", { type: "button", text: "📂", title: "open its folder", onclick: () => api("/api/open", { target: { indexed: x.path } }).catch(e => toast(e.message, true)) }),
-          openBtn({ path: x.path }, "open this sound in…"),
-          cmpBtn({ url, label: name, open: { path: x.path } }),
-          el("button", { type: "button", text: "Copy path", onclick: e => copyText(x.path, e.target) })));
-    }));
-  } catch (e) { $("findResults").replaceChildren(el("div", { class: "empty", text: e.message })); }
+$("findListenBtn").addEventListener("click", async () => {
+  if (FINFO && FINFO.can_listen) return toast("Listening needs: " + FINFO.can_listen, true);
+  try { await api("/api/similar/listen", {}); findStatus(); toast("Listening: the first time downloads the model (~600 MB)."); } catch (e) { toast(e.message, true); }
+});
+$("findStopBtn").addEventListener("click", () => api("/api/similar/stop", {}).then(findStatus).catch(e => toast(e.message, true)));
+
+function drawFindFilters(counts) {
+  const c = counts ? counts.tags : {}, n = id => c[id] ?? 0;
+  $("findFam").replaceChildren(el("span", { class: "dim", style: "font-size:12px", text: "Tags" }), ...FAM.map(([f, label]) => el("button", { type: "button", class: "chip fam", "aria-pressed": String(FS.fam.includes(f)),
+    title: "only " + label.slice(3).toLowerCase(), onclick: () => { FS.fam = FS.fam.includes(f) ? FS.fam.filter(x => x !== f) : [...FS.fam, f]; findFilt(); } }, label)));
+  const shown = FTAGS.filter(t => !FS.fam.length || FS.fam.includes(t.family));
+  $("findTags").replaceChildren(...shown.map(t => el("button", { type: "button", class: "chip" + (counts && !n(t.id) && !FS.tags.includes(t.id) ? " none" : ""), "aria-pressed": String(FS.tags.includes(t.id)),
+    onclick: () => { FS.tags = FS.tags.includes(t.id) ? FS.tags.filter(x => x !== t.id) : [...FS.tags, t.id]; findFilt(); } }, t.label, counts ? el("small", { text: n(t.id).toLocaleString() }) : null)),
+    el("button", { type: "button", class: "chip", "aria-pressed": String(FS.tags.includes("none")), title: "the sounds nobody has tagged yet",
+      onclick: () => { FS.tags = FS.tags.includes("none") ? FS.tags.filter(x => x !== "none") : [...FS.tags, "none"]; findFilt(); } }, "untagged", counts ? el("small", { text: n("none").toLocaleString() }) : null));
+  const kinds = counts ? counts.kinds : {};
+  $("findKind").replaceChildren(...[["", "any"], ["loop", "loops"], ["oneshot", "one-shots"], ["unknown", "?"]].map(([k, l]) => el("button", { type: "button", "aria-pressed": String(FS.kind === k),
+    title: k === "unknown" ? "loop or one-shot: can't tell yet" : "", onclick: () => { FS.kind = k; findFilt(); } }, l, k && counts ? el("small", { class: "dim", text: " " + (kinds[k] || 0).toLocaleString() }) : null)));
 }
-$("findAgain").addEventListener("click", findSearch);
-$("findK").addEventListener("change", findSearch);
+function findReadInputs() {
+  for (const [id, k] of [["findText", "text"], ["findDescribe", "describe"], ["findWithin", "within"], ["findMinS", "min_s"], ["findMaxS", "max_s"], ["findBpmMin", "bpm_min"], ["findBpmMax", "bpm_max"], ["findKey", "key"], ["findBy", "by"]])
+    FS[k] = $(id).value.trim();
+}
+function findFillInputs() {
+  $("findKey").replaceChildren(el("option", { value: "", text: "any" }), ...KEYS.flatMap(k => [el("option", { value: k, text: k }), el("option", { value: k + "m", text: k + "m" })]));
+  for (const [id, k] of [["findText", "text"], ["findDescribe", "describe"], ["findWithin", "within"], ["findMinS", "min_s"], ["findMaxS", "max_s"], ["findBpmMin", "bpm_min"], ["findBpmMax", "bpm_max"], ["findKey", "key"], ["findBy", "by"]])
+    $(id).value = FS[k] || "";
+  $("findAspectList").replaceChildren(...ASPECT.flatMap(([k, label, d, tip]) => {
+    const v = el("span", { class: "mono dim", text: FW[k] }), r = el("input", { type: "range", min: 0, max: 100, value: FW[k], title: tip, "aria-label": label,
+      oninput: () => { FW[k] = +r.value; v.textContent = r.value; }, onchange: () => { store.set("findWeights", FW); FQ && findRun(); } });
+    return [el("span", { text: label, title: tip }), r, v];
+  }), el("span"), el("button", { type: "button", text: "Reset", style: "justify-self:start", onclick: () => { FW = Object.fromEntries(ASPECT.map(a => [a[0], a[2]])); store.set("findWeights", FW); findFillInputs(); FQ && findRun(); } }));
+}
+function findFilt() { FOFF = 0; store.set("findFilters", FS); drawFindFilters(findFilt.counts); findRun(); }
+function findFilters() {
+  const f = {}; for (const k of ["text", "within", "min_s", "max_s", "bpm_min", "bpm_max", "key", "kind"]) if (FS[k] !== "" && FS[k] != null) f[k] = FS[k];
+  if (FS.tags.length) f.tags = FS.tags; if (FS.fam.length) f.families = FS.fam; if (FS.by) f.by = FS.by === "none" ? [null] : [FS.by];
+  return f;
+}
+{ let t = 0;
+  for (const id of ["findText", "findDescribe", "findMinS", "findMaxS", "findBpmMin", "findBpmMax"]) $(id).addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => { findReadInputs(); findFilt(); }, 350); });
+  for (const id of ["findKey", "findBy", "findWithin"]) $(id).addEventListener("change", () => { findReadInputs(); findFilt(); }); }
+$("findK").addEventListener("change", () => { FOFF = 0; findRun(); });
+$("findMore").addEventListener("click", () => { FOFF += +$("findK").value; findRun(true); });
+$("findClear").addEventListener("click", () => { FS = { fam: [], tags: [], kind: "", min_s: "", max_s: "", bpm_min: "", bpm_max: "", key: "", by: "", text: "", describe: "", within: "" }; findFillInputs(); findFilt(); });
+
+function findFrom(q, label) { FQ = q; $("findQuery").textContent = label || q.input || q.path || q.take; $("findQueryClear").hidden = false; showTab("find"); FOFF = 0; findRun(); }
+async function findRun(more) {
+  if (!FINFO) await findStatus();
+  if (!FINFO || !FINFO.count) { $("findResults").replaceChildren(el("div", { class: "empty", text: "Nothing indexed yet: open Folders, add yours, and press ↻ Index." })); $("findMore").hidden = true; return; }
+  const seq = ++FSEQ, k = +$("findK").value, filters = findFilters();
+  if (!more) $("findResults").replaceChildren(el("div", { class: "empty", text: FQ ? "Listening…" : "Looking…" }));
+  try {
+    const b = await api("/api/similar/browse", { filters, describe: FQ ? "" : FS.describe, k: FQ ? 0 : k, offset: FQ ? 0 : FOFF });
+    if (seq !== FSEQ) return;
+    findFilt.counts = b.counts; drawFindFilters(b.counts);
+    let rows = b.results, total = b.total;
+    if (FQ) {
+      const r = await api("/api/similar/search", { ...FQ, filters, weights: FW, k });
+      if (seq !== FSEQ) return;
+      rows = r.results;
+    }
+    const filt = Object.keys(filters).length;
+    $("findSummary").textContent = FQ ? `${rows.length} most like it, of ${total.toLocaleString()} sound${total === 1 ? "" : "s"}${filt ? " the filters leave" : ""}.`
+      : `${total.toLocaleString()} sound${total === 1 ? "" : "s"}${FS.describe ? `, best fit for “${FS.describe}” first` : filt ? "" : " — pick tags or type words to narrow it"}.`;
+    if (!rows.length && !more) { $("findResults").replaceChildren(el("div", { class: "empty", text: filt ? "Nothing matches these filters. ✕ Clear them, or index more folders." : "No matches in the index." })); $("findMore").hidden = true; return; }
+    const nodes = rows.map(findRow);
+    if (more) $("findResults").append(...nodes); else $("findResults").replaceChildren(...nodes);
+    $("findMore").hidden = !!FQ || FOFF + k >= total;
+  } catch (e) { if (seq === FSEQ) $("findResults").replaceChildren(el("div", { class: "empty", text: e.message })); }
+}
+function tagBadge(x) {
+  const t = tagOf(x.tag), by = x.tag_by;
+  const b = el("button", { type: "button", class: "tg " + (t ? t.family : "untagged") + (by === "sound" ? " ear" : by === "you" ? " you" : ""),
+    text: t ? t.label : "untagged", title: (by === "sound" ? `tagged by ear, ${Math.round(100 * x.sure)}% sure` : by === "words" ? "tagged by its words" : by === "you" ? "tagged by you" : "no tag yet") + " — click to set your own (the ear learns from it)" });
+  b.onclick = e => {
+    e.stopPropagation();
+    const s = el("select", { class: "tg", "aria-label": "tag" }, el("option", { value: "", text: "— not mine: as tagged —" }), el("option", { value: "-", text: "none of these" }),
+      ...FAM.map(([f, l]) => el("optgroup", { label: l.slice(3) }, ...FTAGS.filter(t2 => t2.family === f).map(t2 => el("option", { value: t2.id, text: t2.label, selected: x.tag === t2.id && by === "you" })))));
+    let busy = false;
+    s.onchange = async () => {
+      busy = true;
+      try { await api("/api/similar/tag", { path: x.path, tag: s.value }); x.tag = s.value === "-" ? null : s.value || x.tag; x.tag_by = s.value ? "you" : x.tag_by; toast(s.value ? "Tagged. 👂 Listen again to teach the ear." : "Back to its own tag (after the next refresh)."); }
+      catch (err) { toast(err.message, true); }
+      if (s.isConnected) s.replaceWith(tagBadge(x));
+    };
+    s.onblur = () => { if (!busy && s.isConnected) s.replaceWith(tagBadge(x)); };
+    b.replaceWith(s); s.focus();
+  };
+  return b;
+}
+function findRow(x) {
+  const url = "/api/similar/file?path=" + encodeURIComponent(x.path), name = x.path.split("/").pop(), cv = soundRow(url, name, { compact: true, open: { path: x.path } });
+  const facts = [x.kind === "loop" ? "loop" : x.kind === "oneshot" ? "one-shot" : "", x.bpm ? x.bpm + " bpm" : "", x.key || ""].filter(Boolean).join(" · ");
+  return el("div", { class: "fres" },
+    el("span", { class: "sc", text: x.score != null ? x.score + "%" : "", title: FQ ? "how alike, 100 = the same" : "how well it fits the description" }),
+    cv,
+    el("div", { class: "nm" }, el("b", { text: name, title: x.path }), el("span", { text: x.path, title: x.path }),
+      el("div", { class: "btnrow", style: "margin-top:2px" }, tagBadge(x), el("span", { class: "dim mono", style: "font-size:11px", text: facts }),
+        ...(x.aspects || []).map(a => el("span", { class: "badge ac", text: a, title: "matches in " + a })))),
+    el("div", { class: "btnrow" },
+      el("button", { type: "button", text: "Use", title: "make this the Reference for a new render", onclick: async () => {
+        try { const u = await api("/api/similar/use", { path: x.path }); readForm(); if (!["sfx", "music", "song"].includes(eng)) { eng = "sfx"; store.set("engine", eng); }
+          cur().ref = u.file; store.set("form", F); showEngine(); toast(`Reference: ${name}. Describe what to make from it and press RENDER.`); } catch (e) { toast(e.message, true); } } }),
+      el("button", { type: "button", text: "🔎", title: "find sounds like this one", onclick: () => findFrom({ path: x.path }, name) }),
+      el("button", { type: "button", text: "📂", title: "open its folder", onclick: () => api("/api/open", { target: { indexed: x.path } }).catch(e => toast(e.message, true)) }),
+      openBtn({ path: x.path }, "open this sound in…"),
+      cmpBtn({ url, label: name, open: { path: x.path } }),
+      el("button", { type: "button", text: "Copy path", onclick: e => copyText(x.path, e.target) })));
+}
+findFillInputs();
 { const d = $("findDrop");
   d.addEventListener("dragover", e => { e.preventDefault(); d.classList.add("over"); });
   d.addEventListener("dragleave", () => d.classList.remove("over"));
   const go = async file => { try { const j = await upload(file); findFrom({ input: j.file }, file.name); } catch (err) { toast(err.message, true); } };
   d.addEventListener("drop", e => { e.preventDefault(); d.classList.remove("over"); if (e.dataTransfer.files[0]) go(e.dataTransfer.files[0]); });
-  d.addEventListener("click", () => { const inp = el("input", { type: "file", accept: "audio/*" }); inp.onchange = () => inp.files[0] && go(inp.files[0]); inp.click(); }); }
+  d.addEventListener("click", () => { const inp = el("input", { type: "file", accept: "audio/*" }); inp.onchange = () => inp.files[0] && go(inp.files[0]); inp.click(); });
+  d.append(el("button", { type: "button", class: "dbtn", id: "findQueryClear", text: "✕", hidden: true, title: "stop searching by sound: browse by the filters", onclick: e => {
+    e.stopPropagation(); FQ = null; e.currentTarget.hidden = true; $("findQuery").textContent = "drop a sound here, or press 🔎 on any sound"; FOFF = 0; findRun(); } })); }
 
 /* ================= presets ================= */
 let PRESETS = [];
@@ -2181,7 +2335,7 @@ $("advClear").addEventListener("click", () => { setAdv({}); queueCommand(); });
 let SETUP = null;
 async function loadServers() {
   try {
-    SETUP = await api("/api/setup"); drawApps();
+    SETUP = await api("/api/setup"); drawApps(); drawExtra();
     $("setupFile").textContent = SETUP.locked ? `started with --server ${SETUP.locked}: GPU renders go there (restart soundmon-gui without --server to choose here)` : "";
     const r = await api("/api/servers");
     const yes = (b, warn) => b == null ? '<span class="dim">?</span>' : b ? '<span style="color:var(--ok)">✓</span>' : `<span style="color:var(${warn ? "--bad" : "--dim"})">✗</span>`;
@@ -2209,14 +2363,20 @@ function drawApps() {
   }
 }
 document.querySelectorAll("[data-addapp]").forEach(b => b.addEventListener("click", () => { SETUP[b.dataset.addapp].push({ name: "", exec: "", args: "{}" }); drawApps(); }));
-$("saveSetup").addEventListener("click", async () => { try { SETUP = await api("/api/setup", SETUP); drawApps(); $("setupToast").textContent = "Saved"; setTimeout(() => $("setupToast").textContent = "", 3000); } catch (e) { $("setupToast").textContent = e.message; } });
+function drawExtra() {
+  const n = (SETUP.extra_folders || []).length;
+  $("extraFolders").value = (SETUP.extra_folders || []).join("\n");
+  $("extraCount").textContent = `· ${n} of 20`;
+}
+$("extraFolders").addEventListener("input", () => { const n = $("extraFolders").value.split("\n").filter(x => x.trim()).length; $("extraCount").textContent = `· ${n} of 20`; });
+$("saveSetup").addEventListener("click", async () => { try { SETUP.extra_folders = $("extraFolders").value.split("\n").map(x => x.trim()).filter(Boolean); SETUP = await api("/api/setup", SETUP); drawApps(); drawExtra(); $("setupToast").textContent = "Saved"; setTimeout(() => $("setupToast").textContent = "", 3000); } catch (e) { $("setupToast").textContent = e.message; } });
 
 /* ---- Browse / Open on the fixed path fields ---- */
 function addPathTools(id, opts) { const inp = $(id), row = el("div", { class: "pathrow" }); inp.replaceWith(row); row.append(inp, pathTools(inp, opts)); }
 addPathTools("edFolder", { kind: "dir", title: "Where should picks be exported?" });
 addPathTools("findFolders", { kind: "dir", multi: true, title: "Add a folder to search" });
 addPathTools("findWithin", { kind: "dir", title: "Only look inside this folder" });
-$("findWithin").addEventListener("change", () => FQ && findSearch());
+
 async function loadListInto(target, after) {
   const p = await pickPath({ kind: "file", ext: EXT.text, title: "Choose a list (.txt)" }); if (!p) return;
   try { const j = await api("/api/input/from-path", { path: p }); target.value = j.text ?? ""; after?.(); toast("Loaded " + p.split("/").pop()); } catch (e) { toast(e.message, true); }

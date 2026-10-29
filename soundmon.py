@@ -325,8 +325,14 @@ def print_help():
         opt("--ref-strength N", "0.3 close variation … 0.9 loosely inspired", "0.6"),
         opt("--ref-match", "also take its tempo and key"),
         opt("--match-tone REF", "EQ + level each take toward REF"),
-        opt("--index DIR[,DIR]", "index folders of sounds (incremental)"),
-        opt("--similar FILE", "list indexed sounds most like FILE (-n, --in DIR)"),
+        opt("--index DIR[,DIR]", "index folders of sounds: fingerprint + tags (incremental)"),
+        opt("--workers N", "with --index: files read at once", "half the cores, ≤ 8"),
+        opt("--similar FILE", "list indexed sounds most like FILE (-n, --in DIR, --aspects)"),
+        opt("--find WORDS", "list indexed sounds named so (--tag, --kind, --in narrow it)"),
+        opt("--listen", "let an audio model hear the index: tags by ear, --describe"),
+        opt("--listen-device D", "where it listens: auto, cpu, cuda, cuda:1…", "auto"),
+        opt("--describe TEXT", "list sounds that sound like the words (after --listen)"),
+        opt("--tags", "how the index is tagged (kick, pad, riser…; loop / one-shot)"),
         "",
         head("OUTPUT"),
         f"  {c['dim']}AI engines:  {OUTPUT}/soundmon/ (or --output-to) — 44.1 kHz stereo WAV,{c['rst']}",
@@ -2119,7 +2125,7 @@ def _engine_flags(a):
                      # `--blip --narrate-file lines.txt` blips that manifest (the GUI sends it): one engine
                      ((a.narrate or a.narrate_file) and not (a.blip or a.blip_file), "--narrate"),
                      (a.record or a.record_file, "--record"), (a.song, "--song"), (a.music, "--music"),
-                     (a.master is not None, "--master"), (a.index is not None or a.similar is not None, "--index/--similar")):
+                     (a.master is not None, "--master"), (_finding(a), "--index/--similar")):
         if on:
             out.append(flag)
     return out
@@ -2165,7 +2171,7 @@ def check_args(a, p):
     engine = eng[0] if eng else None
     cpu = engine in CPU_ENGINES
     has_input = bool(a.prompt or a.batch or a.batch_file or a.narrate_file or a.record_file or a.blip_file
-                     or a.from_midi or a.from_audio or a.master is not None or a.index is not None or a.similar is not None)
+                     or a.from_midi or a.from_audio or a.master is not None or _finding(a))
     if engine is None and not has_input:
         return None
     # An engine with nothing to work on was answered with the full help and exit 0.
@@ -2464,7 +2470,32 @@ def build_parser():
     p.add_argument("--similar", default=None, metavar="FILE",
                    help="list the indexed sounds most like FILE (how alike, and in what: timbre, brightness, "
                         "envelope, length). -n sets how many (default 20)")
-    p.add_argument("--in", dest="within", default=None, metavar="DIR", help="with --similar: only look inside DIR")
+    p.add_argument("--in", dest="within", default=None, metavar="DIR",
+                   help="with --similar / --find / --describe / --tags: only look inside DIR")
+    p.add_argument("--find", default=None, metavar="WORDS",
+                   help="list the indexed sounds whose path has all these words ('' for all; -n how many)")
+    p.add_argument("--tag", dest="find_tag", default=None, metavar="TAG[,TAG]",
+                   help="with --similar / --find / --describe / --tags: only these tags (kick, snare, pad, riser... "
+                        "or none; soundmon --tags lists them)")
+    p.add_argument("--kind", dest="find_kind", default=None, metavar="K",
+                   help="with --similar / --find / --describe / --tags: loop, oneshot or unknown")
+    p.add_argument("--aspects", default=None, metavar="NAME=W,...",
+                   help="with --similar: how much each aspect counts — timbre, brightness, envelope, length, "
+                        "character (what --listen heard). default timbre=0.5,brightness=0.2,envelope=0.2,"
+                        "length=0.1, and character 70%% of the whole once heard")
+    p.add_argument("--workers", type=int, default=None, metavar="N",
+                   help="with --index: read N files at once (default: half the cores, at most 8)")
+    p.add_argument("--listen", action="store_true",
+                   help="let an audio model (LAION CLAP, ~600 MB once) hear every indexed sound: tags the ones "
+                        "whose words say nothing, learning from the ones whose words do; adds 'character' to "
+                        "--similar and makes --describe work. Needs torch + transformers; a GPU if there is one")
+    p.add_argument("--listen-device", dest="listen_device", default=None, metavar="DEV",
+                   help="with --listen / --describe: auto (default), cpu, cuda, cuda:1…")
+    p.add_argument("--describe", default=None, metavar="TEXT",
+                   help="list the indexed sounds that sound most like the words, e.g. 'a dark metallic hit' "
+                        "(after --listen)")
+    p.add_argument("--tags", action="store_true",
+                   help="how the index is tagged: by words, by ear, by you; each tag; loops and one-shots")
     p.add_argument("--master-like", dest="master_like", default=None, metavar="REF",
                    help="with --master: match each file's tone and loudness to REF instead of the standard chain")
     # --- steering with a reference sound (the audio version of pixelmon's init image) ---
@@ -2612,6 +2643,12 @@ def build_parser():
     return p
 
 
+def _finding(a):
+    """--index / --similar / --find / --describe / --listen / --tags: the sound library (similar.py)"""
+    return (a.index is not None or a.similar is not None or a.find is not None or bool(a.describe)
+            or a.listen or a.tags)
+
+
 def main():
     p = build_parser()
     a = p.parse_args()
@@ -2743,7 +2780,7 @@ def main():
     # no model of any kind. It shares --narrate's manifest parser and the whole
     # output tail, so a hand-voiced pack and a generated one are interchangeable.
     # Similarity search reads files that already exist — no model, no server.
-    if a.index is not None or a.similar is not None:   # `--index ''` is an empty folder list, not "not given"
+    if _finding(a):   # `--index ''` is an empty folder list, not "not given"
         # -n defaults to 1 (one take), which similar.py can't tell from a typed `-n 1`; this can.
         a.similar_k = a.number if given("-n", "--number") else 20
         sys.path.insert(0, _SCRIPT_DIR)

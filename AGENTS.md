@@ -496,15 +496,52 @@ Aliases live in `servers.json` (gitignored — real LAN IPs stay out of the repo
 - **`similar.py` imports nothing heavy at module level** (the GUI imports it). Its
   fingerprint is DSP only, from the audible part of the file (trimmed at −50 dB):
   game sounds are often padded with silence, and before the trim the padding decided
-  the match. **Bump `METHOD` whenever `features()` changes**: an index made with
-  another method rebuilds itself rather than mixing two kinds of vector (and says so).
-  The fingerprint is volume-invariant by construction (scaled to its own peak, mel floor
-  −60 dB, flux floor 60 dB under the loudest bin); selfcheck asserts it. Scores are scaled
-  by the median pairwise distance of the WHOLE index, never the candidates — a
-  candidate-relative scale scored an identical file at −6 dB as 50 % when it was alone.
-  `Index.save()` locks `index.json.lock` and merges with what is on disk: GUI and CLI
-  can index at the same time. The GUI's
+  the match. **Bump `METHOD` whenever `features()` changes**: rows made with another
+  method are fingerprinted again on the next `--index`. The fingerprint is
+  volume-invariant by construction (scaled to its own peak, mel floor −60 dB, flux floor
+  60 dB under the loudest bin); selfcheck asserts it. Scores are scaled by the median
+  pairwise distance of the WHOLE index, never the candidates — a candidate-relative scale
+  scored an identical file at −6 dB as 50 % when it was alone. The index is SQLite (WAL,
+  one connection per thread): GUI and CLI can index at the same time; `meta.gen` counts
+  commits and `Index.table()` caches the arrays until it changes. The GUI's
   `/api/similar/file` serves only paths that are in the index, never arbitrary paths.
+- **Indexing workers are `similar.py --worker` subprocesses, never multiprocessing.**
+  Spawn re-imports the main script in every child, and soundmon.py imports a ComfyUI node
+  that imports torch: each worker was 1.2 GB with the GPU stack loaded. And numpy's BLAS
+  starts a thread per core in every worker unless told otherwise (`_ONE_THREAD`): 8
+  workers × 16 threads ran a laptop at 88 °C. Workers run at nice 10.
+- **Tags (`tags.py`) stay generic**: the vocabulary sample packs use everywhere, never a
+  pack or vendor name. Bump `tags.VERSION` when the rules change: the index re-tags from
+  the `emb` it kept (no file reads). A file's tag is yours (`utag`) > the words' when at
+  least `WORDS_SURE` > the ear's when at least `EAR_SURE` > the words' (`effective_tag`).
+  Glued tokens take their LAST known word ("synthperc" is a perc); broad words ("Drums",
+  "Percussion") always count at 0.6. listen.py's classifier learns only from the library's
+  own words and your tags; it doesn't guess loop/one-shot until taught (CLAP's own guess
+  was 46 % right). Measured on 2,247 sounds whose names say what they are: words 80 %
+  where they call, CLAP untaught 46 %, CLAP taught by the library's words 53 %, and CLAP
+  neighbours share a sound's kind 54 % of the time vs 42 % for the fingerprint — why
+  character is 70 % of "similar" once heard.
+  On a 272,570-sound library (sample packs: drums, loops, FX, instruments): words tag 74 %, the
+  ear 22 % more (taught by 197,697 word-tagged sounds; 71 % agreement on held-back ones; it tags
+  at 0.35 sureness and up, where it was right 75 % of the time), 4 % untagged. Listening took 28 min
+  on an RTX 3070 (~90 sounds/s from a local disk under WSL), indexing 70 min over SMB.
+- **listen.py feeds the GPU from threads, bounded**: decode and the model's input
+  (`Ear.features`, one clip at a time) on `workers` threads with numpy's BLAS held to one
+  (`_one_blas_thread`, process-wide threadpoolctl), at most 3 batches ahead; the main thread only
+  runs the model. `ex.map` over every row decoded unboundedly ahead and ran 900 % CPU at 10/s; this
+  is ~50/s with the GPU at 99 %. One clip at a time also keeps embeddings independent of batching
+  (the CLAP extractor in fusion mode marks a random clip of a batch "longer").
+- **Sampler loop points aren't loops**: a `smpl`/`INST` sustain loop is a held note (one-shot);
+  only acid/Apple Loops flags outrank the words. `tags.EMB_VERSION` bumps make the index re-read
+  just the headers of files read by an older `embedded()`.
+- **`Cooler`** (similar.py): indexing and listening rest above `SOUNDMON_MAX_TEMP` (92 °C).
+- **transformers' `spectrogram` loops over frames in Python** (holding the GIL): 8 decode threads
+  ran one at a time, 860 ms a clip. `listen._speed_up_spectrogram` swaps in a one-call numpy
+  version for CLAP's extractor only after it matches the original on a test clip (bit-identical
+  on 24 real clips); else the library's own stays.
+- **`SOUNDMON_PATH_MAP`** (`here()` / `indexed()`): every file read in similar.py and
+  listen.clip_of goes through `here()`; walked paths come back through `indexed()`. Used to run
+  `--listen` on rtx's WSL (`/mnt/e`) against an index made over the share (`/mnt/windows/e`).
 
 ## Run tools/selfcheck.py after touching an engine
 
@@ -638,8 +675,10 @@ is one no-build page. Rules that keep it honest:
   ebur128 prints 0.1 dB and doesn't oversample 96 kHz), measures the WRITTEN file and
   writes it again quieter if it's over. **Pin `aformat=sample_fmts=dbl` after soxr's
   `aresample`**: unpinned, it negotiated an integer format and read a +6 dBFS float file
-  as 0.0 dB. The make-up gain caps (+3 dB, none when air > 40 %) are neon-caster's
-  design, not a bug: bright sounds come out quieter on purpose.
+  as 0.0 dB. The make-up gain brings a sound back to
+  its loudest 400 ms (only headroom stops it); a sound with air > 40 % may stay up to
+  `BRIGHT_DROP` (6 dB) quieter, on purpose. The old caps (+3 dB, none when bright) left a
+  coin or a sword hit 15–18 dB down - inaudible.
   `analyse()` streams the file in 10 s chunks and keeps ~40 band sums per frame (a 10-min
   file took 2.2 GB as one frame matrix); a silent file returns `"silent": True` with
   neutral numbers — the GUI measures whatever is dropped on it. A lossy export (OGG)

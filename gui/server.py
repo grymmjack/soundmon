@@ -408,6 +408,7 @@ def load_setup():
     s.setdefault("folder_apps", [])
     s.setdefault("game_folders", [])    # [{name, path}] — where Sets export picks
     s.setdefault("similar_folders", []) # folders the Find tab indexes
+    s.setdefault("extra_folders", [])   # folders outside home the GUI may use too (Setup; this machine only)
     return s
 
 
@@ -415,7 +416,7 @@ def _clean_app(a):
     return {"name": str(a.get("name") or "")[:60], "exec": str(a.get("exec") or "")[:500], "args": str(a.get("args") or "{}")[:300]}
 
 
-def save_setup(body):
+def save_setup(body, local=True):
     s = load_setup()
     for k in ("audio_apps", "folder_apps"):
         if isinstance(body.get(k), list):
@@ -427,15 +428,77 @@ def save_setup(body):
         s["similar_folders"] = [str(f).strip()[:500] for f in body["similar_folders"][:40] if str(f).strip()]
     if "server" in body:
         s["server"] = re.sub(r"\s+", "", str(body["server"] or ""))[:300]
+    if isinstance(body.get("extra_folders"), list) and body["extra_folders"] != s["extra_folders"]:
+        if not local:
+            raise ValueError("folders outside home can only be changed on the computer running soundmon-gui")
+        s["extra_folders"] = clean_extra_folders(body["extra_folders"])
     _write_json(SETUP_FILE, s)
+    _ROOTS["sig"] = None
     return s
 
 
+# Every path the GUI touches is confined to your home folder, plus up to MAX_EXTRA folders outside it that
+# you add in Setup (sample libraries on another disk). Never the system's own folders, and never a drive's root.
+MAX_EXTRA = 20
+SYSTEM_DIRS = ("/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib32",
+               "/lib64", "/libx32", "/var", "/srv", "/opt", "/snap", "/System", "/Library", "/private", "/Applications")
+_ROOTS = {"sig": None, "roots": []}
+
+
+def _under(full, root):
+    return full == root or full.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def clean_extra_folders(folders):
+    """Setup's folders outside home: up to MAX_EXTRA, each a real folder that isn't a system folder or a
+    drive's root. Raises ValueError naming the first bad one, so a bad list never sticks."""
+    out = []
+    for f in folders:
+        f = str(f or "").strip()[:500]
+        if not f or f in out:
+            continue
+        full = os.path.realpath(os.path.expanduser(f))
+        if not os.path.isabs(os.path.expanduser(f)) and not f.startswith("~"):
+            raise ValueError(f"give the whole path: {f}")
+        if os.path.dirname(full) == full:
+            raise ValueError(f"not a whole drive: {f} (pick a folder on it)")
+        if any(_under(full, d) or _under(d, full) for d in SYSTEM_DIRS) and not _under(full, HOME):
+            raise ValueError(f"not a system folder: {f}")
+        if not os.path.isdir(full):
+            raise ValueError(f"not a folder: {f}")
+        out.append(f)
+    if len(out) > MAX_EXTRA:
+        raise ValueError(f"at most {MAX_EXTRA} folders outside home ({len(out)} given)")
+    return out
+
+
+def allowed_roots():
+    """Home, then Setup's folders outside it (real paths), re-read only when the setup file changes."""
+    try:
+        sig = os.stat(SETUP_FILE).st_mtime_ns
+    except OSError:
+        sig = 0
+    if _ROOTS["sig"] != sig:
+        roots = [HOME]
+        for f in load_setup().get("extra_folders", [])[:MAX_EXTRA]:
+            r = os.path.realpath(os.path.expanduser(str(f)))
+            if os.path.isabs(r) and os.path.dirname(r) != r and r not in roots:
+                roots.append(r)
+        _ROOTS.update(sig=sig, roots=roots)
+    return _ROOTS["roots"]
+
+
+def root_of(full):
+    """The allowed folder a path is inside (the deepest one), or None."""
+    hits = [r for r in allowed_roots() if _under(full, r)]
+    return max(hits, key=len) if hits else None
+
+
 def home_path(path, must_exist=True):
-    """Expand ~ and confine to the user's home dir."""
+    """Expand ~ and confine to the user's home dir or a folder added in Setup (Folders outside home)."""
     full = os.path.realpath(os.path.expanduser(str(path or "")))
-    if full != HOME and not full.startswith(HOME + os.sep):
-        raise ValueError("path must be inside your home folder")
+    if not root_of(full):
+        raise ValueError("path must be inside your home folder, or a folder added in Setup → Folders outside home")
     if must_exist and not os.path.exists(full):
         raise ValueError(f"not found: {path}")
     return full
@@ -470,13 +533,17 @@ def browse(path, kind="any", exts=None, hidden=False, gallery=None):
         raise ValueError(f"can't read {full}: {e.strerror or e}")
     dirs.sort(key=str.lower)
     files.sort(key=lambda f: f["name"].lower())
+    top = root_of(full) or HOME
     crumbs, p = [], full
     while True:
-        crumbs.append({"name": "~" if p == HOME else os.path.basename(p), "path": p})
-        if p == HOME or os.path.dirname(p) == p:
+        crumbs.append({"name": "~" if p == HOME else (p if p == top else os.path.basename(p)), "path": p})
+        if p == top or os.path.dirname(p) == p:
             break
         p = os.path.dirname(p)
     places = [{"name": "Home", "path": HOME}]
+    for r in allowed_roots()[1:]:
+        if os.path.isdir(r):
+            places.append({"name": "⇱ " + (os.path.basename(r) or r), "path": r})
     for label, d in (("Gallery", gallery), ("Dropped files", INPUTS), ("Music", "~/Music"), ("Downloads", "~/Downloads"),
                      ("Desktop", "~/Desktop"), ("Documents", "~/Documents"), ("git", "~/git")):
         if d and os.path.isdir(os.path.expanduser(d)):
@@ -490,7 +557,7 @@ def browse(path, kind="any", exts=None, hidden=False, gallery=None):
         if os.path.isdir(d) and all(x["path"] != d for x in places):
             places.append({"name": os.path.basename(d) or d, "path": d})
     cap = 3000
-    return {"path": full, "home": HOME, "parent": None if full == HOME else os.path.dirname(full), "crumbs": crumbs[::-1],
+    return {"path": full, "home": HOME, "parent": None if full == top else os.path.dirname(full), "crumbs": crumbs[::-1],
             "dirs": dirs[:cap], "files": files[:cap], "more": max(0, len(dirs) + len(files) - 2 * cap), "places": places,
             "sep": os.sep}
 
@@ -1476,43 +1543,73 @@ def analysis(path, cache_dir):
 # ---------------------------------------------------------------------------
 # Find: sounds on disk like this one (similar.py)
 # ---------------------------------------------------------------------------
-FIND = {"index": None, "mtime": None, "job": None}
+FIND = {"index": None, "job": None, "listen": None, "ears": {}}
 
 
 def find_index():
-    """similar.Index, reloaded only when its file changed."""
-    sim = load_module("similar")
-    p = sim.INDEX
-    mt = os.path.getmtime(p) if os.path.exists(p) else None
-    if FIND["index"] is None or FIND["mtime"] != mt:
-        FIND["index"], FIND["mtime"] = sim.Index(p), mt
+    """similar.Index (one per GUI: it caches the table and follows the database's own changes)."""
+    if FIND["index"] is None:
+        FIND["index"] = load_module("similar").Index()
     return FIND["index"]
 
 
-def find_start(folders):
-    """Index folders in the background; FIND["job"] reports progress."""
+def find_listen():
+    """listen.py, loaded once (it keeps the model in memory between searches); LookupError when torch or
+    transformers aren't there."""
+    if FIND["listen"] is None:
+        mod = load_module("listen")
+        ok, why = mod.available()
+        if not ok:
+            raise LookupError(why)
+        FIND["listen"] = mod
+    return FIND["listen"]
+
+
+def find_ear(kind):
+    """f(text) or f(path) -> a unit embedding, from the model (loaded on first use)."""
+    if kind not in FIND["ears"]:
+        mod = find_listen()
+        FIND["ears"][kind] = mod.text_query() if kind == "text" else mod.audio_query()
+    return FIND["ears"][kind]
+
+
+def find_job(kind, work):
+    """Run an index or listen job in the background; FIND["job"] reports progress. One at a time."""
     if FIND["job"] and FIND["job"]["running"]:
-        raise ValueError("already indexing — wait for it to finish")
+        raise ValueError(f"already {FIND['job']['kind']} — wait for it, or ■ Stop it")
+    job = {"kind": kind, "running": True, "phase": "starting", "done": 0, "total": 0, "current": "", "stats": None,
+           "error": None, "started": time.time(), "stop": False}
+    FIND["job"] = job
+
+    def prog(phase, i, n, path):
+        if phase != job["phase"] and "cooling" not in (phase, job["phase"]):   # a rest keeps its rate
+            job["phase_started"] = time.time()
+        job.update(phase=phase, done=i, total=n, current=os.path.basename(path or ""))
+
+    def run():
+        try:
+            job["stats"] = work(prog, lambda: job["stop"])
+        except Exception as e:
+            job["error"] = str(e)[:300]
+        job["running"] = False
+    threading.Thread(target=run, daemon=True).start()
+    return job
+
+
+def find_start(folders, workers=None):
     folders = [home_path(f) for f in folders]
     if not folders:
         raise ValueError("add a folder to index first")
     mastering()                                         # numpy + ffmpeg, or a clear 501
-    job = {"running": True, "done": 0, "total": 0, "current": "", "stats": None, "error": None, "started": time.time()}
-    FIND["job"] = job
+    return find_job("indexing", lambda prog, stop: find_index().update(folders, prog, workers=workers, stop=stop))
 
-    def prog(i, n, path):
-        job.update(done=i, total=n, current=os.path.basename(path))
 
-    def run():
-        try:
-            idx = load_module("similar").Index()
-            job["stats"] = idx.update(folders, prog)
-        except Exception as e:
-            job["error"] = str(e)[:300]
-        job["running"] = False
-        FIND["index"] = None
-    threading.Thread(target=run, daemon=True).start()
-    return job
+def find_listen_start():
+    mod = find_listen()
+    idx = find_index()
+    if not idx.count():
+        raise ValueError("nothing is indexed yet — index your sound folders first")
+    return find_job("listening", lambda prog, stop: mod.listen(idx, prog, stop=stop))
 
 
 def gallery_items(gallery, limit=400):
@@ -1688,9 +1785,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/similar/status":
             try:
                 idx = find_index()
-                return self._json({"count": len(idx.data["files"]), "folders": idx.data["folders"],
-                                   "updated": idx.data.get("updated"), "job": FIND["job"],
-                                   "setup_folders": load_setup()["similar_folders"]})
+                tg = load_module("tags")
+                try:
+                    find_listen()
+                    can_listen = ""
+                except LookupError as e:
+                    can_listen = str(e)
+                return self._json(dict(idx.info(), job=FIND["job"], setup_folders=load_setup()["similar_folders"],
+                                       note=idx.note, can_listen=can_listen,
+                                       tags=[{"id": t[0], "label": t[1], "family": t[2]} for t in tg.TAGS]))
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
         if u.path in ("/api/browse", "/api/disk/file") and not self._local():
@@ -1721,7 +1824,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
         if u.path == "/api/similar/file":              # play a Find result: only files in the index
             p = urllib.parse.parse_qs(u.query).get("path", [""])[0]
-            if p not in find_index().data["files"] or not os.path.isfile(p):
+            if not find_index().has(p) or not os.path.isfile(p):
                 return self._json({"error": "not in the index"}, 404)
             ext = os.path.splitext(p)[1].lower()
             return self._file(p, AUDIO_TYPES.get(ext) or mimetypes.guess_type(p)[0] or "application/octet-stream")
@@ -1861,7 +1964,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json({"ratings": rate(self.gallery, body.get("dir"), body.get("file"), body.get("stars", 0))})
             if u.path == "/api/setup":
                 snd, fold = detect_programs()
-                return self._json(dict(save_setup(body), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
+                return self._json(dict(save_setup(body, self._local()), detected={"audio_apps": snd, "folder_apps": fold}, locked=SERVER_ARG or None))
             if u.path == "/api/presets":
                 return self._json({"presets": save_preset(body)})
             if u.path == "/api/similar/index":
@@ -1872,31 +1975,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             raise ValueError(f"not a folder: {f}")
                     save_setup({"similar_folders": folders})
                 try:
-                    return self._json({"job": find_start(load_setup()["similar_folders"])})
+                    return self._json({"job": find_start(load_setup()["similar_folders"], body.get("workers"))})
                 except LookupError as e:
                     return self._json({"error": str(e)}, 501)
-            if u.path == "/api/similar/search":
-                # the query: a dropped file (input), a gallery take (take), or an indexed file (path)
+            if u.path == "/api/similar/listen":
+                try:
+                    return self._json({"job": find_listen_start()})
+                except LookupError as e:
+                    return self._json({"error": str(e)}, 501)
+            if u.path == "/api/similar/stop":
+                if FIND["job"] and FIND["job"]["running"]:
+                    FIND["job"]["stop"] = True
+                return self._json({"job": FIND["job"]})
+            if u.path == "/api/similar/forget":         # take a folder out of the index
+                f = str(body.get("folder") or "")
+                if f not in find_index().folders():
+                    raise ValueError("that folder isn't in the index")
+                find_index().forget(f)
+                return self._json(find_index().info())
+            if u.path in ("/api/similar/search", "/api/similar/browse"):
                 idx = find_index()
-                if body.get("take"):
-                    q = self.sets.take_path(body["take"])
-                elif body.get("input"):
-                    q = input_path(body["input"])
-                elif body.get("path") in idx.data["files"]:
-                    q = body["path"]
-                else:
-                    raise ValueError("drop a sound to search with")
-                if not idx.data["files"]:
-                    raise ValueError("nothing is indexed yet — add your sound folders and press Index")
-                within = str(body.get("within") or "").strip()
-                if within:
-                    within = home_path(within)
-                k = max(1, min(200, int(body.get("k") or 30)))
+                if not idx.count():
+                    raise ValueError("nothing is indexed yet — add your sound folders and press ↻ Index")
+                f = body.get("filters") if isinstance(body.get("filters"), dict) else {}
+                if str(f.get("within") or "").strip():
+                    f["within"] = home_path(str(f["within"]).strip())
+                k = max(1, min(500, int(body.get("k") or 30)))
                 try:
                     mastering()
                 except LookupError as e:
                     return self._json({"error": str(e)}, 501)
-                return self._json({"query": os.path.basename(q), "results": idx.search(q, k, within=within or None)})
+                if u.path == "/api/similar/browse":
+                    describe = str(body.get("describe") or "").strip()[:300]
+                    try:
+                        ear = find_ear("text") if describe else None
+                    except LookupError as e:
+                        return self._json({"error": str(e)}, 501)
+                    res = idx.browse(f, k, max(0, int(body.get("offset") or 0)), describe or None, ear)
+                    counts = idx.summary(dict(f, tags=None, families=None))
+                    return self._json(dict(res, counts=counts))
+                # the query: a dropped file (input), a gallery take (take), or an indexed file (path)
+                if body.get("take"):
+                    q = self.sets.take_path(body["take"])
+                elif body.get("input"):
+                    q = input_path(body["input"])
+                elif body.get("path") and idx.has(body["path"]):
+                    q = body["path"]
+                else:
+                    raise ValueError("drop a sound to search with")
+                weights = body.get("weights") if isinstance(body.get("weights"), dict) else None
+                listener = None
+                if not idx.has(q) and idx.info()["listened"]:
+                    try:
+                        listener = find_ear("audio")
+                    except LookupError:
+                        listener = None
+                return self._json({"query": os.path.basename(q),
+                                   "results": idx.search(q, k, filters=f, weights=weights, listener=listener)})
+            if u.path == "/api/similar/tag":            # your tag for a sound: kept, and the ear learns from it
+                find_index().set_tag(str(body.get("path") or ""), body.get("tag"), body.get("kind"))
+                return self._json({"ok": True})
             if u.path == "/api/input/from-path":        # Browse picked a file on disk: copy it in, like a drop
                 if not self._local():
                     raise ValueError("picking files from this computer only works on the computer running soundmon-gui")
@@ -1915,7 +2053,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._json(res)
             if u.path == "/api/similar/use":            # a Find result becomes a reference (copied into inputs)
                 p = body.get("path")
-                if p not in find_index().data["files"] or not os.path.isfile(p):
+                if not find_index().has(p) or not os.path.isfile(p):
                     raise ValueError("that file isn't in the index")
                 name = safe_name(os.path.basename(p), 96)
                 if not name.lower().endswith(INPUT_EXT):
@@ -1980,7 +2118,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if not is_dir and not path.lower().endswith(OPENABLE):
                         raise ValueError("only sound, music and text files open from here (never programs or scripts)")
                 elif t.get("indexed"):                        # a Find result: open the folder it is in
-                    if t["indexed"] not in find_index().data["files"]:
+                    if not find_index().has(t["indexed"]):
                         raise ValueError("that file isn't in the index")
                     path = os.path.dirname(t["indexed"])
                 elif is_dir:

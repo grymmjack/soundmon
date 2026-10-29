@@ -688,17 +688,18 @@ Each sound can be fine alone and still grate when a fight stacks twenty of them.
 - cut 3.2 kHz when the 2.5–5 kHz presence band piles up;
 - de-ess sharp sibilants;
 - low-pass 12 kHz for effects;
-- bring each sound back toward its own loudest 400 ms, at most +3 dB and never past
-  −1 dBTP.
+- bring each sound back to its own loudest 400 ms, never past −1 dBTP.
 
 It uses no limiter and never normalizes to full scale. Voices are left alone unless
 they're bright.
 
-**Bright sounds come out quieter, on purpose.** The make-up gain stops at +3 dB, and a
-sound with over 40 % of its energy above 10 kHz (white noise, a whistle) gets none: the
-level the EQ and low-pass took away is the treatment (NEON-CASTER's design). White noise
-goes from −14.4 to −23.3 LUFS at its loudest 400 ms; the line says
-`(bright: no make-up gain, by design)` whenever this happens.
+**A sound comes out as loud as it went in, less harsh.** Only a sound with over 40 % of
+its energy above 10 kHz (white noise, a whistle) may come out quieter, by at most 6 dB
+(`BRIGHT_DROP` in master.py): some of the level the EQ and low-pass took away is the
+treatment. White noise goes from −12.7 to −18.7 LUFS at its loudest 400 ms, and the line
+says `(bright: up to 6 dB quieter, by design)`. A sound can also be held back by its
+headroom: `(kept under -1 dBTP)`. (It used to be at most +3 dB of make-up and none for a
+bright sound: a coin or a sword hit, nearly all highs, came out 15–18 dB down.)
 
 ```bash
 soundmon --master sfx/                       # -> sfx/mastered/… (never overwrites)
@@ -778,42 +779,94 @@ soundmon "laser zap" -n 8 --match-tone our_laser.wav              # sit with the
   gives good variations from an encoded reference needs an rtx run. If SA3 does badly,
   try `--engine sao`, the classic Stable Audio Open audio-to-audio.
 
-### Finding similar sounds on disk (`--index`, `--similar`)
+### Your sound library, searchable (`--index`, `--find`, `--similar`, `--listen`)
 
-Like Sononym: drop a sound, get back the files on your disk that sound like it.
+Like Sononym: index your sample folders once, then find sounds by what they are (kick,
+pad, riser…, loop or one-shot, tempo, key), by name, by a sound you drop, or by
+describing one. Everything runs on your machine.
 
 ```bash
 soundmon --index ~/samples,~/games/neon-caster/sfx     # build or refresh the index (only changed files are read)
+soundmon --tags                                        # how it's tagged: kick 3,120, snare 2,840 …
+soundmon --find 909 --tag kick --kind oneshot          # by name and tag
 soundmon --similar door.wav                            # the 20 closest, best first
 soundmon --similar door.wav -n 50 --in ~/samples/foley # only look inside one folder
+soundmon --listen                                      # optional: an audio model hears every sound
+soundmon --describe "a dark metallic hit"              # …then search by description
 ```
 
 ```
 🔎 sounds like door.wav  (1840 indexed)
-     1.  91%    0.84s  /home/me/samples/foley/metal_door_03.wav   [timbre, envelope]
-     2.  87%    1.10s  /home/me/samples/foley/gate_clang.wav      [timbre]
+     1.  91%    0.84s  Foley                  oneshot   /home/me/samples/foley/metal_door_03.wav   [timbre, envelope]
+     2.  87%    1.10s  ~Wood & metal hit      oneshot   /home/me/samples/foley/gate_clang.wav      [timbre]
 ```
 
-Each file gets a fingerprint built only from signal processing (no model, no GPU),
-taken from its audible part:
+**Tags from a sound's own words.** Every file is tagged from its name, the folders it sits
+in, and what the file says about itself (WAV/AIFF chunks: acid and Apple Loops flags, smpl,
+INFO, bext, iXML; tags in other formats): one of 30 tags in three families — drums (kick,
+snare, clap, hi-hat, cymbal, tom, hand drum, shaker, wood & metal hit, percussion, drums),
+tonal (bass, synth & lead, keys, pad & drone, pluck & arp, stab & chord, strings/brass/winds,
+guitar, bells & mallets, vocal) and fx (riser, whoosh, impact, explosion & gun, zap & glitch,
+noise, ambience, foley, scratch); **loop or one-shot** (an acid or Apple Loops flag, then
+words like "loop" or "120 bpm" in the name or its folder, then a sampler's loop points — looped
+end to end is a loop, a sustain loop part way in is a held note, so a one-shot — then a length
+that fits whole bars, then a short length); and **tempo and key**
+("Fmin", "C# minor", the acid chunk). The vocabulary (`tags.py`) is the one sample packs use
+everywhere, including how they write it — glued ("DryKick"), without vowels ("snrs"),
+abbreviated ("SD", "OH") — and knows nothing about any one library. On a 275,000-sound
+library it tags 70–94% of each folder by words alone.
+
+**Tags by ear (`--listen`, optional).** An audio model (LAION's open
+[CLAP](https://huggingface.co/laion/larger_clap_general), ~600 MB, downloaded once) hears
+the first 10 s of every sound. Your library then teaches it: the sounds whose words say what
+they are are the lessons, a small classifier learns them from what the model hears (blended
+with the model's own guess from each tag's description), and it tags the sounds whose words
+say nothing — only where it's reasonably sure. Each library teaches itself; nothing but the
+vocabulary is shipped. It also lets `--similar` weigh a sound's **character** (what the
+model hears — the best at "the same kind of sound") and makes `--describe` work. It needs
+torch and transformers (ComfyUI's venv has them) and uses a GPU when torch has one that
+works, else the CPU (~8 sounds a second). An AMD RDNA2 laptop GPU (RX 6600M and the like)
+may need `HSA_OVERRIDE_GFX_VERSION=10.3.0` for ROCm; `--listen-device cpu` forces the CPU.
+
+**Similar.** Each file also gets a fingerprint built only from signal processing, from its
+audible part:
 - **timbre**: the average 32-band spectrum and how much each band moves;
 - **brightness**: spectral centroid, flatness (tonal or noisy) and roll-off;
 - **envelope**: attack time, hits per second, and the loudness shape;
 - **length**.
 
-A search compares every feature on the same scale and weights timbre highest. Results
-show a 0–100 "how alike" score and which aspects match. Identical copies (and links to
-the same file) show once, files deleted since indexing are left out, and the query itself
-never comes back. The fingerprint doesn't depend on volume, and the score's scale comes
-from the whole index, so a near-duplicate reads high however few files `--in` leaves.
+A search compares every feature on the same scale and weights timbre highest — or as you
+say: `--aspects timbre=1,length=0`. Once listened to, character takes 70% of the whole
+unless you set it. Results show a 0–100 "how alike" score and which aspects match.
+Identical copies (and links to the same file) show once, files deleted since indexing are
+left out, and the query itself never comes back. The fingerprint doesn't depend on volume,
+and the score's scale comes from the whole index, so a near-duplicate reads high however
+few files the filters leave. `--tag`, `--kind` and `--in` narrow `--similar`, `--find`,
+`--describe` and `--tags` alike.
 
-The index is `~/soundmon-gallery/similar/index.json`. It skips `mastered/`, backups, and
-folders starting with `_` or `.`, and reads the first 30 s of long files. Its summary
-counts unreadable files, silent or too-short ones, and anything skipped (dangling links,
-folders it can't read) separately; a file that failed isn't read again until it changes.
-Two `--index` runs at once are safe (a lock, and each merges the other's work). An index
-made by an older fingerprint is reset and says so: re-run `--index`. It needs numpy and
-ffmpeg, but no ComfyUI.
+**The index** is one SQLite file, `~/soundmon-gallery/similar/index.db` (`$SOUNDMON_INDEX`
+picks another; an `index.json` from an older soundmon is taken in once). About 2 KB a
+sound with what the model heard. It reads several files at once (`--workers`, default half
+your cores, each at low priority on one thread — about 140 sounds a second from a network
+share), saves as it goes (stop it any time; the next run carries on), skips `mastered/`,
+`__MACOSX`, backups and folders starting with `_` or `.`, and reads the first 30 s of long
+files. Its summary counts unreadable files, silent or too-short ones, and anything skipped
+(dangling links, folders it can't read) separately; a file that failed isn't read again
+until it changes. Two runs at once are safe. Changing the tag rules re-tags from what the
+index kept, without reading the files again. It needs numpy and ffmpeg, but no ComfyUI.
+
+Indexing and `--listen` **rest when the CPU runs hot**: above 92 °C they wait till it's 5 °C
+cooler (`$SOUNDMON_MAX_TEMP` sets the limit, `0` never rests). A laptop's CPU and GPU often
+share their cooling, so a busy GPU heats the CPU too. It reads the CPU's own sensors (Linux
+hwmon); where there are none it never rests. `--listen` on a GPU hears 50-100 sounds a second
+(ffmpeg and the model's input are made on several threads while the GPU works).
+
+**Run the heavy part on another machine.** The index is one file: copy it to the machine that has
+the sounds on its own disk (and a GPU), index or listen there, and copy it back. If that machine
+sees them under another path, say so with `SOUNDMON_PATH_MAP="INDEXED=HERE"` (several joined with
+`;`), e.g. `SOUNDMON_PATH_MAP="/mnt/nas/music=/srv/music"`: the index keeps its own paths, only the
+reading goes through the map. A file's date and size are what tell the index it's unchanged, so a
+share and the disk it serves agree.
 
 ### Compressing output (`--ogg`)
 
@@ -944,6 +997,11 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   sounds) and every sound has **↗** (also on right-click): open it in the system's default
   app, in a program from Setup (found automatically: Audacity, VLC, OpenMPT…), or show it in
   its folder. With `--lan`, browsing and opening only work from the machine running the GUI.
+- **Folders outside home.** The GUI only touches files in your home folder, plus up to 20
+  folders you list in Setup → **Folders outside home** (a sample library on another disk):
+  Browse… shows each as a ⇱ shortcut, and Find, Sets and references can use them. Not a whole
+  drive or a system folder (/etc, /usr…); the list is only changed from the machine running
+  the GUI. (A symlink in home to another disk doesn't count — its real place is checked.)
 - **The command is always visible.** Under RENDER is the exact `soundmon …` command the
   server will run (the server builds it, so the preview can't drift). COPY CLI takes it
   to a terminal.
@@ -995,10 +1053,16 @@ soundmon-gui --server rtx    # GPU renders go to rtx (else the Setup tab's pick,
   length" (`--ref-match`) and "match its tone" (`--match-tone`). The job keeps a copy
   of the reference, and its gallery card has **ref ▶** to hear it. A set's theme can
   carry a reference too, and a set can export **mastered like the reference**.
-- **🔎 Find** indexes the folders you choose (remembered), then lists the
-  sounds most like the one you drop, or like any gallery take or set take (🔎 on its
-  card). Each result can be played, **Use**d as the form's reference, opened in its
-  folder, or have its path copied.
+- **🔎 Find** is your sound library: ↻ **Index** the folders you choose (remembered; a
+  progress bar with the rate and time left, ■ Stop any time), then filter by tag chips (with
+  counts, by family), loop or one-shot, length, tempo, key, words in the name, who tagged it
+  and folder — or drop a sound for the ones most like it (or 🔎 on any gallery take, set
+  take or result), under the same filters. 👂 **Listen** lets the audio model hear them
+  all: tags by ear, a **describe** box ("a dark metallic hit"), and **Character** in the
+  **Aspects** dial, whose sliders set how much timbre, brightness, envelope, length and
+  character count. A result's tag (dashed: by ear) is a menu: set your own, and the next
+  Listen learns from it. Each result can be played, **Use**d as the form's reference,
+  opened in its folder, compared, or have its path copied.
 - **Voices** speaks one of your lines in every Kokoro voice, so you can compare them;
   **Use** puts one in the Narrate form.
 - **Presets** (top of the form) save and load the form's settings by name, in folders and
@@ -1183,7 +1247,9 @@ soundmon/
 ├── opl.py                     --opl: Nuked OPL3 FM (core fetched, not vendored)
 ├── record.py                  --record: the terminal recording booth (mic → pack)
 ├── master.py                  --master: per-sound mastering chain (from NEON-CASTER), + analyse(), match_tone()
-├── similar.py                 --index / --similar: DSP fingerprints, find sounds like this one
+├── similar.py                 --index / --similar / --find: the library index (SQLite), DSP fingerprints, filters
+├── tags.py                    what a sound is from its own words: tags, loop/one-shot, tempo, key
+├── listen.py                  --listen / --describe: CLAP hears the library, learns its tags (optional)
 ├── sounds.json                --style guide snippets (edit / add your own)
 ├── sa3_reprompt.json          the four Qwen system prompts, verbatim from ComfyUI
 ├── servers.example.json       template for --server aliases (copy to servers.json)
